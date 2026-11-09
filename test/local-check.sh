@@ -104,6 +104,69 @@ else
   fail "write-authorized-keys syntax"
 fi
 
+echo "== enable/restore offline apt syntax =="
+if bash -n autoinstall/enable-offline-apt.sh && bash -n autoinstall/restore-online-apt.sh; then
+  pass "enable/restore-online-apt syntax"
+else
+  fail "enable/restore-online-apt syntax"
+fi
+
+echo "== restore-online-apt writes third-party sources =="
+rroot="$tmp/restore-root"
+mkdir -p "$rroot/offline/apt-sources/keyrings" "$rroot/offline/apt-sources/sources.list.d"
+mkdir -p "$rroot/etc/apt/keyrings" "$rroot/etc/apt/sources.list.d" "$rroot/etc/apt/apt.conf.d" \
+         "$rroot/usr/share/keyrings"
+# fake Ubuntu bak (should be restored)
+echo 'deb http://archive.ubuntu.com/ubuntu noble main' > "$rroot/etc/apt/sources.list.offline-bak"
+echo 'deb [trusted=yes] file:/opt/offline/apt ./' > "$rroot/etc/apt/sources.list.d/00-offline-bundle.list"
+echo 'Acquire::AllowInsecureRepositories "true";' > "$rroot/etc/apt/apt.conf.d/99-offline-bundle"
+# fake third-party seeds (same filenames fetch ships)
+echo 'DOCKERKEY' > "$rroot/offline/apt-sources/keyrings/docker.asc"
+echo 'GHKEY' > "$rroot/offline/apt-sources/keyrings/githubcli-archive-keyring.gpg"
+echo 'NVKEY' > "$rroot/offline/apt-sources/keyrings/nvidia-container-toolkit.asc"
+echo 'JKEY' > "$rroot/offline/apt-sources/keyrings/jenkins-keyring.asc"
+echo 'NKEY' > "$rroot/offline/apt-sources/keyrings/nodesource.gpg"
+echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable' \
+  > "$rroot/offline/apt-sources/sources.list.d/docker.list"
+echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' \
+  > "$rroot/offline/apt-sources/sources.list.d/github-cli.list"
+echo 'deb [signed-by=/etc/apt/keyrings/nvidia-container-toolkit.asc] https://nvidia.github.io/libnvidia-container/stable/deb/amd64 /' \
+  > "$rroot/offline/apt-sources/sources.list.d/nvidia-container-toolkit.list"
+echo 'deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/' \
+  > "$rroot/offline/apt-sources/sources.list.d/jenkins.list"
+cat > "$rroot/offline/apt-sources/sources.list.d/nodesource.sources" <<'NS'
+Types: deb
+URIs: https://deb.nodesource.com/node_24.x
+Suites: nodistro
+Components: main
+Architectures: amd64
+Signed-By: /usr/share/keyrings/nodesource.gpg
+NS
+cp -a autoinstall/restore-online-apt.sh "$rroot/offline/restore-online-apt.sh"
+if APT_ETC="$rroot/etc/apt" SHARE_KEYRINGS="$rroot/usr/share/keyrings" \
+    bash "$rroot/offline/restore-online-apt.sh" >"$tmp/restore.out" 2>&1; then
+  ok=1
+  [[ -f "$rroot/etc/apt/sources.list" ]] || ok=0
+  [[ ! -f "$rroot/etc/apt/sources.list.d/00-offline-bundle.list" ]] || ok=0
+  [[ ! -f "$rroot/etc/apt/apt.conf.d/99-offline-bundle" ]] || ok=0
+  for f in docker.asc githubcli-archive-keyring.gpg nvidia-container-toolkit.asc jenkins-keyring.asc; do
+    [[ -f "$rroot/etc/apt/keyrings/$f" ]] || ok=0
+  done
+  [[ -f "$rroot/usr/share/keyrings/nodesource.gpg" ]] || ok=0
+  for f in docker.list github-cli.list nvidia-container-toolkit.list jenkins.list nodesource.sources; do
+    [[ -f "$rroot/etc/apt/sources.list.d/$f" ]] || ok=0
+  done
+  grep -q 'download.docker.com' "$rroot/etc/apt/sources.list.d/docker.list" || ok=0
+  grep -q 'deb.nodesource.com' "$rroot/etc/apt/sources.list.d/nodesource.sources" || ok=0
+  if [[ "$ok" -eq 1 ]]; then
+    pass "restore-online-apt third-party sources"
+  else
+    fail "restore-online-apt third-party sources: $(cat "$tmp/restore.out"); ls=$(ls -R "$rroot/etc/apt" "$rroot/usr/share/keyrings" 2>&1)"
+  fi
+else
+  fail "restore-online-apt exited non-zero: $(cat "$tmp/restore.out")"
+fi
+
 
 echo "== full-offline render =="
 if python3 tools/render-user-data.py \
@@ -568,12 +631,12 @@ echo "== validate-offline-bundle helper =="
 if [[ -x tools/validate-offline-bundle.sh ]] && bash -n tools/validate-offline-bundle.sh; then
   # 空假捆绑应失败
   mkdir -p "$tmp/ob/apt"
-  echo '{"schema":2,"release":"noble","pins":{}}' > "$tmp/ob/manifest.json"
+  echo '{"schema":3,"release":"noble","pins":{}}' > "$tmp/ob/manifest.json"
   : > "$tmp/ob/apt/Packages"
   if bash tools/validate-offline-bundle.sh --bundle "$tmp/ob" --release noble 2>"$tmp/ob.err"; then
     fail "validate should fail on empty Packages"
   else
-    if grep -q '缺包\|不完整' "$tmp/ob.err"; then
+    if grep -qE '缺包|不完整|apt-sources' "$tmp/ob.err"; then
       pass "validate-offline-bundle rejects empty apt"
     else
       fail "validate-offline-bundle rejects empty apt: $(head -2 "$tmp/ob.err")"
@@ -581,6 +644,19 @@ if [[ -x tools/validate-offline-bundle.sh ]] && bash -n tools/validate-offline-b
   fi
 else
   fail "validate-offline-bundle helper"
+fi
+
+echo "== apt-sources seed wiring =="
+if grep -q 'apt-sources' tools/fetch-offline-bundle.sh \
+  && grep -q 'nodesource.gpg' tools/fetch-offline-bundle.sh \
+  && grep -q 'nodesource.sources' tools/fetch-offline-bundle.sh \
+  && grep -q 'apt-sources' tools/validate-offline-bundle.sh \
+  && grep -q 'third-party apt sources' autoinstall/restore-online-apt.sh \
+  && grep -q 'SHARE_KEYRINGS' autoinstall/restore-online-apt.sh \
+  && grep -q '"schema": 3' tools/fetch-offline-bundle.sh; then
+  pass "apt-sources fetch/validate/restore wired"
+else
+  fail "apt-sources fetch/validate/restore wired"
 fi
 
 echo "== build-iso force-fetch + provision.env %q markers =="
@@ -604,7 +680,8 @@ fi
 
 echo "== shellcheck (if available) =="
 if command -v shellcheck >/dev/null; then
-  if shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh tools/validate-offline-bundle.sh test/local-check.sh \
+  if shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh tools/validate-offline-bundle.sh \
+      autoinstall/enable-offline-apt.sh autoinstall/restore-online-apt.sh test/local-check.sh \
     && shellcheck -e SC2054,SC2001 -x test/qemu-smoke.sh; then
     pass "shellcheck"
   else
