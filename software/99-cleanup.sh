@@ -23,7 +23,7 @@ mkdir -p /var/log/autoinstall
   echo "# provisioned at $(date -u +%FT%TZ)"
   echo "# host: $(cat /etc/hostname 2>/dev/null)"
   echo
-  for c in docker "docker compose" java node npm grok opencode openmausbot sshd; do
+  for c in docker "docker compose" nvidia-ctk java node npm grok opencode openmausbot sshd; do
     printf '%-18s ' "$c"
     # shellcheck disable=SC2086
     $c --version 2>/dev/null | head -1 || echo "(not found)"
