@@ -141,6 +141,7 @@ cat /var/log/autoinstall/20-docker.log
 | `--offline` | apt `fallback: offline-install`（`updates` 仍为 Subiquity 合法值 `security`；无 `none`） |
 | `--debs DIR` | 把目录下 `.deb` 打进 `/pool` 并离线安装 |
 | `--storage-layout` | `direct`（默认）/ `lvm` / `zfs` |
+| `--network` | `dhcp`（默认）/ `none`。默认写入 netplan match `en*`/`eth*` 的 DHCP（`optional: true`），并用 late-command 落盘 `/etc/netplan/50-autoinstall-dhcp.yaml`（mode 600）+ 禁用 cloud-init 网络改写，保证**离线无网卡装机**后首启插网也能 DHCP。`none` 则不写。静态 IP 后续再加。 |
 | `--ssh-allow-pw` | 未注入公钥时**必须为 true**，否则装完登不进去；与 `10-openssh.sh` 保持一致 |
 | `--ssh-authorized-keys FILE` | 公钥文件（每行一把，忽略空行/注释），写入 `ssh.authorized-keys`；建议配合 `--ssh-allow-pw false` |
 | `--iso-sha256 HEX` | 可选源 ISO SHA256；不匹配立即失败 |
@@ -148,6 +149,18 @@ cat /var/log/autoinstall/20-docker.log
 | `--pin-node N` | Node 主版本（默认 24）；环境变量 `PIN_NODE_MAJOR` |
 | `--pin-grok / --pin-opencode / --pin-openmausbot VER` | npm 包版本（默认 latest）；亦可用 `PIN_GROK` / `PIN_OPENCODE` / `PIN_OPENMAUSBOT` |
 | `--menu-regex` | 要注入的菜单标题正则；Desktop 版用 `Try or Install Ubuntu` |
+
+
+### 默认 DHCP 网络
+
+默认 `--network dhcp`：
+
+1. autoinstall `network:` 使用 netplan v2，对 `en*` / `eth*` 做 match，`dhcp4`/`dhcp6` + `optional: true`（无网线不拖慢开机）。
+2. late-commands 额外写入 `/etc/netplan/50-autoinstall-dhcp.yaml`（`chmod 600`），并写 `cloud.cfg.d/99-disable-network-config.cfg` 关闭 cloud-init 网络覆盖；同时删除可能由 Subiquity 在**无 NIC 安装**时生成的空/按名 `00-installer-config.yaml`。
+
+背景：未显式写 `network:` 时，Subiquity 会把安装时探测到的网卡写进目标系统；`-nic none` 全离线装机后首启就没有 DHCP。本默认修复该问题。
+
+用 `--network none` 可恢复「不注入网络段」的旧行为。
 
 ### 完整性与版本复现
 

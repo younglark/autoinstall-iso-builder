@@ -30,6 +30,7 @@ PACKAGES=""
 SSH_ALLOW_PW="true"
 SSH_AUTHORIZED_KEYS=""
 STORAGE_LAYOUT="direct"
+NETWORK_MODE="dhcp"
 OFFLINE=0
 OFFLINE_BUNDLE=""
 FULL_OFFLINE=0
@@ -71,6 +72,8 @@ usage() {
   --ssh-authorized-keys FILE
                         authorized_keys 文件 (每行一把公钥), 写入 autoinstall ssh.authorized-keys
   --storage-layout L    direct | lvm | zfs, 默认 direct
+  --network MODE        dhcp (默认) | none; dhcp 写入 en*/eth* 通配 DHCP netplan,
+                        并用 late-command 确保装完后系统始终有 DHCP
   --offline             全离线安装 (需 --offline-bundle; 零外网请求仍装完全部 software/)
   --offline-bundle DIR  fetch-offline-bundle.sh 产出目录 (含 apt/ npm/ manifest.json)
   --fetch-offline       构建前自动调用 tools/fetch-offline-bundle.sh (需 docker)
@@ -122,6 +125,7 @@ while [[ $# -gt 0 ]]; do
     --ssh-allow-pw)   SSH_ALLOW_PW="$2"; shift 2 ;;
     --ssh-authorized-keys) SSH_AUTHORIZED_KEYS="$2"; shift 2 ;;
     --storage-layout) STORAGE_LAYOUT="$2"; shift 2 ;;
+    --network)        NETWORK_MODE="$2"; shift 2 ;;
     --offline)        OFFLINE=1; shift ;;
     --offline-bundle) OFFLINE_BUNDLE="$2"; OFFLINE=1; shift 2 ;;
     --fetch-offline)  FETCH_OFFLINE=1; OFFLINE=1; shift ;;
@@ -250,6 +254,11 @@ log "工作目录: $WORK"
 # ---------------------------------------------------------------- 1. 渲染配置
 mkdir -p "$WORK/nocloud"
 
+case "$NETWORK_MODE" in
+  dhcp|none) ;;
+  *) die "--network 必须是 dhcp 或 none (got: $NETWORK_MODE)" ;;
+esac
+
 RENDER_ARGS=(
   --template "$SCRIPT_DIR/autoinstall/user-data.tmpl"
   --out "$WORK/nocloud/user-data"
@@ -269,6 +278,7 @@ RENDER_ARGS=(
 [[ "$FULL_OFFLINE" -eq 1 ]] && RENDER_ARGS+=(--full-offline)
 [[ "$WITH_POOL" -eq 1 ]] && RENDER_ARGS+=(--with-pool)
 [[ "$PROVISION" -eq 1 ]] && RENDER_ARGS+=(--provision)
+RENDER_ARGS+=(--network "$NETWORK_MODE")
 
 python3 "$SCRIPT_DIR/tools/render-user-data.py" "${RENDER_ARGS[@]}"
 cp "$SCRIPT_DIR/autoinstall/meta-data" "$WORK/nocloud/meta-data"
