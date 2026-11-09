@@ -66,7 +66,7 @@
 
 加：在 `software/` 放一个 `80-你的东西.sh`，按现有脚本的约定（`set -euo pipefail`、结尾自带校验命令、失败即非零退出）即可，无需改主脚本。
 
-减：`--skip "30 70"` 跳过 Jenkins 和 OpenMausBot；整套不要就 `--no-provision`。
+减：`--skip "30 70"` 跳过 Jenkins 和 OpenMausBot；`--skip "30-jenkins 70-openmausbot"` 等价。整套不要就 `--no-provision`。
 
 ---
 
@@ -111,7 +111,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node.iso --uefi
 /nocloud/user-data        # subiquity autoinstall 配置
 /nocloud/meta-data        # NoCloud 数据源的实例标识
 /provision/*.sh           # 软件预装脚本 + provision.env
-/boot/grub/grub.cfg       # linux 行追加 autoinstall ds=nocloud;s=/cdrom/nocloud/
+/boot/grub/grub.cfg       # linux 行追加 autoinstall ds=nocloud\;s=/cdrom/nocloud/
 /boot/grub/loopback.cfg   # 同上（Ventoy / 多启动 U 盘走这个）
 ```
 
@@ -122,7 +122,7 @@ sudo bash /opt/provision/20-docker.sh
 cat /var/log/autoinstall/20-docker.log
 ```
 
-`ds=nocloud;s=/cdrom/nocloud/` 里的 `/cdrom` 是安装器把 ISO 挂载的位置——这也是为什么种子必须放在 ISO 内部，而不是第二块 U 盘上。
+`ds=nocloud\;s=/cdrom/nocloud/`（GRUB 中分号必须转义）里的 `/cdrom` 是安装器把 ISO 挂载的位置——这也是为什么种子必须放在 ISO 内部，而不是第二块 U 盘上。
 
 ---
 
@@ -136,13 +136,33 @@ cat /var/log/autoinstall/20-docker.log
 | `--packages` | 逗号分隔的发行版包名，走 subiquity 的 apt（第三方包走 `software/`） |
 | `--mirror` | 内网源务必替换，否则每台机器都从公网拉 |
 | `--no-provision` | 不执行 `software/`，只做裸装机 |
-| `--skip "30 70"` | 跳过指定编号的脚本 |
+| `--skip "30 70"` | 跳过脚本：编号前缀或完整名均可（`30` / `30-jenkins`） |
 | `--strict` | 任一软件装失败就中止安装（默认记日志继续） |
 | `--offline` | `updates: none` + apt 允许 `offline-install` |
 | `--debs DIR` | 把目录下 `.deb` 打进 `/pool` 并离线安装 |
 | `--storage-layout` | `direct`（默认）/ `lvm` / `zfs` |
-| `--ssh-allow-pw` | 未注入公钥时**必须为 true**，否则装完登不进去 |
+| `--ssh-allow-pw` | 未注入公钥时**必须为 true**，否则装完登不进去；与 `10-openssh.sh` 保持一致 |
+| `--ssh-authorized-keys FILE` | 公钥文件（每行一把，忽略空行/注释），写入 `ssh.authorized-keys`；建议配合 `--ssh-allow-pw false` |
+| `--iso-sha256 HEX` | 可选源 ISO SHA256；不匹配立即失败 |
+| `--iso-sha256sums FILE` | 按 ISO basename 在 SHA256SUMS 文件中查找校验和；优先于 `--iso-sha256` |
+| `--pin-node N` | Node 主版本（默认 24）；环境变量 `PIN_NODE_MAJOR` |
+| `--pin-grok / --pin-opencode / --pin-openmausbot VER` | npm 包版本（默认 latest）；亦可用 `PIN_GROK` / `PIN_OPENCODE` / `PIN_OPENMAUSBOT` |
 | `--menu-regex` | 要注入的菜单标题正则；Desktop 版用 `Try or Install Ubuntu` |
+
+### 完整性与版本复现
+
+- 推荐先验证官方 `SHA256SUMS.gpg`（用 Ubuntu CD Image signing key），再传 `--iso-sha256sums SHA256SUMS`；脚本只验证 SHA256，不替代 GPG 签名验证。
+- `--pin-grok 具体版本` / `--pin-opencode 具体版本` / `--pin-openmausbot 具体版本` 可避免 `latest` 漂移。默认仍为 `latest`，以保持原有行为。
+- `--pin-node 24` 只钉主版本；NodeSource、Docker、Jenkins 仍跟随其稳定仓库，尚未做完整 apt 版本锁。若要求严格复现，应使用内网快照源并固定 `.deb` 版本。当前默认行为不变，不承诺 bit-for-bit 可复现。
+- `apt.primary` 暂保留 legacy 格式以兼容 22.04 的旧版 Subiquity（且安装器刷新关闭）；24.04-only 项目可迁移到 `mirror-selection.primary`。
+
+### 快速校验与 CI
+
+```bash
+bash test/local-check.sh
+```
+
+覆盖 Python 语法、grub 转义/幂等/旧参数修复、user-data YAML、公钥、pool-before-provision 顺序与 skip 前缀。`.github/workflows/ci.yml` 在 PR/push 上运行 ShellCheck 与这些校验。完整 `build-iso.sh --dry-run` 仍需真实 ISO；BIOS/UEFI/QEMU 与 Secure Boot 验证见下文，不在轻量 CI 下载 ISO。
 
 ### 离线限制（重要）
 
@@ -220,7 +240,7 @@ xorriso -indev ubuntu.iso -outdev out.iso \
 ## 落盘前最后确认
 
 - 口令是哈希，不是明文；哈希本身也别提交到公开仓库。
-- 没有任何 API key / 私钥 / `authorized_keys` 进了镜像。
+- 没有任何 API key / 私钥进镜像。SSH **公钥**可通过 `--ssh-authorized-keys` 注入，属于公开信息；私钥绝不注入。
 - 目标机磁盘 ≥ 25 GB，且装机时能访问 docker.com / pkg.jenkins.io / deb.nodesource.com / npm registry。
 
 这条线一旦破，后面所有「镜像管理」都失去意义。

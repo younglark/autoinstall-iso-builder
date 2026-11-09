@@ -4,6 +4,9 @@
 #
 # 所有双 @ 包裹的占位符由 tools/render-user-data.py 自动替换, 不要手工改这里。
 # 校验:  python3 -c "import yaml,sys;yaml.safe_load(open('user-data'))"
+#
+# apt.primary 仍用 legacy 格式 (非 mirror-selection), 以同时兼容 22.04 / 24.04
+# 且 refresh-installer.update=false 时的旧版 Subiquity。
 # ---------------------------------------------------------------------------
 autoinstall:
   version: 1
@@ -27,7 +30,8 @@ autoinstall:
     install-server: true
     # 未注入 authorized-keys 时必须为 true, 否则装完无法登录
     allow-pw: @@SSH_ALLOW_PW@@
-    authorized-keys: []
+    authorized-keys:
+@@SSH_AUTHORIZED_KEYS_BLOCK@@
 
   apt:
     geoip: false
