@@ -70,7 +70,8 @@ usage() {
   --locale / --keyboard / --timezone
   --ssh-allow-pw BOOL   默认 true (未配公钥时必须为 true, 否则装完登不进去)
   --ssh-authorized-keys FILE
-                        authorized_keys 文件 (每行一把公钥), 写入 autoinstall ssh.authorized-keys
+                        authorized_keys 文件 (每行一把公钥); 写入 autoinstall ssh.authorized-keys,
+                        并打进 /nocloud + late-command 再写一次到用户家目录 (防 Subiquity 漏写)
   --storage-layout L    direct | lvm | zfs, 默认 direct
   --network MODE        dhcp (默认) | none; dhcp 写入 en*/eth* 通配 DHCP netplan,
                         并用 late-command 确保装完后系统始终有 DHCP
@@ -282,6 +283,15 @@ RENDER_ARGS+=(--network "$NETWORK_MODE")
 
 python3 "$SCRIPT_DIR/tools/render-user-data.py" "${RENDER_ARGS[@]}"
 cp "$SCRIPT_DIR/autoinstall/meta-data" "$WORK/nocloud/meta-data"
+
+# SSH 公钥: 除写入 user-data ssh.authorized-keys 外, 再放进 /nocloud 供 late-command 脚本落盘
+# (Subiquity 偶发不写 ~/.ssh/authorized_keys)
+if [[ -n "$SSH_AUTHORIZED_KEYS" ]] && grep -vE '^[[:space:]]*(#|$)' "$SSH_AUTHORIZED_KEYS" | grep -q .; then
+  cp "$SSH_AUTHORIZED_KEYS" "$WORK/nocloud/authorized_keys"
+  cp "$SCRIPT_DIR/autoinstall/write-authorized-keys.sh" "$WORK/nocloud/write-authorized-keys.sh"
+  chmod 0755 "$WORK/nocloud/write-authorized-keys.sh"
+  ok "已打包 SSH 公钥晚写脚本 (/nocloud/write-authorized-keys.sh)"
+fi
 
 # 本地 deb 打进 ISO 的 /pool
 if [[ "$WITH_POOL" -eq 1 ]]; then

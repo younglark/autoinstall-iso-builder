@@ -103,6 +103,8 @@ def build_late_commands(
     provision: bool,
     full_offline: bool,
     network: str,
+    username: str = "ops",
+    auth_keys: list[str] | None = None,
 ):
     cmds = []
 
@@ -138,6 +140,12 @@ def build_late_commands(
 
     if network == "dhcp":
         cmds += build_dhcp_late_commands()
+
+    # Subiquity ssh.authorized-keys 偶发未写入家目录; ISO 上的脚本再落盘一次。
+    if auth_keys:
+        cmds.append(
+            f"bash /cdrom/nocloud/write-authorized-keys.sh {username}"
+        )
 
     cmds += [
         "curtin in-target --target=/target -- timedatectl set-ntp true || true",
@@ -246,6 +254,8 @@ def main() -> int:
             provision=args.provision,
             full_offline=full_offline,
             network=network,
+            username=args.username,
+            auth_keys=auth_keys,
         ),
     }
 
@@ -298,6 +308,19 @@ def main() -> int:
         elif network == "none":
             if "network" in (ai or {}):
                 sys.stderr.write("[FAIL] network=none 但 YAML 仍含 network 键\n")
+                return 2
+        late = ai.get("late-commands") or []
+        if auth_keys:
+            if not any("write-authorized-keys.sh" in str(c) for c in late):
+                sys.stderr.write(
+                    "[FAIL] 提供了 ssh keys 但 late-commands 无 write-authorized-keys.sh\n"
+                )
+                return 2
+        else:
+            if any("write-authorized-keys.sh" in str(c) for c in late):
+                sys.stderr.write(
+                    "[FAIL] 未提供 ssh keys 但 late-commands 含 write-authorized-keys.sh\n"
+                )
                 return 2
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)

@@ -74,10 +74,34 @@ if python3 tools/render-user-data.py \
 else
   fail "render-user-data"
 fi
-if python3 -c "import yaml; d=yaml.safe_load(open('$tmp/user-data')); assert d['autoinstall']['version']==1; assert d['autoinstall']['ssh']['allow-pw'] is False; assert len(d['autoinstall']['ssh']['authorized-keys'])==1; late=d['autoinstall']['late-commands']; assert any('offline-debs' in str(c) for c in late); assert any('run-all.sh' in str(c) for c in late); i_pool=next(i for i,c in enumerate(late) if 'offline-debs' in str(c) or 'dpkg -i' in str(c)); i_prov=next(i for i,c in enumerate(late) if 'run-all.sh' in str(c)); assert i_pool < i_prov, (i_pool, i_prov)"; then
-  pass "yaml + late-commands order"
+if python3 -c "import yaml; d=yaml.safe_load(open('$tmp/user-data')); assert d['autoinstall']['version']==1; assert d['autoinstall']['ssh']['allow-pw'] is False; assert len(d['autoinstall']['ssh']['authorized-keys'])==1; late=d['autoinstall']['late-commands']; assert any('offline-debs' in str(c) for c in late); assert any('run-all.sh' in str(c) for c in late); assert any('write-authorized-keys.sh' in str(c) for c in late); i_pool=next(i for i,c in enumerate(late) if 'offline-debs' in str(c) or 'dpkg -i' in str(c)); i_prov=next(i for i,c in enumerate(late) if 'run-all.sh' in str(c)); assert i_pool < i_prov, (i_pool, i_prov)"; then
+  pass "yaml + late-commands order + ssh-keys late"
 else
   fail "yaml/order check"
+fi
+
+echo "== ssh keys late-command absent when no keys =="
+if python3 tools/render-user-data.py \
+  --template autoinstall/user-data.tmpl \
+  --out "$tmp/user-data-nokeys" \
+  --password-hash "$HASH" \
+  --ssh-allow-pw true \
+  --provision; then
+  :
+else
+  fail "render without keys"
+fi
+if python3 -c "import yaml; d=yaml.safe_load(open('$tmp/user-data-nokeys')); late=d['autoinstall'].get('late-commands') or []; assert not any('write-authorized-keys.sh' in str(c) for c in late)"; then
+  pass "no-keys omits write-authorized-keys late"
+else
+  fail "no-keys omits write-authorized-keys late"
+fi
+
+echo "== write-authorized-keys.sh syntax =="
+if bash -n autoinstall/write-authorized-keys.sh; then
+  pass "write-authorized-keys syntax"
+else
+  fail "write-authorized-keys syntax"
 fi
 
 
@@ -129,6 +153,21 @@ if python3 -c "import yaml; d=yaml.safe_load(open('$tmp/user-data-nonet')); ai=d
   pass "network none omits section/late"
 else
   fail "network none omits section/late"
+fi
+
+
+echo "== 00-base skips installed pkgs =="
+if grep -q 'filter_missing' software/00-base.sh && grep -q 'skip already installed' software/00-base.sh; then
+  pass "00-base skip-installed helper"
+else
+  fail "00-base skip-installed helper"
+fi
+
+echo "== fetch-offline-bundle recursive depends =="
+if grep -q 'force-download' tools/fetch-offline-bundle.sh && grep -q 'apt-cache depends --recurse' tools/fetch-offline-bundle.sh; then
+  pass "fetch recursive depends download"
+else
+  fail "fetch recursive depends download"
 fi
 
 echo "== fetch-offline-bundle.sh syntax =="
