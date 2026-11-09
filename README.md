@@ -38,6 +38,7 @@
 | `50-grok.sh` | xAI Grok Build | `@xai-official/grok`，**官方包**，不是社区的 `@vibe-kit/grok-cli` |
 | `60-opencode.sh` | OpenCode | `opencode-ai` |
 | `70-openmausbot.sh` | OpenMausBot | npm CLI + 一个**故意未启用**的 systemd 单元 |
+| `80-unity-cli.sh` | Unity CLI | 官方 CDN 二进制装到 `/usr/local/bin/unity`；**不含 Editor / 登录 / 许可证** |
 | `99-cleanup.sh` | 收尾 | 恢复 `resolv.conf`、删 `policy-rc.d`、清 apt 缓存、写清单 |
 
 ### 两个版本约束，别忽略
@@ -54,6 +55,7 @@
 | Grok | `export XAI_API_KEY=xai-...`（CI 里走环境变量） |
 | OpenCode | `opencode auth login` |
 | OpenMausBot | 填 `/etc/openmausbot/env`（0600），再 `systemctl enable --now openmausbot` |
+| Unity CLI | 装机后 `unity auth login`，需要 Editor 再 `unity install <ver>`（镜像**不**预装 Editor） |
 
 理由很直接：镜像会被复制、被外传，烤进去的 key 等于公开。而且 OpenMausBot 本身还依赖「本机已登录的 claude / codex / grok CLI」，这层也必须在跑起来之后才配对。
 
@@ -65,7 +67,7 @@
 
 ### 增删软件
 
-加：在 `software/` 放一个 `80-你的东西.sh`，按现有脚本的约定（`set -euo pipefail`、结尾自带校验命令、失败即非零退出）即可，无需改主脚本。
+加：在 `software/` 放一个 `85-你的东西.sh`，按现有脚本的约定（`set -euo pipefail`、结尾自带校验命令、失败即非零退出）即可，无需改主脚本。
 
 减：`--skip "30 70"` 跳过 Jenkins 和 OpenMausBot；`--skip "30-jenkins 70-openmausbot"` 等价。整套不要就 `--no-provision`。
 
@@ -142,7 +144,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso --uefi
 | 选盘 | 默认停在选盘页 | 同左：图形安装器停在「安装类型/磁盘」页，确认后继续 |
 | 配置投递 | `/nocloud` + 内核参数 | 同左；另在 ISO 根放一份 `/autoinstall.yaml` 兜底（Subiquity 优先级：内核参数 > live 根 > cloud-config > 介质根，正常不会用到） |
 
-`software/*.sh` 在 Desktop 目标上不需要改：Desktop minimal 不带 curl/git/openssh-server，`00-base`/`10-openssh` 会补装；已装的包（ca-certificates、gnupg、jq 等）照旧跳过。Docker / NVIDIA Container Toolkit / Jenkins / Node / 三个 CLI 与 Server 相同（Toolkit **不含** GPU 驱动）。
+`software/*.sh` 在 Desktop 目标上不需要改：Desktop minimal 不带 curl/git/openssh-server，`00-base`/`10-openssh` 会补装；已装的包（ca-certificates、gnupg、jq 等）照旧跳过。Docker / NVIDIA Container Toolkit / Jenkins / Node / Grok / OpenCode / OpenMausBot / Unity CLI 与 Server 相同（Toolkit **不含** GPU 驱动；Unity CLI **不含** Editor）。
 
 ### 离线：Desktop 能不能全离线？
 
@@ -212,6 +214,7 @@ cat /var/log/autoinstall/20-docker.log
 | `--iso-sha256sums FILE` | 按 ISO basename 在 SHA256SUMS 文件中查找校验和；优先于 `--iso-sha256` |
 | `--pin-node N` | Node 主版本（默认 24）；环境变量 `PIN_NODE_MAJOR` |
 | `--pin-grok / --pin-opencode / --pin-openmausbot VER` | npm 包版本（默认 latest）；亦可用 `PIN_GROK` / `PIN_OPENCODE` / `PIN_OPENMAUSBOT` |
+| `--pin-unity-cli VER` | Unity CLI 版本（默认拉 stable，若无则 beta）；亦可用 `PIN_UNITY_CLI` |
 | `--edition` | `auto`（默认）/ `server` / `desktop`。`auto` 读 ISO 的 `casper/install-sources.yaml`（`variant: desktop/server`），退回 `.disk/info`；显式指定优先 |
 | `--desktop-source` | 仅 desktop：`minimal`（默认，`ubuntu-desktop-minimal`）/ `standard`（`ubuntu-desktop`）/ 任意 source id；会对照 ISO 的 install-sources.yaml 校验 |
 | `--realname` | `identity.realname`（登录界面显示名）；desktop 默认等于 `--username` |
@@ -258,7 +261,7 @@ bash test/local-check.sh
 
 ### 全离线模式（`--offline` + `--offline-bundle`）
 
-目标：装机过程**零外网请求**，装完仍有 Docker / Jenkins / Node 24 / Grok / OpenCode / OpenMausBot。
+目标：装机过程**零外网请求**，装完仍有 Docker / Jenkins / Node 24 / Grok / OpenCode / OpenMausBot / Unity CLI。
 
 ```bash
 # 1) 构建期联网抓取捆绑（按发行版缓存，可复用）
@@ -287,14 +290,14 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 | 阶段 | 行为 |
 |---|---|
-| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource），`dpkg-scanpackages` 生成本地 apt 源；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball 兜底 |
-| ISO | 写入 `/offline/{apt,npm,node,manifest.json}` |
+| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource），`dpkg-scanpackages` 生成本地 apt 源；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball 与 Unity CLI 二进制（`unity-cli/`，约 128 MB）兜底 |
+| ISO | 写入 `/offline/{apt,npm,node,unity-cli,manifest.json}` |
 | 装机 late-commands | 拷到 `/opt/offline`，临时只启用 `deb [trusted=yes] file:/opt/offline/apt ./`，再跑 `software/`（`OFFLINE=1`） |
-| `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压 |
+| `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装 |
 
 体积与缓存：
 
-- 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；有 `manifest.json` 时默认复用（`--force` 重建）。
+- 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；有 `manifest.json` 时默认复用（`--force` 重建）。**新加 Unity CLI 等条目后，旧捆绑需 `--force` 才会写入 `unity-cli/`。**
 - 实测（本仓库验证机，2026-11）：**noble+npm ≈ 648 MB**（150 debs + npm prefix ≈329 MB 压缩）；**jammy apt-only（--skip-npm）≈ 312 MB**（127 debs）。含 OpenMausBot 时 npm 树是大头；U 盘请预留 ≥ 镜像+捆绑余量。
 - `--packages` 会并进捆绑；全离线时 autoinstall 的 `packages:` 置空，改由 `00-base.sh` 从本地 apt 安装，避免安装器阶段无索引。
 
@@ -308,6 +311,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 - Docker / NVIDIA Container Toolkit / Jenkins / NodeSource 走各自第三方仓库 → 需要下载 `.deb` 后配 `--debs`
 - Grok / OpenCode / OpenMausBot 是 **npm 全局包** → 需要预建 npm 缓存（`npm cache add`）或打成 tarball 后离线 `npm install -g ./xxx.tgz`
+- Unity CLI 是 CDN 二进制（`public-cdn.cloud.unity3d.com`）→ 全离线捆绑的 `unity-cli/`；无捆绑时脚本会联网下载
 
 真正要全离线，建议改为「内网镜像源 + 自建 npm registry（Verdaccio）」，比往 ISO 里塞依赖靠谱得多。
 
@@ -317,7 +321,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 1. `--dry-run` 的 YAML 能被 `yaml.safe_load` 解析（脚本已内置校验）。
 2. `xorriso -indev out.iso -report_el_torito plain` 里 **BIOS 与 UEFI 两个引导项都在**。
-3. 虚拟机 BIOS + UEFI 各装一次，`virt-cat` 读到的 `/var/log/autoinstall/manifest.txt` 里 docker / nvidia-ctk / node / grok / opencode / openmausbot 都有版本号。
+3. 虚拟机 BIOS + UEFI 各装一次，`virt-cat` 读到的 `/var/log/autoinstall/manifest.txt` 里 docker / nvidia-ctk / node / grok / opencode / openmausbot / unity 都有版本号。
 4. `provision-failed.txt` 为空。
 5. 重启后 `systemctl status docker jenkins ssh` 三个都是 active。
 
@@ -338,6 +342,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 | `npm install` 超时 / 404 | 公网 registry 不通 | 换 `registry.npmmirror.com`，或改走内网 Verdaccio |
 | `docker` 命令要 sudo | 组权限未生效 | 重新登录（组变更需新会话） |
 | `docker run --gpus` 失败 | **未装 GPU 驱动**（本镜像只预装 Toolkit） | 在目标机另行安装 NVIDIA 驱动后再用；无 GPU 的 VM 只能验证 `nvidia-ctk --version` / daemon.json |
+| `unity` 能跑但装不了 Editor / 未登录 | **镜像只预装 CLI** | 装机后 `unity auth login`，再 `unity install <ver>`；许可证另激活 |
 | `openmausbot` 打不开窗口 | 它是 Electron 应用 | 服务器上只能用 `openmausbot serve` |
 | 装完没有服务自启 | `policy-rc.d` 没删掉 | 确认 `99-cleanup.sh` 跑过；检查 `/usr/sbin/policy-rc.d` 不存在 |
 
@@ -380,6 +385,6 @@ xorriso -indev ubuntu.iso -outdev out.iso \
 
 - 口令是哈希，不是明文；哈希本身也别提交到公开仓库。
 - 没有任何 API key / 私钥进镜像。SSH **公钥**可通过 `--ssh-authorized-keys` 注入，属于公开信息；私钥绝不注入。
-- 目标机磁盘 ≥ 25 GB，且装机时能访问 docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / npm registry。
+- 目标机磁盘 ≥ 25 GB，且装机时能访问 docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）。全离线捆绑可免除这些外网依赖。
 
 这条线一旦破，后面所有「镜像管理」都失去意义。

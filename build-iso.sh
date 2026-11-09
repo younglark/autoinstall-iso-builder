@@ -53,6 +53,7 @@ PIN_NODE_MAJOR="${PIN_NODE_MAJOR:-24}"
 PIN_GROK="${PIN_GROK:-latest}"
 PIN_OPENCODE="${PIN_OPENCODE:-latest}"
 PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
+PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 
 usage() {
   cat <<'USAGE'
@@ -99,6 +100,7 @@ usage() {
   --pin-grok VER        npm 版 @xai-official/grok, 默认 latest (PIN_GROK)
   --pin-opencode VER    npm 版 opencode-ai, 默认 latest (PIN_OPENCODE)
   --pin-openmausbot VER npm 版 openmausbot, 默认 latest (PIN_OPENMAUSBOT)
+  --pin-unity-cli VER  Unity CLI 版本, 默认拉 latest/latest-beta (PIN_UNITY_CLI)
   --iso-sha256 HEX      校验源 ISO 的 SHA256, 不匹配则失败
   --iso-sha256sums FILE 用 SHA256SUMS 文件按 basename 校验源 ISO
   --menu-regex REGEX    要注入的菜单项标题正则。默认 server: "Try or Install";
@@ -169,6 +171,7 @@ while [[ $# -gt 0 ]]; do
     --pin-grok)       PIN_GROK="$2"; shift 2 ;;
     --pin-opencode)   PIN_OPENCODE="$2"; shift 2 ;;
     --pin-openmausbot) PIN_OPENMAUSBOT="$2"; shift 2 ;;
+    --pin-unity-cli)  PIN_UNITY_CLI="$2"; shift 2 ;;
     --iso-sha256)     ISO_SHA256="$2"; shift 2 ;;
     --iso-sha256sums) ISO_SHA256SUMS="$2"; shift 2 ;;
     --dry-run)        DRY_RUN=1; shift ;;
@@ -292,6 +295,7 @@ if [[ "${FETCH_OFFLINE:-0}" -eq 1 ]]; then
   FETCH_ARGS=(--release "$REL_HINT" --out "$OB_OUT" --packages "$PACKAGES"
     --pin-node "$PIN_NODE_MAJOR" --pin-grok "$PIN_GROK"
     --pin-opencode "$PIN_OPENCODE" --pin-openmausbot "$PIN_OPENMAUSBOT")
+  [[ -n "$PIN_UNITY_CLI" ]] && FETCH_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
   bash "$SCRIPT_DIR/tools/fetch-offline-bundle.sh" "${FETCH_ARGS[@]}"
   OFFLINE_BUNDLE="$OB_OUT"
 fi
@@ -428,6 +432,7 @@ PIN_NODE_MAJOR=$PIN_NODE_MAJOR
 PIN_GROK=$PIN_GROK
 PIN_OPENCODE=$PIN_OPENCODE
 PIN_OPENMAUSBOT=$PIN_OPENMAUSBOT
+PIN_UNITY_CLI=$PIN_UNITY_CLI
 OFFLINE=$FULL_OFFLINE
 OFFLINE_ROOT=/opt/offline
 EXTRA_APT_PACKAGES=$PACKAGES
