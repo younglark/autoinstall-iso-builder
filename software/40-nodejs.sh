@@ -33,7 +33,21 @@ else
       | grep -oE "node-v${NODE_MAJOR}\\.[0-9.]*-linux-x64\\.tar\\.xz" | head -1)
     [ -n "$TARBALL" ] || { echo "ERROR: 无法确定 Node ${NODE_MAJOR} tarball 名称"; exit 1; }
     curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/${TARBALL}" -o /tmp/node.tar.xz
-    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
+    # 解到 /opt/node-… 再 symlink, 避免 tar 改写 /usr/local 属主
+    NODE_BASE="$(basename "$TARBALL" .tar.xz)"
+    NODE_DIR="/opt/${NODE_BASE}"
+    rm -rf "$NODE_DIR"
+    mkdir -p "$NODE_DIR"
+    tar --no-same-owner --no-overwrite-dir -xJf /tmp/node.tar.xz -C "$NODE_DIR" --strip-components=1
+    for sub in bin include lib share; do
+      if [ -d "$NODE_DIR/$sub" ]; then
+        mkdir -p "/usr/local/$sub"
+        for item in "$NODE_DIR/$sub"/*; do
+          [ -e "$item" ] || continue
+          ln -sfn "$item" "/usr/local/$sub/$(basename "$item")"
+        done
+      fi
+    done
   fi
 fi
 

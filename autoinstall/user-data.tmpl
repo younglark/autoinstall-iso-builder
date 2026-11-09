@@ -56,4 +56,4 @@ autoinstall:
   error-commands:
     - [sh, -c, "mkdir -p /target/var/log/autoinstall && cp -a /var/log/installer /target/var/log/autoinstall/ 2>/dev/null || true"]
 
-  shutdown: reboot
+  shutdown: @@SHUTDOWN@@
