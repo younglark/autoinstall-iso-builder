@@ -78,6 +78,15 @@ def build_network_block(mode: str) -> str:
     return "\n".join(out) + "\n"
 
 
+def build_interactive_sections_block(auto_disk: bool) -> str:
+    """Default: stop on storage screen (layout values used as UI defaults).
+    --auto-disk: fully unattended (dangerous: auto-wipes match size largest).
+    """
+    if auto_disk:
+        return "  interactive-sections: []"
+    return "  interactive-sections:\n    - storage"
+
+
 def build_dhcp_late_commands() -> list[str]:
     """
     Subiquity 在无显式 network 时会按「安装时探测到的网卡」写 00-installer-config.yaml;
@@ -203,6 +212,14 @@ def main() -> int:
         choices=["dhcp", "none"],
         help="dhcp(默认): 写入 match en*/eth* 的 netplan + late-command; none: 不写",
     )
+    ap.add_argument(
+        "--auto-disk",
+        action="store_true",
+        help=(
+            "全自动选盘 (interactive-sections: [])；默认停在 storage 页由用户确认。"
+            "危险：会按 match size:largest 直接抹盘。仅用于 QEMU/CI 无人值守。"
+        ),
+    )
     args = ap.parse_args()
 
     pw = args.password_hash.strip()
@@ -247,6 +264,7 @@ def main() -> int:
         "SSH_ALLOW_PW": ssh_allow,
         "SSH_AUTHORIZED_KEYS_BLOCK": yaml_quoted_list_block(auth_keys, indent="      "),
         "STORAGE_LAYOUT": args.storage_layout,
+        "INTERACTIVE_SECTIONS_BLOCK": build_interactive_sections_block(bool(args.auto_disk)),
         "PACKAGES_BLOCK": yaml_list_block(render_packages),
         "NETWORK_BLOCK": build_network_block(network),
         "LATE_COMMANDS_BLOCK": build_late_commands(
@@ -293,6 +311,19 @@ def main() -> int:
             if not any("offline" in str(c) for c in late):
                 sys.stderr.write("[FAIL] full-offline 但 late-commands 未引用 offline\n")
                 return 2
+        isec = ai.get("interactive-sections")
+        if args.auto_disk:
+            if isec not in ([], None):
+                sys.stderr.write(
+                    f"[FAIL] --auto-disk 但 interactive-sections 不是 []: {isec!r}\n"
+                )
+                return 2
+        else:
+            if not isinstance(isec, list) or "storage" not in isec:
+                sys.stderr.write(
+                    f"[FAIL] 默认应含 interactive-sections: [storage], got {isec!r}\n"
+                )
+                return 2
         if network == "dhcp":
             net = ai.get("network") or {}
             eth = net.get("ethernets") or {}
@@ -330,7 +361,7 @@ def main() -> int:
     print(
         f"[ok] wrote {args.out} (packages={len(render_packages)}, "
         f"ssh_keys={len(auth_keys)}, offline={offline}, full_offline={full_offline}, "
-        f"network={network})"
+        f"network={network}, auto_disk={bool(args.auto_disk)})"
     )
     return 0
 

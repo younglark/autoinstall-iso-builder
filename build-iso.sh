@@ -31,6 +31,7 @@ SSH_ALLOW_PW="true"
 SSH_AUTHORIZED_KEYS=""
 STORAGE_LAYOUT="direct"
 NETWORK_MODE="dhcp"
+AUTO_DISK=0
 OFFLINE=0
 OFFLINE_BUNDLE=""
 FULL_OFFLINE=0
@@ -75,6 +76,9 @@ usage() {
   --storage-layout L    direct | lvm | zfs, 默认 direct
   --network MODE        dhcp (默认) | none; dhcp 写入 en*/eth* 通配 DHCP netplan,
                         并用 late-command 确保装完后系统始终有 DHCP
+  --auto-disk           全自动选盘并抹盘 (interactive-sections: [])。默认停在硬盘选择页
+                        由用户确认。危险：按 match size:largest 自动抹最大盘。仅用于
+                        QEMU/CI 无人值守；物理机切勿默认开启。
   --offline             全离线安装 (需 --offline-bundle; 零外网请求仍装完全部 software/)
   --offline-bundle DIR  fetch-offline-bundle.sh 产出目录 (含 apt/ npm/ manifest.json)
   --fetch-offline       构建前自动调用 tools/fetch-offline-bundle.sh (需 docker)
@@ -127,6 +131,7 @@ while [[ $# -gt 0 ]]; do
     --ssh-authorized-keys) SSH_AUTHORIZED_KEYS="$2"; shift 2 ;;
     --storage-layout) STORAGE_LAYOUT="$2"; shift 2 ;;
     --network)        NETWORK_MODE="$2"; shift 2 ;;
+    --auto-disk)      AUTO_DISK=1; shift ;;
     --offline)        OFFLINE=1; shift ;;
     --offline-bundle) OFFLINE_BUNDLE="$2"; OFFLINE=1; shift 2 ;;
     --fetch-offline)  FETCH_OFFLINE=1; OFFLINE=1; shift ;;
@@ -280,6 +285,13 @@ RENDER_ARGS=(
 [[ "$WITH_POOL" -eq 1 ]] && RENDER_ARGS+=(--with-pool)
 [[ "$PROVISION" -eq 1 ]] && RENDER_ARGS+=(--provision)
 RENDER_ARGS+=(--network "$NETWORK_MODE")
+[[ "$AUTO_DISK" -eq 1 ]] && RENDER_ARGS+=(--auto-disk)
+
+if [[ "$AUTO_DISK" -eq 1 ]]; then
+  warn "--auto-disk 已开启：装机将自动抹除 match size:largest 的磁盘，无确认步骤"
+else
+  log "默认停在硬盘选择页（interactive storage）；无人值守请加 --auto-disk"
+fi
 
 python3 "$SCRIPT_DIR/tools/render-user-data.py" "${RENDER_ARGS[@]}"
 cp "$SCRIPT_DIR/autoinstall/meta-data" "$WORK/nocloud/meta-data"
