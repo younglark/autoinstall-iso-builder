@@ -102,6 +102,8 @@ chmod +x build-iso.sh test/qemu-smoke.sh tools/*.py software/*.sh
 ./build-iso.sh --iso ubuntu-24.04.1-live-server-amd64.iso                --out out/ubuntu-24.04.1-ci-node-autodisk.iso                --hostname ci-node01 --username ops                --password-hash "$(openssl passwd -6 'Ch@ngeMe')"                --auto-disk
 
 # 4. 先在虚拟机跑一遍（务必做，别直接上物理机）
+#    qemu-smoke 会先读 ISO 里的 user-data：若 interactive-sections 非空会立刻失败，
+#    提示用 --auto-disk 重建（避免空等选盘页直至超时）。
 bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso
 bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso --uefi
 ```
@@ -161,7 +163,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso --uefi
 ### 限制与已知问题
 
 - **只支持 24.04+ Desktop**。22.04 Desktop 是 Ubiquity（preseed），没有 `casper/install-sources.yaml`，脚本会直接报错退出。
-- Desktop 安装器是图形界面，串口（`console=ttyS0`）看不到进度；`qemu-smoke.sh` 只能靠装完后读盘断言。Desktop 建议 `QEMU_MEM=8192 QEMU_DISK=40G`。
+- Desktop 安装器是图形界面，串口（`console=ttyS0`）看不到进度；`qemu-smoke.sh` 只能靠装完后读盘断言。Desktop 建议 `QEMU_MEM=8192 QEMU_DISK=40G`。冒烟前会检查 ISO 的 `interactive-sections`：非空（默认停选盘）直接退出并提示 `--auto-disk`；装完后会在 `/usr/bin`、`/usr/sbin`、`/usr/local/bin` 核对 `git`/`gh`/`rg`/`docker`/`nvidia-ctk`/`node`/`unity`/`godot`/`sshd` 等。
 - 带 interactive-sections 时 Subiquity 忽略 `reporting`；旧版桌面安装器在部分交互时「确认页」可能显示空白（[ubuntu-desktop-provision#926](https://github.com/canonical/ubuntu-desktop-provision/issues/926)，2026-08 已有人报告修复），返回再前进即可。
 - `drivers` / `codecs` / `oem` 未设置，沿用 Subiquity 默认值。
 - UEFI：24.04 Desktop 的 ESP 里只有 `bootx64/grubx64/mmx64.efi`，没有 grub.cfg 副本，所以改 `/boot/grub/grub.cfg` 即同时对 BIOS/UEFI 生效（已在 24.04.5.1 Desktop ISO 上确认）。
@@ -262,7 +264,7 @@ cat /var/log/autoinstall/20-docker.log
 bash test/local-check.sh
 ```
 
-覆盖 Python 语法、grub 转义/幂等/旧参数修复、user-data YAML、默认 interactive storage / `--auto-disk`、公钥、pool-before-provision 顺序与 skip 前缀，以及 Desktop 24.04（基于真实 24.04.5.1 Desktop ISO 抽出的 grub.cfg / loopback.cfg / install-sources.yaml 夹具）的版本识别、菜单注入与渲染语义。`.github/workflows/ci.yml` 在 PR/push 上运行 ShellCheck 与这些校验。完整 `build-iso.sh --dry-run` 仍需真实 ISO；BIOS/UEFI/QEMU 与 Secure Boot 验证见下文，不在轻量 CI 下载 ISO。
+覆盖 Python 语法、grub 转义/幂等/旧参数修复、user-data YAML、默认 interactive storage / `--auto-disk`、公钥、pool-before-provision 顺序与 skip 前缀、`qemu-smoke` 对交互选盘 ISO 的拒绝（迷你 ISO + `--guard-only`，无需真开机），以及 Desktop 24.04（基于真实 24.04.5.1 Desktop ISO 抽出的 grub.cfg / loopback.cfg / install-sources.yaml 夹具）的版本识别、菜单注入与渲染语义。`.github/workflows/ci.yml` 在 PR/push 上运行 ShellCheck 与这些校验。完整 `build-iso.sh --dry-run` 仍需真实 ISO；BIOS/UEFI/QEMU 与 Secure Boot 验证见下文，不在轻量 CI 下载 ISO。
 
 ### 全离线模式（`--offline` + `--offline-bundle`）
 

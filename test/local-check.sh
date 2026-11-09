@@ -678,6 +678,77 @@ else
   fail "99-cleanup manifest helpers"
 fi
 
+echo "== qemu-smoke interactive-sections guard =="
+if command -v xorriso >/dev/null; then
+  smoke_tmp="$(mktemp -d)"
+  mkdir -p "$smoke_tmp/interactive/nocloud" "$smoke_tmp/autodisk/nocloud"
+  cat > "$smoke_tmp/interactive/nocloud/user-data" <<'UD'
+#cloud-config
+autoinstall:
+  version: 1
+  interactive-sections:
+    - storage
+  identity:
+    hostname: smoke
+    username: ops
+    password: 'x'
+UD
+  cat > "$smoke_tmp/autodisk/nocloud/user-data" <<'UD'
+#cloud-config
+autoinstall:
+  version: 1
+  interactive-sections: []
+  identity:
+    hostname: smoke
+    username: ops
+    password: 'x'
+UD
+  printf 'instance-id: smoke\n' > "$smoke_tmp/interactive/nocloud/meta-data"
+  printf 'instance-id: smoke\n' > "$smoke_tmp/autodisk/nocloud/meta-data"
+  echo ok > "$smoke_tmp/interactive/README"
+  echo ok > "$smoke_tmp/autodisk/README"
+  if xorriso -as mkisofs -R -V SMOKEINT -o "$smoke_tmp/interactive.iso" "$smoke_tmp/interactive" >/dev/null 2>&1 \
+    && xorriso -as mkisofs -R -V SMOKEAUTO -o "$smoke_tmp/autodisk.iso" "$smoke_tmp/autodisk" >/dev/null 2>&1; then
+    set +e
+    out_int="$(bash test/qemu-smoke.sh "$smoke_tmp/interactive.iso" --guard-only 2>&1)"
+    rc_int=$?
+    out_auto="$(bash test/qemu-smoke.sh "$smoke_tmp/autodisk.iso" --guard-only 2>&1)"
+    rc_auto=$?
+    set -e
+    if [[ "$rc_int" -ne 0 ]] && grep -q -- '--auto-disk' <<<"$out_int" \
+      && grep -q 'interactive-sections' <<<"$out_int"; then
+      pass "qemu-smoke rejects interactive ISO"
+    else
+      fail "qemu-smoke rejects interactive ISO (rc=$rc_int)"
+      printf '%s\n' "$out_int" | sed 's/^/    /' >&2
+    fi
+    if [[ "$rc_auto" -eq 0 ]] && grep -q '检查通过' <<<"$out_auto"; then
+      pass "qemu-smoke accepts auto-disk ISO (--guard-only)"
+    else
+      fail "qemu-smoke accepts auto-disk ISO (rc=$rc_auto)"
+      printf '%s\n' "$out_auto" | sed 's/^/    /' >&2
+    fi
+  else
+    fail "qemu-smoke mini ISO build (xorriso)"
+  fi
+  rm -rf "$smoke_tmp"
+else
+  echo "(xorriso not installed, qemu-smoke guard skipped)"
+fi
+
+# 静态：sshd 查 /usr/sbin；新工具列入检查
+if grep -q '/usr/sbin' test/qemu-smoke.sh \
+  && grep -q 'nvidia-ctk' test/qemu-smoke.sh \
+  && grep -qE '^[[:space:]]+gh$' test/qemu-smoke.sh \
+  && grep -qE '^[[:space:]]+rg$' test/qemu-smoke.sh \
+  && grep -qE '^[[:space:]]+unity$' test/qemu-smoke.sh \
+  && grep -qE '^[[:space:]]+godot$' test/qemu-smoke.sh \
+  && grep -q -- '--guard-only' test/qemu-smoke.sh; then
+  pass "qemu-smoke paths + new tools + guard-only"
+else
+  fail "qemu-smoke paths + new tools + guard-only"
+fi
+
 echo "== shellcheck (if available) =="
 if command -v shellcheck >/dev/null; then
   if shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh tools/validate-offline-bundle.sh \
