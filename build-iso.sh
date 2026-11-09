@@ -364,8 +364,12 @@ MAP_ARGS=(
 [[ "$HAS_LOOPBACK" -eq 1 ]] && MAP_ARGS+=(-map "$WORK/loopback.cfg" /boot/grub/loopback.cfg)
 [[ "$WITH_POOL" -eq 1 ]]    && MAP_ARGS+=(-map "$WORK/pool"            /pool)
 [[ "$PROVISION" -eq 1 ]]    && MAP_ARGS+=(-map "$WORK/provision"       /provision)
-# offline-bundle map
-[[ "$FULL_OFFLINE" -eq 1 ]] && MAP_ARGS+=(-map "$OFFLINE_BUNDLE"        /offline)
+# offline-bundle map (+ apt enable/restore helpers; avoid nested sh -c find \( \))
+if [[ "$FULL_OFFLINE" -eq 1 ]]; then
+  MAP_ARGS+=(-map "$OFFLINE_BUNDLE" /offline)
+  MAP_ARGS+=(-map "$SCRIPT_DIR/autoinstall/enable-offline-apt.sh" /offline/enable-offline-apt.sh)
+  MAP_ARGS+=(-map "$SCRIPT_DIR/autoinstall/restore-online-apt.sh" /offline/restore-online-apt.sh)
+fi
 
 log "打包 (复制模式, 引导记录 replay)"
 xorriso -indev "$SRC_ISO" -outdev "$OUT_ISO" \
@@ -397,6 +401,10 @@ grep -qE 'ds=nocloud\\;s=/cdrom/nocloud/' "$WORK/verify.cfg" \
 if [[ "$FULL_OFFLINE" -eq 1 ]]; then
   xorriso -indev "$OUT_ISO" -ls /offline 2>/dev/null | grep -q 'manifest.json' \
     || die "/offline/manifest.json 未写入"
+  xorriso -indev "$OUT_ISO" -ls /offline 2>/dev/null | grep -q 'enable-offline-apt.sh' \
+    || die "/offline/enable-offline-apt.sh 未写入"
+  xorriso -indev "$OUT_ISO" -ls /offline 2>/dev/null | grep -q 'restore-online-apt.sh' \
+    || die "/offline/restore-online-apt.sh 未写入"
   ok "校验 /offline 捆绑已写入"
 fi
 if [[ "$PROVISION" -eq 1 ]]; then

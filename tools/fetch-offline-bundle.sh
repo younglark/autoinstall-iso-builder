@@ -204,12 +204,25 @@ find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -a {} "$OUTDIR/a
 cd "$OUTDIR/apt"
 dpkg-scanpackages . /dev/null > Packages
 gzip -9c Packages > Packages.gz
-# 简单 Release
+# Release with Date + hashes (apt still needs trusted=yes for unsigned repo)
+SIZE_P=$(wc -c < Packages)
+SIZE_Z=$(wc -c < Packages.gz)
+MD5_P=$(md5sum Packages | awk '{print $1}')
+MD5_Z=$(md5sum Packages.gz | awk '{print $1}')
+SHA_P=$(sha256sum Packages | awk '{print $1}')
+SHA_Z=$(sha256sum Packages.gz | awk '{print $1}')
 cat > Release <<REL
 Archive: offline
 Codename: offline
 Components: .
 Architectures: ${ARCH}
+Date: $(date -Ru)
+MD5Sum:
+ ${MD5_P} ${SIZE_P} Packages
+ ${MD5_Z} ${SIZE_Z} Packages.gz
+SHA256:
+ ${SHA_P} ${SIZE_P} Packages
+ ${SHA_Z} ${SIZE_Z} Packages.gz
 REL
 
 ls -1 *.deb | sort > "$OUTDIR/package-list.txt"

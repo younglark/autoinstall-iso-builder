@@ -54,20 +54,11 @@ def build_late_commands(
     cmds = []
 
     if full_offline:
-        # 1) 拷贝离线捆绑 2) 临时只指向 file: 源 3) 再 provision
+        # 1) 拷贝离线捆绑 2) 脚本挂 file: 源 (忌 find \( \) —— nested sh -c 会 Syntax error exit 2)
+        # 3) 再 provision。enable/restore 由 build-iso 写入 ISO /offline/
         cmds += [
-            "mkdir -p /target/opt/offline && cp -a /cdrom/offline/. /target/opt/offline/",
-            (
-                "curtin in-target --target=/target -- sh -c '"
-                "mkdir -p /etc/apt/sources.list.d.offline-bak; "
-                "if [ -f /etc/apt/sources.list ]; then mv /etc/apt/sources.list /etc/apt/sources.list.offline-bak; fi; "
-                "mkdir -p /etc/apt/sources.list.d; "
-                "find /etc/apt/sources.list.d -maxdepth 1 -type f \\\\( -name \"*.list\" -o -name \"*.sources\" \\\\) "
-                "-exec mv {} /etc/apt/sources.list.d.offline-bak/ \\\\; 2>/dev/null || true; "
-                "echo \"deb [trusted=yes] file:/opt/offline/apt ./\" > /etc/apt/sources.list.d/00-offline-bundle.list; "
-                "apt-get update"
-                "'"
-            ),
+            "mkdir -p /target/opt/offline && cp -a /cdrom/offline/. /target/opt/offline/ && chmod -R a+rX /target/opt/offline",
+            "curtin in-target --target=/target -- bash /opt/offline/enable-offline-apt.sh",
         ]
 
     if with_pool and not full_offline:
@@ -89,14 +80,7 @@ def build_late_commands(
     if full_offline:
         # 恢复安装器写入的官方源, 便于以后联网升级; 保留 /opt/offline 供重装
         cmds.append(
-            "curtin in-target --target=/target -- sh -c '"
-            "rm -f /etc/apt/sources.list.d/00-offline-bundle.list; "
-            "if [ -f /etc/apt/sources.list.offline-bak ]; then "
-            "mv /etc/apt/sources.list.offline-bak /etc/apt/sources.list; fi; "
-            "if [ -d /etc/apt/sources.list.d.offline-bak ]; then "
-            "mv /etc/apt/sources.list.d.offline-bak/* /etc/apt/sources.list.d/ 2>/dev/null || true; "
-            "rmdir /etc/apt/sources.list.d.offline-bak 2>/dev/null || true; fi"
-            "'"
+            "curtin in-target --target=/target -- bash /opt/offline/restore-online-apt.sh"
         )
 
     cmds += [
