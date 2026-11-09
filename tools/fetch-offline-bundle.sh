@@ -8,6 +8,7 @@
 #     apt/                 # file:/ apt 源 (Packages + *.deb)
 #     npm/prefix.tar.gz    # 预装的全局 npm 树 (解压到 /usr/local)
 #     node/                # 官方 Node tarball (nodesource 失败时的兜底)
+#     unity-cli/           # Unity CLI 二进制 + version/sha256（不含 Editor）
 #     package-list.txt
 #
 # 依赖: docker (推荐), 宿主机 node/npm (打 npm 包)。无 docker 时退出并提示。
@@ -26,6 +27,7 @@ PIN_NODE_MAJOR="${PIN_NODE_MAJOR:-24}"
 PIN_GROK="${PIN_GROK:-latest}"
 PIN_OPENCODE="${PIN_OPENCODE:-latest}"
 PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
+PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 SKIP_NPM=0
 FORCE=0
 UBUNTU_MIRROR="${UBUNTU_MIRROR:-http://archive.ubuntu.com/ubuntu}"
@@ -45,9 +47,10 @@ usage() {
   --pin-grok VER        默认 latest
   --pin-opencode VER    默认 latest
   --pin-openmausbot VER 默认 latest
+  --pin-unity-cli VER   Unity CLI 版本 (默认拉 latest/latest-beta)
   --ubuntu-mirror URL   容器内 Ubuntu 源
   --skip-npm            不打包 npm 全局树 (调试用)
-  --force               忽略已有 manifest, 强制重建
+  --force               忽略已有 manifest, 强制重建 (新加 unity-cli 等时需 --force)
 USAGE
 }
 
@@ -67,6 +70,7 @@ while [[ $# -gt 0 ]]; do
     --pin-grok) PIN_GROK="$2"; shift 2 ;;
     --pin-opencode) PIN_OPENCODE="$2"; shift 2 ;;
     --pin-openmausbot) PIN_OPENMAUSBOT="$2"; shift 2 ;;
+    --pin-unity-cli) PIN_UNITY_CLI="$2"; shift 2 ;;
     --ubuntu-mirror) UBUNTU_MIRROR="$2"; shift 2 ;;
     --skip-npm) SKIP_NPM=1; shift ;;
     --force) FORCE=1; shift ;;
@@ -295,7 +299,7 @@ if command -v sudo >/dev/null; then
 fi
 
 # 同步到 OUT (保留可复用)
-rm -rf "$OUT/apt" "$OUT/node" "$OUT/package-list.txt" "$OUT/java-package.txt"
+rm -rf "$OUT/apt" "$OUT/node" "$OUT/unity-cli" "$OUT/package-list.txt" "$OUT/java-package.txt"
 mkdir -p "$OUT"
 cp -a "$WORK/out/." "$OUT/"
 
@@ -325,6 +329,54 @@ else
   : > "$OUT/npm/.skipped"
 fi
 
+# --------------- Unity CLI binary (host; not apt) ---------------
+# 直接拉 CDN 二进制 + sha256，系统装机脚本装到 /usr/local/bin/unity。不含 Editor。
+log "下载 Unity CLI (linux-x64)"
+UNITY_CDN="${UNITY_CLI_CDN_BASE:-https://public-cdn.cloud.unity3d.com/hub/prod/cli/}"
+UNITY_PLATFORM="linux-x64"
+UNITY_DIR="$OUT/unity-cli"
+mkdir -p "$UNITY_DIR"
+UNITY_MANIFEST=""
+UNITY_VERSION=""
+if [[ -n "$PIN_UNITY_CLI" ]]; then
+  UNITY_MANIFEST="$(curl -fsSL "${UNITY_CDN}${PIN_UNITY_CLI}/latest.json")" \
+    || die "无法拉取 Unity CLI 版本清单: ${UNITY_CDN}${PIN_UNITY_CLI}/latest.json"
+else
+  if UNITY_MANIFEST="$(curl -fsSL "${UNITY_CDN}latest.json" 2>/dev/null)"; then
+    ok "Unity CLI stable 清单"
+  else
+    warn "Unity CLI stable 不可用，回退 latest-beta.json"
+    UNITY_MANIFEST="$(curl -fsSL "${UNITY_CDN}latest-beta.json")" \
+      || die "无法拉取 Unity CLI beta 清单"
+  fi
+fi
+eval "$(python3 - "$UNITY_MANIFEST" "$UNITY_PLATFORM" <<'UPY'
+import json, sys
+o = json.loads(sys.argv[1])
+plat = sys.argv[2]
+b = o["binaries"][plat]
+print(f'UNITY_VERSION={o["version"]!r}')
+print(f'UNITY_FILENAME={b["filename"]!r}')
+print(f'UNITY_SHA256={b["sha256"]!r}')
+UPY
+)"
+[[ -n "$UNITY_VERSION" && -n "$UNITY_FILENAME" && -n "$UNITY_SHA256" ]] \
+  || die "Unity CLI 清单字段不完整"
+if [[ -n "$PIN_UNITY_CLI" && "$UNITY_VERSION" != "$PIN_UNITY_CLI" ]]; then
+  die "Unity CLI 版本不匹配: 请求 $PIN_UNITY_CLI 得到 $UNITY_VERSION"
+fi
+curl -fsSL "${UNITY_CDN}${UNITY_VERSION}/${UNITY_FILENAME}" -o "$UNITY_DIR/$UNITY_FILENAME" \
+  || die "下载 Unity CLI 失败: ${UNITY_CDN}${UNITY_VERSION}/${UNITY_FILENAME}"
+echo "$UNITY_SHA256  $UNITY_DIR/$UNITY_FILENAME" | sha256sum -c - \
+  || die "Unity CLI sha256 校验失败"
+# 统一落一份名为 unity 的可执行文件，方便离线脚本
+cp -a "$UNITY_DIR/$UNITY_FILENAME" "$UNITY_DIR/unity"
+chmod +x "$UNITY_DIR/unity" "$UNITY_DIR/$UNITY_FILENAME"
+printf '%s\n' "$UNITY_VERSION" > "$UNITY_DIR/version"
+printf '%s\n' "$UNITY_SHA256" > "$UNITY_DIR/sha256"
+printf '%s\n' "$UNITY_FILENAME" > "$UNITY_DIR/binary.name"
+ok "Unity CLI $UNITY_VERSION ($(du -h "$UNITY_DIR/unity" | cut -f1))"
+
 # --------------- manifest ---------------
 APT_COUNT=0
 [[ -f "$OUT/package-list.txt" ]] && APT_COUNT=$(wc -l < "$OUT/package-list.txt")
@@ -340,6 +392,15 @@ node = []
 nd = out/"node"
 if nd.exists():
     node = [p.name for p in nd.iterdir() if p.is_file()]
+unity_meta = {}
+ud = out/"unity-cli"
+if ud.exists():
+    unity_meta = {
+      "version": (ud/"version").read_text().strip() if (ud/"version").exists() else None,
+      "sha256": (ud/"sha256").read_text().strip() if (ud/"sha256").exists() else None,
+      "filename": (ud/"binary.name").read_text().strip() if (ud/"binary.name").exists() else None,
+      "present": (ud/"unity").exists() or any(ud.glob("unity-*")),
+    }
 manifest = {
   "schema": 1,
   "release": "${RELEASE}",
@@ -351,6 +412,7 @@ manifest = {
     "grok": "${PIN_GROK}",
     "opencode": "${PIN_OPENCODE}",
     "openmausbot": "${PIN_OPENMAUSBOT}",
+    "unity_cli": "${PIN_UNITY_CLI}" or (unity_meta.get("version") or ""),
   },
   "extra_packages": [p.strip() for p in "${PACKAGES}".split(",") if p.strip()],
   "apt_deb_count": len(debs),
@@ -359,6 +421,7 @@ manifest = {
   "npm_prefix": (out/"npm/prefix.tar.gz").exists(),
   "node_tarballs": node,
   "java_package": (out/"java-package.txt").read_text().strip() if (out/"java-package.txt").exists() else None,
+  "unity_cli": unity_meta or None,
 }
 (out/"manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
 print(json.dumps(manifest, indent=2, ensure_ascii=False))

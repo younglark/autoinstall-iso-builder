@@ -335,6 +335,20 @@ else
   fail "nvidia toolkit script + offline seed + manifest"
 fi
 
+echo "== unity-cli script + offline seed =="
+if [[ -x software/80-unity-cli.sh ]] \
+  && grep -q '/usr/local/bin/unity' software/80-unity-cli.sh \
+  && grep -q 'public-cdn.cloud.unity3d.com/hub/prod/cli' software/80-unity-cli.sh \
+  && grep -q 'offline_enabled' software/80-unity-cli.sh \
+  && grep -q 'unity-cli' tools/fetch-offline-bundle.sh \
+  && grep -q 'public-cdn.cloud.unity3d.com/hub/prod/cli' tools/fetch-offline-bundle.sh \
+  && grep -qE '(^|[[:space:]])unity([[:space:]]|$)' software/99-cleanup.sh \
+  && ! grep -qE 'apt-get install.*(libgtk|libnss3|xvfb)' software/80-unity-cli.sh; then
+  pass "unity-cli script + offline seed + manifest (CLI only)"
+else
+  fail "unity-cli script + offline seed + manifest"
+fi
+
 echo "== fetch-offline-bundle recursive depends =="
 if grep -q 'force-download' tools/fetch-offline-bundle.sh && grep -q 'apt-cache depends --recurse' tools/fetch-offline-bundle.sh; then
   pass "fetch recursive depends download"
