@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # build-iso.sh — 把 subiquity autoinstall 烧进 Ubuntu Live ISO
+#   支持 Ubuntu Server 22.04 / 24.04 与 Ubuntu Desktop 24.04 (--edition)
 #
 # 原理: 不重建 ISO, 也不解包 squashfs。
 #   * 在 ISO 根目录新增 /nocloud/{user-data,meta-data} 种子
@@ -36,7 +37,10 @@ OFFLINE=0
 OFFLINE_BUNDLE=""
 FULL_OFFLINE=0
 DEBS_DIR=""
-MENU_REGEX="Try or Install"
+MENU_REGEX=""
+EDITION="auto"
+DESKTOP_SOURCE="minimal"
+REALNAME_=""
 DRY_RUN=0
 KEEP_WORK=0
 PROVISION=1
@@ -56,7 +60,7 @@ usage() {
   ./build-iso.sh --iso <原版ISO> --out <输出ISO> [选项]
 
 必填:
-  --iso PATH            官方 Ubuntu Server ISO (22.04 / 24.04)
+  --iso PATH            官方 Ubuntu Server ISO (22.04 / 24.04) 或 Ubuntu Desktop 24.04 ISO
   --out PATH            输出 ISO 路径
 
 身份 (二选一, 必填):
@@ -64,6 +68,11 @@ usage() {
   --password PLAIN      明文, 脚本用 openssl passwd -6 现场哈希 (会留在 shell 历史里)
 
 可选:
+  --edition E           auto (默认) | server | desktop。auto 读 ISO 内
+                        casper/install-sources.yaml 的 variant (退回 .disk/info) 判断
+  --desktop-source S    仅 desktop: minimal (默认, ubuntu-desktop-minimal) |
+                        standard (ubuntu-desktop, 带 Office 等全套) | 任意 source id
+  --realname NAME       identity.realname (登录界面显示名); desktop 默认等于 --username
   --hostname NAME       默认 ubuntu-node
   --username NAME       默认 ops
   --packages "a,b,c"    预装软件包, 逗号分隔
@@ -92,7 +101,8 @@ usage() {
   --pin-openmausbot VER npm 版 openmausbot, 默认 latest (PIN_OPENMAUSBOT)
   --iso-sha256 HEX      校验源 ISO 的 SHA256, 不匹配则失败
   --iso-sha256sums FILE 用 SHA256SUMS 文件按 basename 校验源 ISO
-  --menu-regex REGEX    要注入的菜单项标题正则, 默认 "Try or Install"
+  --menu-regex REGEX    要注入的菜单项标题正则。默认 server: "Try or Install";
+                        desktop: "^(Try or Install Ubuntu|Ubuntu \(safe graphics\))$"
   --dry-run             只渲染配置并打印, 不产出 ISO
   --keep-work           保留临时目录便于排查
 
@@ -113,6 +123,18 @@ log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m[ok]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[fail]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# 与 software/run-all.sh 的 --skip 语义一致: 编号前缀或完整名
+should_skip_script() {
+  local name="$1" tok
+  for tok in $PROVISION_SKIP; do
+    [[ -z "$tok" ]] && continue
+    case "$name" in
+      "$tok"|"$tok"-*) return 0 ;;
+    esac
+  done
+  return 1
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -137,6 +159,9 @@ while [[ $# -gt 0 ]]; do
     --fetch-offline)  FETCH_OFFLINE=1; OFFLINE=1; shift ;;
     --debs)           DEBS_DIR="$2"; shift 2 ;;
     --menu-regex)     MENU_REGEX="$2"; shift 2 ;;
+    --edition)        EDITION="$2"; shift 2 ;;
+    --desktop-source) DESKTOP_SOURCE="$2"; shift 2 ;;
+    --realname)       REALNAME_="$2"; shift 2 ;;
     --no-provision)   PROVISION=0; shift ;;
     --strict)         STRICT=1; shift ;;
     --skip)           PROVISION_SKIP="$2"; shift 2 ;;
@@ -198,6 +223,60 @@ elif [[ -n "$ISO_SHA256" ]]; then
   verify_iso_sha256 "$ISO_SHA256"
 fi
 
+for bin in xorriso python3; do
+  command -v "$bin" >/dev/null || die "缺少依赖: $bin   (apt install xorriso python3)"
+done
+
+# ---------------------------------------------------------------- 版本识别
+case "$EDITION" in
+  auto|server|desktop) ;;
+  *) die "--edition 必须是 auto | server | desktop (got: $EDITION)" ;;
+esac
+
+DETECT_DIR="$(mktemp -d -t iso-detect-XXXXXX)"
+xorriso -osirrox on -indev "$SRC_ISO" \
+  -extract /casper/install-sources.yaml "$DETECT_DIR/install-sources.yaml" 2>/dev/null || true
+xorriso -osirrox on -indev "$SRC_ISO" \
+  -extract /.disk/info "$DETECT_DIR/disk-info" 2>/dev/null || true
+DETECT_OUT="$(python3 "$SCRIPT_DIR/tools/detect-edition.py" \
+  --install-sources "$DETECT_DIR/install-sources.yaml" --disk-info "$DETECT_DIR/disk-info")"
+rm -rf -- "$DETECT_DIR"
+ISO_EDITION="$(sed -n 's/^EDITION=//p' <<<"$DETECT_OUT")"
+ISO_RELEASE="$(sed -n 's/^RELEASE=//p' <<<"$DETECT_OUT")"
+ISO_SOURCES="$(sed -n 's/^SOURCES=//p' <<<"$DETECT_OUT")"
+ISO_SUBIQUITY="$(sed -n 's/^SUBIQUITY=//p' <<<"$DETECT_OUT")"
+
+if [[ "$EDITION" == "auto" ]]; then
+  case "$ISO_EDITION" in
+    server|desktop) EDITION="$ISO_EDITION" ;;
+    *) EDITION="server"; warn "无法从 ISO 识别版本, 按 server 处理 (可用 --edition 指定)" ;;
+  esac
+  log "识别到 ISO: edition=$EDITION release=${ISO_RELEASE:-?} sources=${ISO_SOURCES:-?}"
+elif [[ "$ISO_EDITION" != "unknown" && "$ISO_EDITION" != "$EDITION" ]]; then
+  warn "--edition $EDITION 与 ISO 识别结果 ($ISO_EDITION) 不一致, 以 --edition 为准"
+fi
+
+if [[ "$EDITION" == "desktop" ]]; then
+  # 22.04 Desktop 用的是 Ubiquity (preseed), 不消费 Subiquity autoinstall
+  if [[ "$ISO_SUBIQUITY" != "1" ]]; then
+    die "这张 Desktop ISO 没有 casper/install-sources.yaml, 不是 Subiquity 系安装器。
+  只支持 Ubuntu Desktop 24.04+ (22.04 Desktop 用 Ubiquity, 不支持 autoinstall)"
+  fi
+  case "$DESKTOP_SOURCE" in
+    minimal)  DESKTOP_SOURCE_ID="ubuntu-desktop-minimal" ;;
+    standard|full) DESKTOP_SOURCE_ID="ubuntu-desktop" ;;
+    *)        DESKTOP_SOURCE_ID="$DESKTOP_SOURCE" ;;
+  esac
+  if [[ -n "$ISO_SOURCES" && ",$ISO_SOURCES," != *",$DESKTOP_SOURCE_ID,"* ]]; then
+    die "--desktop-source $DESKTOP_SOURCE_ID 不在 ISO 的 install-sources.yaml 里 (可选: $ISO_SOURCES)"
+  fi
+  [[ -n "$MENU_REGEX" ]] || MENU_REGEX='^(Try or Install Ubuntu|Ubuntu \(safe graphics\))$'
+  [[ -n "$REALNAME_" ]] || REALNAME_="$USERNAME_"
+  log "Desktop 模式: source=$DESKTOP_SOURCE_ID realname=$REALNAME_ (网络交给 NetworkManager)"
+else
+  [[ -n "$MENU_REGEX" ]] || MENU_REGEX="Try or Install"
+fi
+
 # ---------------------------------------------------------------- 全离线捆绑
 if [[ "${FETCH_OFFLINE:-0}" -eq 1 ]]; then
   REL_HINT="noble"
@@ -228,10 +307,16 @@ elif [[ "$OFFLINE" -eq 1 && "$PROVISION" -eq 1 ]]; then
   die "--offline 且启用 provision 时必须提供 --offline-bundle DIR (或 --fetch-offline)。\n  先运行: ./tools/fetch-offline-bundle.sh --release noble --out cache/offline-bundles/noble-amd64"
 fi
 
-for bin in xorriso python3; do
-  command -v "$bin" >/dev/null || die "缺少依赖: $bin   (apt install xorriso python3)"
-done
-
+if [[ "$EDITION" == "desktop" && "$FULL_OFFLINE" -eq 1 ]]; then
+  if [[ "$PROVISION" -ne 1 ]]; then
+    die "Desktop 全离线需要 provision (software/10-openssh.sh 从捆绑装 openssh-server; Desktop ISO 不带 ssh)。
+  去掉 --no-provision, 或不用 --offline-bundle"
+  fi
+  if should_skip_script 10-openssh; then
+    warn "Desktop 全离线且跳过了 10-openssh: 装完不会有 SSH 服务"
+  fi
+  log "Desktop 全离线: 安装器阶段不装 ssh (install-server: false), 由 10-openssh 从捆绑安装"
+fi
 WITH_POOL=0
 if [[ -n "$DEBS_DIR" ]]; then
   [[ -d "$DEBS_DIR" ]] || die "--debs 目录不存在: $DEBS_DIR"
@@ -285,6 +370,12 @@ RENDER_ARGS=(
 [[ "$WITH_POOL" -eq 1 ]] && RENDER_ARGS+=(--with-pool)
 [[ "$PROVISION" -eq 1 ]] && RENDER_ARGS+=(--provision)
 RENDER_ARGS+=(--network "$NETWORK_MODE")
+RENDER_ARGS+=(--edition "$EDITION")
+if [[ "$EDITION" == "desktop" ]]; then
+  RENDER_ARGS+=(--desktop-source "$DESKTOP_SOURCE_ID" --realname "$REALNAME_")
+elif [[ -n "$REALNAME_" ]]; then
+  RENDER_ARGS+=(--realname "$REALNAME_")
+fi
 [[ "$AUTO_DISK" -eq 1 ]] && RENDER_ARGS+=(--auto-disk)
 
 if [[ "$AUTO_DISK" -eq 1 ]]; then
@@ -295,6 +386,13 @@ fi
 
 python3 "$SCRIPT_DIR/tools/render-user-data.py" "${RENDER_ARGS[@]}"
 cp "$SCRIPT_DIR/autoinstall/meta-data" "$WORK/nocloud/meta-data"
+
+# Desktop: 再放一份 /autoinstall.yaml 到 ISO 根 (Subiquity 优先级: 内核参数 > live 根 >
+# cloud-config > 介质根)。正常走 NoCloud; 若 live 会话的 cloud-init 没拿到种子则兜底。
+# 文件就是同一份配置 (仅含顶层 autoinstall: 键, 24.04+ 允许)。
+if [[ "$EDITION" == "desktop" ]]; then
+  cp "$WORK/nocloud/user-data" "$WORK/autoinstall.yaml"
+fi
 
 # SSH 公钥: 除写入 user-data ssh.authorized-keys 外, 再放进 /nocloud 供 late-command 脚本落盘
 # (Subiquity 偶发不写 ~/.ssh/authorized_keys)
@@ -377,6 +475,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "-------------------------------------------------------------"
   cat "$WORK/nocloud/user-data"
   echo "-------------------------------------------------------------"
+  log "edition=$EDITION menu-regex=$MENU_REGEX"
   log "以下是注入后的 grub linux 行"
   grep -n 'autoinstall' "$WORK/grub.cfg" || true
   if [[ "$PROVISION" -eq 1 ]]; then
@@ -397,6 +496,7 @@ MAP_ARGS=(
   -map "$WORK/grub.cfg"         /boot/grub/grub.cfg
 )
 [[ "$HAS_LOOPBACK" -eq 1 ]] && MAP_ARGS+=(-map "$WORK/loopback.cfg" /boot/grub/loopback.cfg)
+[[ "$EDITION" == "desktop" ]] && MAP_ARGS+=(-map "$WORK/autoinstall.yaml" /autoinstall.yaml)
 [[ "$WITH_POOL" -eq 1 ]]    && MAP_ARGS+=(-map "$WORK/pool"            /pool)
 [[ "$PROVISION" -eq 1 ]]    && MAP_ARGS+=(-map "$WORK/provision"       /provision)
 # offline-bundle map (+ apt enable/restore helpers; avoid nested sh -c find \( \))
@@ -448,6 +548,14 @@ if [[ "$PROVISION" -eq 1 ]]; then
   xorriso -osirrox on -indev "$OUT_ISO" -extract /nocloud/user-data "$WORK/v-user-data" 2>/dev/null
   grep -q 'run-all.sh' "$WORK/v-user-data" \
     || die "user-data 里没有调用 run-all.sh"
+fi
+if [[ "$EDITION" == "desktop" ]]; then
+  xorriso -indev "$OUT_ISO" -ls / 2>/dev/null | grep -q 'autoinstall.yaml' \
+    || die "Desktop: /autoinstall.yaml 未写入"
+  xorriso -osirrox on -indev "$OUT_ISO" -extract /nocloud/user-data "$WORK/v-ud-desktop" 2>/dev/null
+  grep -q 'id: '"$DESKTOP_SOURCE_ID" "$WORK/v-ud-desktop" \
+    || die "Desktop: user-data 里 source.id 不是 $DESKTOP_SOURCE_ID"
+  ok "Desktop: source=$DESKTOP_SOURCE_ID, /autoinstall.yaml 兜底已写入"
 fi
 ok "/nocloud 与 grub 参数均已就位"
 

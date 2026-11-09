@@ -9,7 +9,7 @@ pass() { printf '[pass] %s\n' "$*"; }
 fail() { printf '[fail] %s\n' "$*" >&2; FAIL=1; }
 
 echo "== python syntax =="
-if python3 -m py_compile tools/patch-grub.py tools/render-user-data.py; then
+if python3 -m py_compile tools/patch-grub.py tools/render-user-data.py tools/detect-edition.py; then
   pass "py_compile"
 else
   fail "py_compile"
@@ -189,6 +189,132 @@ else
   fail "network none omits section/late"
 fi
 
+
+echo "== desktop 24.04: edition detection =="
+det_d="$(python3 tools/detect-edition.py --install-sources test/fixtures/desktop-2404/install-sources.yaml --disk-info test/fixtures/desktop-2404/disk-info)"
+det_s="$(python3 tools/detect-edition.py --install-sources test/fixtures/server-2404/install-sources.yaml --disk-info test/fixtures/server-2404/disk-info)"
+det_info_only="$(python3 tools/detect-edition.py --install-sources /nonexistent --disk-info test/fixtures/server-2404/disk-info)"
+det_2204d="$(printf 'Ubuntu 22.04.5 LTS "Jammy Jellyfish" - Release amd64 (20240911)' > "$tmp/info2204"; python3 tools/detect-edition.py --install-sources /nonexistent --disk-info "$tmp/info2204")"
+if grep -qx 'EDITION=desktop' <<<"$det_d" && grep -qx 'DEFAULT_SOURCE=ubuntu-desktop-minimal' <<<"$det_d" \
+  && grep -qx 'SOURCES=ubuntu-desktop-minimal,ubuntu-desktop' <<<"$det_d" && grep -qx 'RELEASE=24.04' <<<"$det_d"; then
+  pass "detect desktop 24.04 (variant: desktop)"
+else
+  fail "detect desktop 24.04: $det_d"
+fi
+if grep -qx 'EDITION=server' <<<"$det_s" && grep -qx 'SUBIQUITY=1' <<<"$det_s"; then
+  pass "detect server 24.04"
+else
+  fail "detect server 24.04: $det_s"
+fi
+if grep -qx 'EDITION=server' <<<"$det_info_only"; then
+  pass "detect server via .disk/info fallback"
+else
+  fail "detect server via .disk/info fallback: $det_info_only"
+fi
+if grep -qx 'EDITION=desktop' <<<"$det_2204d" && grep -qx 'SUBIQUITY=0' <<<"$det_2204d"; then
+  pass "22.04 desktop flagged non-subiquity (build-iso refuses)"
+else
+  fail "22.04 desktop detection: $det_2204d"
+fi
+
+echo "== desktop 24.04: grub menu regex =="
+DESKTOP_MENU_REGEX='^(Try or Install Ubuntu|Ubuntu \(safe graphics\))$'
+for f in grub.cfg loopback.cfg; do
+  cp "test/fixtures/desktop-2404/$f" "$tmp/d-$f"
+  chmod u+w "$tmp/d-$f"
+  python3 tools/patch-grub.py --file "$tmp/d-$f" --menu-regex "$DESKTOP_MENU_REGEX" \
+    --params 'autoinstall ds=nocloud\;s=/cdrom/nocloud/' --timeout 3 >/dev/null || fail "desktop patch $f"
+  n="$(grep -c 'autoinstall ds=nocloud\\;s=/cdrom/nocloud/ ---' "$tmp/d-$f" || true)"
+  if [[ "$n" -eq 2 ]]; then
+    pass "desktop $f: Try or Install + safe graphics patched ($n)"
+  else
+    fail "desktop $f: expected 2 patched lines, got $n"
+  fi
+done
+# shellcheck disable=SC2016  # literal GRUB variable, not a shell expansion
+if grep -q 'iso-scan/filename=${iso_path} autoinstall' "$tmp/d-loopback.cfg"; then
+  pass "desktop loopback keeps iso-scan before autoinstall"
+else
+  fail "desktop loopback iso-scan ordering"
+fi
+# desktop regex must NOT match server menu titles
+cp test/fixtures/grub.cfg "$tmp/s-grub.cfg"
+if python3 tools/patch-grub.py --file "$tmp/s-grub.cfg" --menu-regex "$DESKTOP_MENU_REGEX" \
+  --params 'autoinstall ds=nocloud\;s=/cdrom/nocloud/' --timeout 3 >/dev/null 2>&1; then
+  fail "desktop regex should not match server grub"
+else
+  pass "desktop regex does not match server menu"
+fi
+
+echo "== desktop 24.04: render =="
+if python3 tools/render-user-data.py \
+  --template autoinstall/user-data.tmpl \
+  --out "$tmp/user-data-desktop" \
+  --password-hash "$HASH" \
+  --username alice \
+  --edition desktop \
+  --ssh-authorized-keys test/fixtures/authorized_keys \
+  --provision >/dev/null; then
+  :
+else
+  fail "desktop render"
+fi
+if python3 -c "
+import yaml
+d=yaml.safe_load(open('$tmp/user-data-desktop'))['autoinstall']
+assert d['source']['id']=='ubuntu-desktop-minimal', d.get('source')
+assert d['identity']['realname']=='alice' and d['identity']['username']=='alice'
+assert 'network' not in d, 'desktop must not set autoinstall.network'
+assert d['interactive-sections']==['storage']
+assert d['ssh']['install-server'] is True
+late=[str(c) for c in d['late-commands']]
+net=[c for c in late if '50-autoinstall-dhcp.yaml' in c and 'printf' in c]
+assert net and 'renderer: NetworkManager' in net[0], net
+assert any('write-authorized-keys.sh' in c for c in late)
+assert any('run-all.sh' in c for c in late)
+"; then
+  pass "desktop: source minimal, realname, no network key, NM renderer DHCP, storage interactive"
+else
+  fail "desktop render semantics"
+fi
+
+if python3 tools/render-user-data.py \
+  --template autoinstall/user-data.tmpl \
+  --out "$tmp/user-data-desktop-off" \
+  --password-hash "$HASH" \
+  --edition desktop --desktop-source standard --realname 'Ops Team' \
+  --offline --full-offline --network none --provision >/dev/null; then
+  :
+else
+  fail "desktop full-offline render"
+fi
+if python3 -c "
+import yaml
+d=yaml.safe_load(open('$tmp/user-data-desktop-off'))['autoinstall']
+assert d['source']['id']=='ubuntu-desktop'
+assert d['identity']['realname']=='Ops Team'
+assert d['ssh']['install-server'] is False, 'desktop ISO has no openssh-server; offline must defer to 10-openssh'
+assert d['apt']['fallback']=='offline-install'
+late=[str(c) for c in d['late-commands']]
+assert any('enable-offline-apt' in c for c in late)
+assert not any('50-autoinstall-dhcp.yaml' in c for c in late)
+"; then
+  pass "desktop full-offline: standard source, ssh deferred to bundle, network none"
+else
+  fail "desktop full-offline semantics"
+fi
+
+echo "== server render has no desktop keys =="
+if python3 -c "
+import yaml
+d=yaml.safe_load(open('$tmp/user-data-dhcp'))['autoinstall']
+assert 'source' not in d and 'realname' not in d['identity']
+assert d['ssh']['install-server'] is True
+"; then
+  pass "server: no source/realname, install-server true"
+else
+  fail "server render leaked desktop keys"
+fi
 
 echo "== 00-base skips installed pkgs =="
 if grep -q 'filter_missing' software/00-base.sh && grep -q 'skip already installed' software/00-base.sh; then

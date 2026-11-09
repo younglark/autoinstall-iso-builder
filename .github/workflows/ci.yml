@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, "fix/**"]
+    branches: [main, "fix/**", "feat/**"]
   pull_request:
 
 jobs:
@@ -23,7 +23,7 @@ jobs:
           shellcheck -e SC2054,SC2001 -x test/qemu-smoke.sh
 
       - name: Python syntax
-        run: python3 -m py_compile tools/patch-grub.py tools/render-user-data.py
+        run: python3 -m py_compile tools/patch-grub.py tools/render-user-data.py tools/detect-edition.py
 
       - name: Local validators (render / grub / skip / yaml)
         run: bash test/local-check.sh

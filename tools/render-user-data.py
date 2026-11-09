@@ -64,9 +64,21 @@ def build_apt_primary_block(mirror: str, full_offline: bool) -> str:
     )
 
 
-def build_network_block(mode: str) -> str:
-    """autoinstall.network 段。none 时返回空串(省略该键)。"""
-    if mode == "none":
+# 桌面版: 目标系统由 NetworkManager 管理网络; 同样按 en*/eth* 通配 DHCP,
+# 但 renderer 必须是 NetworkManager, 否则网卡在 GNOME 里显示「未托管」。
+DHCP_NETPLAN_NM = DHCP_NETPLAN.replace(
+    "network:\n  version: 2\n", "network:\n  version: 2\n  renderer: NetworkManager\n", 1
+)
+
+
+def build_network_block(mode: str, edition: str = "server") -> str:
+    """autoinstall.network 段。none 时返回空串(省略该键)。
+
+    desktop: 也省略。桌面安装器的 live 会话由 NetworkManager 联网, 在 autoinstall
+    里塞 networkd 风格的 netplan 会与之打架; 目标系统的 DHCP 由 late-command 写入
+    renderer: NetworkManager 的 netplan。
+    """
+    if mode == "none" or edition == "desktop":
         return ""
     # DHCP_NETPLAN starts with "network:"; re-key under autoinstall indent (2 spaces)
     body = DHCP_NETPLAN.strip()
@@ -78,6 +90,35 @@ def build_network_block(mode: str) -> str:
     return "\n".join(out) + "\n"
 
 
+def yaml_dq(v: str) -> str:
+    return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def build_realname_line(realname: str) -> str:
+    if not realname:
+        return ""
+    return f"    realname: {yaml_dq(realname)}"
+
+
+DESKTOP_SOURCE_ALIASES = {
+    "minimal": "ubuntu-desktop-minimal",
+    "standard": "ubuntu-desktop",
+    "full": "ubuntu-desktop",
+}
+
+
+def resolve_desktop_source(value: str) -> str:
+    v = (value or "minimal").strip()
+    return DESKTOP_SOURCE_ALIASES.get(v, v)
+
+
+def build_source_block(edition: str, source_id: str) -> str:
+    """server: 省略 (沿用 ISO 默认 ubuntu-server); desktop: 显式写 source.id。"""
+    if edition != "desktop":
+        return ""
+    return "\n".join(["  source:", f"    id: {source_id}", ""])
+
+
 def build_interactive_sections_block(auto_disk: bool) -> str:
     """Default: stop on storage screen (layout values used as UI defaults).
     --auto-disk: fully unattended (dangerous: auto-wipes match size largest).
@@ -87,13 +128,14 @@ def build_interactive_sections_block(auto_disk: bool) -> str:
     return "  interactive-sections:\n    - storage"
 
 
-def build_dhcp_late_commands() -> list[str]:
+def build_dhcp_late_commands(edition: str = "server") -> list[str]:
     """
     Subiquity 在无显式 network 时会按「安装时探测到的网卡」写 00-installer-config.yaml;
     离线无 NIC 装机后首启就没有 DHCP。即使有 autoinstall.network (match 通配),
     仍用 late-commands 落盘 50-autoinstall-dhcp.yaml 并关掉 cloud-init 网络改写, 避免冲突。
     """
-    body_lines = DHCP_NETPLAN.rstrip("\n").splitlines()
+    netplan = DHCP_NETPLAN_NM if edition == "desktop" else DHCP_NETPLAN
+    body_lines = netplan.rstrip("\n").splitlines()
     quoted = " ".join("'" + line.replace("'", "'\\''") + "'" for line in body_lines)
     return [
         "mkdir -p /target/etc/netplan /target/etc/cloud/cloud.cfg.d",
@@ -112,6 +154,7 @@ def build_late_commands(
     provision: bool,
     full_offline: bool,
     network: str,
+    edition: str = "server",
     username: str = "ops",
     auth_keys: list[str] | None = None,
 ):
@@ -148,7 +191,7 @@ def build_late_commands(
         )
 
     if network == "dhcp":
-        cmds += build_dhcp_late_commands()
+        cmds += build_dhcp_late_commands(edition)
 
     # Subiquity ssh.authorized-keys 偶发未写入家目录; ISO 上的脚本再落盘一次。
     if auth_keys:
@@ -213,6 +256,18 @@ def main() -> int:
         help="dhcp(默认): 写入 match en*/eth* 的 netplan + late-command; none: 不写",
     )
     ap.add_argument(
+        "--edition",
+        default="server",
+        choices=["server", "desktop"],
+        help="server(默认) | desktop (Ubuntu 24.04 Desktop, ubuntu-desktop-bootstrap)",
+    )
+    ap.add_argument(
+        "--desktop-source",
+        default="minimal",
+        help="desktop 安装源: minimal(=ubuntu-desktop-minimal, 默认) | standard(=ubuntu-desktop) | 任意 source id",
+    )
+    ap.add_argument("--realname", default="", help="identity.realname; desktop 默认等于 username")
+    ap.add_argument(
         "--auto-disk",
         action="store_true",
         help=(
@@ -239,7 +294,13 @@ def main() -> int:
         return 2
 
     network = args.network
+    edition = args.edition
     full_offline = bool(args.full_offline)
+    source_id = resolve_desktop_source(args.desktop_source) if edition == "desktop" else ""
+    realname = args.realname or (args.username if edition == "desktop" else "")
+    # Desktop ISO 不带 openssh-server (官方文档明确), 安装器阶段装 ssh 需要联网;
+    # 全离线时交给 software/10-openssh.sh 从离线捆绑安装。
+    ssh_install_server = "false" if (edition == "desktop" and full_offline) else "true"
     offline = bool(args.offline) or full_offline
 
     # Subiquity only accepts updates in {security, all}; there is no "none".
@@ -262,16 +323,20 @@ def main() -> int:
         "APT_FALLBACK": fallback,
         "UPDATES": updates,
         "SSH_ALLOW_PW": ssh_allow,
+        "SSH_INSTALL_SERVER": ssh_install_server,
+        "REALNAME_LINE": build_realname_line(realname),
+        "SOURCE_BLOCK": build_source_block(edition, source_id),
         "SSH_AUTHORIZED_KEYS_BLOCK": yaml_quoted_list_block(auth_keys, indent="      "),
         "STORAGE_LAYOUT": args.storage_layout,
         "INTERACTIVE_SECTIONS_BLOCK": build_interactive_sections_block(bool(args.auto_disk)),
         "PACKAGES_BLOCK": yaml_list_block(render_packages),
-        "NETWORK_BLOCK": build_network_block(network),
+        "NETWORK_BLOCK": build_network_block(network, edition),
         "LATE_COMMANDS_BLOCK": build_late_commands(
             with_pool=args.with_pool,
             provision=args.provision,
             full_offline=full_offline,
             network=network,
+            edition=edition,
             username=args.username,
             auth_keys=auth_keys,
         ),
@@ -286,15 +351,22 @@ def main() -> int:
             raise KeyError(f"模板里有未知占位符 @@{key}@@")
         return str(values[key])
 
+    # A placeholder alone on its line that renders empty drops the whole line.
+    def sub_line(m):
+        val = str(values.get(m.group(1), m.group(0)))
+        if m.group(1) in values and val == "":
+            return ""
+        return val + "\n"
+
+    tmpl = re.sub(r"^@@([A-Z0-9_]+)@@\n", sub_line, tmpl, flags=re.M)
     rendered = PLACEHOLDER_RE.sub(sub, tmpl)
     leftover = PLACEHOLDER_RE.findall(rendered)
     if leftover:
         sys.stderr.write(f"[FAIL] 未替换的占位符: {leftover}\n")
         return 2
 
-    # When NETWORK_BLOCK is empty, collapse double blank lines left by the placeholder line
-    if network == "none":
-        rendered = re.sub(r"\n{3,}", "\n\n", rendered)
+    # Empty optional blocks leave blank lines behind; collapse them.
+    rendered = re.sub(r"\n{3,}", "\n\n", rendered)
 
     if yaml is not None:
         try:
@@ -324,7 +396,25 @@ def main() -> int:
                     f"[FAIL] 默认应含 interactive-sections: [storage], got {isec!r}\n"
                 )
                 return 2
-        if network == "dhcp":
+        if edition == "desktop":
+            src = (ai.get("source") or {}).get("id")
+            if src != source_id:
+                sys.stderr.write(f"[FAIL] desktop 但 source.id={src!r} != {source_id!r}\n")
+                return 2
+            if not (ai.get("identity") or {}).get("realname"):
+                sys.stderr.write("[FAIL] desktop 缺少 identity.realname\n")
+                return 2
+            if "network" in ai:
+                sys.stderr.write("[FAIL] desktop 不应写 autoinstall.network (live 会话归 NetworkManager)\n")
+                return 2
+            late = ai.get("late-commands") or []
+            if network == "dhcp" and not any(
+                "renderer: NetworkManager" in str(c) and "50-autoinstall-dhcp.yaml" in str(c)
+                for c in late
+            ):
+                sys.stderr.write("[FAIL] desktop dhcp 但 late-commands 未写 renderer: NetworkManager\n")
+                return 2
+        elif network == "dhcp":
             net = ai.get("network") or {}
             eth = net.get("ethernets") or {}
             if "all-en" not in eth or "all-eth" not in eth:
@@ -361,7 +451,9 @@ def main() -> int:
     print(
         f"[ok] wrote {args.out} (packages={len(render_packages)}, "
         f"ssh_keys={len(auth_keys)}, offline={offline}, full_offline={full_offline}, "
-        f"network={network}, auto_disk={bool(args.auto_disk)})"
+        f"network={network}, auto_disk={bool(args.auto_disk)}, edition={edition}"
+        + (f", source={source_id}" if source_id else "")
+        + ")"
     )
     return 0
 

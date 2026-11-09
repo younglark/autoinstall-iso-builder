@@ -1,6 +1,6 @@
 #cloud-config
 # ---------------------------------------------------------------------------
-# Ubuntu Server 22.04 / 24.04 autoinstall 配置模板
+# Ubuntu Server 22.04 / 24.04 与 Ubuntu Desktop 24.04 autoinstall 配置模板
 #
 # 所有双 @ 包裹的占位符由 tools/render-user-data.py 自动替换, 不要手工改这里。
 # apt.primary 用 legacy 格式以兼容 22.04; 全离线时 primary 为空列表 + offline offline-install。
@@ -17,13 +17,15 @@ autoinstall:
   timezone: @@TIMEZONE@@
 
 @@NETWORK_BLOCK@@
+@@SOURCE_BLOCK@@
   identity:
     hostname: @@HOSTNAME@@
     username: @@USERNAME@@
+@@REALNAME_LINE@@
     password: "@@PASSWORD_HASH@@"
 
   ssh:
-    install-server: true
+    install-server: @@SSH_INSTALL_SERVER@@
     allow-pw: @@SSH_ALLOW_PW@@
     authorized-keys:
 @@SSH_AUTHORIZED_KEYS_BLOCK@@

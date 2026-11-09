@@ -1,0 +1,42 @@
+- default: true
+  description:
+    en: A minimal but usable Ubuntu Desktop.
+  id: ubuntu-desktop-minimal
+  locale_support: langpack
+  name:
+    en: Ubuntu Desktop (minimized)
+  path: minimal.squashfs
+  preinstalled_langs:
+  - de
+  - en
+  - es
+  - fr
+  - it
+  - pt
+  - ru
+  - zh
+  - ''
+  size: 4826120192
+  type: fsimage-layered
+  variant: desktop
+- default: false
+  description:
+    en: A full featured Ubuntu Desktop.
+  id: ubuntu-desktop
+  locale_support: langpack
+  name:
+    en: Ubuntu Desktop
+  path: minimal.standard.squashfs
+  preinstalled_langs:
+  - de
+  - en
+  - es
+  - fr
+  - it
+  - pt
+  - ru
+  - zh
+  - ''
+  size: 6521954304
+  type: fsimage-layered
+  variant: desktop
