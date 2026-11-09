@@ -1,12 +1,9 @@
 #!/bin/bash
-# 40-nodejs.sh — Node.js (默认 major=24, 可用 PIN_NODE_MAJOR 覆盖)
-#
-# 三件事都卡在这一个版本上:
-#   * @xai-official/grok  需要 Node >= 20
-#   * opencode-ai         需要 Node >= 18
-#   * openmausbot         需要 Node >= 24   ← 决定了默认下限
-# Ubuntu 24.04 自带 Node 18, 不够用, 所以不装发行版包。
+# 40-nodejs.sh — Node.js (默认 major=24)
 set -euo pipefail
+HERE="$(cd -- "$(dirname -- "$0")" && pwd)"
+# shellcheck disable=SC1091
+[ -f "$HERE/lib-offline.sh" ] && . "$HERE/lib-offline.sh"
 export DEBIAN_FRONTEND=noninteractive
 export HOME=/root
 
@@ -17,20 +14,27 @@ if command -v node >/dev/null && [ "$(node -p 'process.versions.node.split(".")[
   exit 0
 fi
 
-# 首选 NodeSource
-if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o /tmp/nodesource_setup.sh; then
-  bash /tmp/nodesource_setup.sh || echo "warn: NodeSource 脚本返回非零, 继续尝试"
-  apt-get install -y nodejs || true
-fi
-
-# 回退: 官方二进制 tarball (NodeSource 被墙/源不可用时的兜底)
-if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -lt "$NODE_MAJOR" ]; then
-  echo "回退到官方 tarball (v${NODE_MAJOR})"
-  TARBALL=$(curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/" \
-    | grep -oE "node-v${NODE_MAJOR}\\.[0-9.]*-linux-x64\\.tar\\.xz" | head -1)
-  [ -n "$TARBALL" ] || { echo "ERROR: 无法确定 Node ${NODE_MAJOR} tarball 名称"; exit 1; }
-  curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/${TARBALL}" -o /tmp/node.tar.xz
-  tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
+if offline_enabled 2>/dev/null; then
+  echo "offline: 安装 Node (本地 apt 或捆绑 tarball)"
+  if offline_apt_ready 2>/dev/null; then
+    offline_apt_install nodejs || true
+  fi
+  if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -lt "$NODE_MAJOR" ]; then
+    offline_install_node_tarball || { echo "ERROR: 离线 Node 安装失败"; exit 1; }
+  fi
+else
+  if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o /tmp/nodesource_setup.sh; then
+    bash /tmp/nodesource_setup.sh || echo "warn: NodeSource 脚本返回非零, 继续尝试"
+    apt-get install -y nodejs || true
+  fi
+  if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -lt "$NODE_MAJOR" ]; then
+    echo "回退到官方 tarball (v${NODE_MAJOR})"
+    TARBALL=$(curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/" \
+      | grep -oE "node-v${NODE_MAJOR}\\.[0-9.]*-linux-x64\\.tar\\.xz" | head -1)
+    [ -n "$TARBALL" ] || { echo "ERROR: 无法确定 Node ${NODE_MAJOR} tarball 名称"; exit 1; }
+    curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/${TARBALL}" -o /tmp/node.tar.xz
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
+  fi
 fi
 
 node -v

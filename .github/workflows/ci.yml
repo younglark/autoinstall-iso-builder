@@ -18,7 +18,7 @@ jobs:
 
       - name: ShellCheck
         run: |
-          shellcheck -x build-iso.sh software/run-all.sh software/*.sh test/local-check.sh
+          shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh test/local-check.sh
           # SC2054: qemu -drive file=...,if=... commas are inside one argv, not array separators
           shellcheck -e SC2054,SC2001 -x test/qemu-smoke.sh
 

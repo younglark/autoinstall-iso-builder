@@ -31,6 +31,8 @@ SSH_ALLOW_PW="true"
 SSH_AUTHORIZED_KEYS=""
 STORAGE_LAYOUT="direct"
 OFFLINE=0
+OFFLINE_BUNDLE=""
+FULL_OFFLINE=0
 DEBS_DIR=""
 MENU_REGEX="Try or Install"
 DRY_RUN=0
@@ -69,8 +71,10 @@ usage() {
   --ssh-authorized-keys FILE
                         authorized_keys 文件 (每行一把公钥), 写入 autoinstall ssh.authorized-keys
   --storage-layout L    direct | lvm | zfs, 默认 direct
-  --offline             不联网场景: updates=none, apt 允许 offline-install
-  --debs DIR            把目录下所有 .deb 打进 ISO 的 /pool 并离线安装
+  --offline             全离线安装 (需 --offline-bundle; 零外网请求仍装完全部 software/)
+  --offline-bundle DIR  fetch-offline-bundle.sh 产出目录 (含 apt/ npm/ manifest.json)
+  --fetch-offline       构建前自动调用 tools/fetch-offline-bundle.sh (需 docker)
+  --debs DIR            把目录下所有 .deb 打进 ISO 的 /pool 并离线安装 (旧局部离线)
   --no-provision        不执行 software/ 下的软件预装脚本
   --strict              任一软件装失败就中止安装 (默认: 记日志继续)
   --skip "30 70"        跳过脚本: 编号前缀或完整名均可 (30 或 30-jenkins)
@@ -119,6 +123,8 @@ while [[ $# -gt 0 ]]; do
     --ssh-authorized-keys) SSH_AUTHORIZED_KEYS="$2"; shift 2 ;;
     --storage-layout) STORAGE_LAYOUT="$2"; shift 2 ;;
     --offline)        OFFLINE=1; shift ;;
+    --offline-bundle) OFFLINE_BUNDLE="$2"; OFFLINE=1; shift 2 ;;
+    --fetch-offline)  FETCH_OFFLINE=1; OFFLINE=1; shift ;;
     --debs)           DEBS_DIR="$2"; shift 2 ;;
     --menu-regex)     MENU_REGEX="$2"; shift 2 ;;
     --no-provision)   PROVISION=0; shift ;;
@@ -182,6 +188,36 @@ elif [[ -n "$ISO_SHA256" ]]; then
   verify_iso_sha256 "$ISO_SHA256"
 fi
 
+# ---------------------------------------------------------------- 全离线捆绑
+if [[ "${FETCH_OFFLINE:-0}" -eq 1 ]]; then
+  REL_HINT="noble"
+  if [[ -n "$SRC_ISO" ]]; then
+    base="$(basename -- "$SRC_ISO")"
+    case "$base" in
+      *22.04*|*jammy*) REL_HINT=jammy ;;
+      *24.04*|*noble*) REL_HINT=noble ;;
+    esac
+  fi
+  OB_OUT="${OFFLINE_BUNDLE:-$SCRIPT_DIR/cache/offline-bundles/${REL_HINT}-amd64}"
+  log "自动抓取离线捆绑 -> $OB_OUT"
+  FETCH_ARGS=(--release "$REL_HINT" --out "$OB_OUT" --packages "$PACKAGES"
+    --pin-node "$PIN_NODE_MAJOR" --pin-grok "$PIN_GROK"
+    --pin-opencode "$PIN_OPENCODE" --pin-openmausbot "$PIN_OPENMAUSBOT")
+  bash "$SCRIPT_DIR/tools/fetch-offline-bundle.sh" "${FETCH_ARGS[@]}"
+  OFFLINE_BUNDLE="$OB_OUT"
+fi
+
+if [[ -n "$OFFLINE_BUNDLE" ]]; then
+  [[ -d "$OFFLINE_BUNDLE" ]] || die "--offline-bundle 目录不存在: $OFFLINE_BUNDLE"
+  [[ -f "$OFFLINE_BUNDLE/manifest.json" ]] || die "不像离线捆绑 (缺 manifest.json): $OFFLINE_BUNDLE"
+  [[ -d "$OFFLINE_BUNDLE/apt" ]] || die "不像离线捆绑 (缺 apt/): $OFFLINE_BUNDLE"
+  OFFLINE=1
+  FULL_OFFLINE=1
+  log "全离线捆绑: $OFFLINE_BUNDLE ($(du -sh "$OFFLINE_BUNDLE" | cut -f1))"
+elif [[ "$OFFLINE" -eq 1 && "$PROVISION" -eq 1 ]]; then
+  die "--offline 且启用 provision 时必须提供 --offline-bundle DIR (或 --fetch-offline)。\n  先运行: ./tools/fetch-offline-bundle.sh --release noble --out cache/offline-bundles/noble-amd64"
+fi
+
 for bin in xorriso python3; do
   command -v "$bin" >/dev/null || die "缺少依赖: $bin   (apt install xorriso python3)"
 done
@@ -230,6 +266,7 @@ RENDER_ARGS=(
 )
 [[ -n "$SSH_AUTHORIZED_KEYS" ]] && RENDER_ARGS+=(--ssh-authorized-keys "$SSH_AUTHORIZED_KEYS")
 [[ "$OFFLINE" -eq 1 ]] && RENDER_ARGS+=(--offline)
+[[ "$FULL_OFFLINE" -eq 1 ]] && RENDER_ARGS+=(--full-offline)
 [[ "$WITH_POOL" -eq 1 ]] && RENDER_ARGS+=(--with-pool)
 [[ "$PROVISION" -eq 1 ]] && RENDER_ARGS+=(--provision)
 
@@ -261,6 +298,9 @@ PIN_NODE_MAJOR=$PIN_NODE_MAJOR
 PIN_GROK=$PIN_GROK
 PIN_OPENCODE=$PIN_OPENCODE
 PIN_OPENMAUSBOT=$PIN_OPENMAUSBOT
+OFFLINE=$FULL_OFFLINE
+OFFLINE_ROOT=/opt/offline
+EXTRA_APT_PACKAGES=$PACKAGES
 ENV
   SCRIPT_COUNT=$(find "$WORK/provision" -maxdepth 1 -name '[0-9][0-9]-*.sh' | wc -l)
   ok "已打包 $SCRIPT_COUNT 个软件预装脚本 (node>=$PIN_NODE_MAJOR grok=$PIN_GROK)"
@@ -324,6 +364,12 @@ MAP_ARGS=(
 [[ "$HAS_LOOPBACK" -eq 1 ]] && MAP_ARGS+=(-map "$WORK/loopback.cfg" /boot/grub/loopback.cfg)
 [[ "$WITH_POOL" -eq 1 ]]    && MAP_ARGS+=(-map "$WORK/pool"            /pool)
 [[ "$PROVISION" -eq 1 ]]    && MAP_ARGS+=(-map "$WORK/provision"       /provision)
+# offline-bundle map (+ apt enable/restore helpers; avoid nested sh -c find \( \))
+if [[ "$FULL_OFFLINE" -eq 1 ]]; then
+  MAP_ARGS+=(-map "$OFFLINE_BUNDLE" /offline)
+  MAP_ARGS+=(-map "$SCRIPT_DIR/autoinstall/enable-offline-apt.sh" /offline/enable-offline-apt.sh)
+  MAP_ARGS+=(-map "$SCRIPT_DIR/autoinstall/restore-online-apt.sh" /offline/restore-online-apt.sh)
+fi
 
 log "打包 (复制模式, 引导记录 replay)"
 xorriso -indev "$SRC_ISO" -outdev "$OUT_ISO" \
@@ -352,6 +398,15 @@ grep -q 'autoinstall ds=nocloud' "$WORK/verify.cfg" \
 # 确认 GRUB 分号已转义
 grep -qE 'ds=nocloud\\;s=/cdrom/nocloud/' "$WORK/verify.cfg" \
   || die "grub.cfg 里 ds= 分号未转义 (应为 ds=nocloud\\;s=...)"
+if [[ "$FULL_OFFLINE" -eq 1 ]]; then
+  xorriso -indev "$OUT_ISO" -ls /offline 2>/dev/null | grep -q 'manifest.json' \
+    || die "/offline/manifest.json 未写入"
+  xorriso -indev "$OUT_ISO" -ls /offline 2>/dev/null | grep -q 'enable-offline-apt.sh' \
+    || die "/offline/enable-offline-apt.sh 未写入"
+  xorriso -indev "$OUT_ISO" -ls /offline 2>/dev/null | grep -q 'restore-online-apt.sh' \
+    || die "/offline/restore-online-apt.sh 未写入"
+  ok "校验 /offline 捆绑已写入"
+fi
 if [[ "$PROVISION" -eq 1 ]]; then
   xorriso -indev "$OUT_ISO" -ls /provision 2>/dev/null | grep -q 'run-all.sh' \
     || die "/provision/run-all.sh 未写入"

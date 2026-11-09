@@ -4,16 +4,26 @@
 #
 # 装机约 8-15 分钟 (取决于机器)。装完自动关机 (shutdown 时的 reboot + -no-reboot),
 # 随后用 libguestfs 直接读目标盘里的包清单做断言 —— 这是唯一可信的验收方式。
+#
+# 选项:
+#   --uefi          UEFI 固件
+#   --offline-nic   不给虚拟机网卡 (验证全离线捆绑; 需 ISO 已含 /offline)
 # =============================================================================
 set -Eeuo pipefail
 
 ISO="${1:-}"
 shift || true
 MODE="bios"
-[[ "${1:-}" == "--uefi" ]] && MODE="uefi"
+OFFLINE_NIC=0
+for arg in "$@"; do
+  case "$arg" in
+    --uefi) MODE="uefi" ;;
+    --offline-nic) OFFLINE_NIC=1 ;;
+  esac
+done
 
 if [[ -z "$ISO" || ! -f "$ISO" ]]; then
-  echo "用法: $0 <iso> [--uefi]" >&2
+  echo "用法: $0 <iso> [--uefi] [--offline-nic]" >&2
   exit 1
 fi
 
@@ -30,10 +40,28 @@ QEMU_ARGS=(
   -drive file="$DISK",if=virtio,format=qcow2
   -cdrom "$ISO"
   -boot order=d,menu=off
-  -nographic -serial file:"$LOG" -monitor none
+  -display none -serial file:"$LOG" -monitor none
   -no-reboot
 )
-[[ -x /dev/kvm ]] && QEMU_ARGS+=(-enable-kvm -cpu host)
+# Probe KVM: nested/broken hosts hang with 0% CPU and empty serial. Fall back to TCG.
+if [[ "${FORCE_TCG:-0}" != 1 ]] && { [[ -e /dev/kvm ]] || [[ -c /dev/kvm ]]; }; then
+  if timeout 5 qemu-system-x86_64 -enable-kvm -cpu host -m 256 -nographic -monitor none -nic none 2>/dev/null       | grep -q SeaBIOS; then
+    QEMU_ARGS+=(-enable-kvm -cpu host)
+    echo "==> KVM 可用"
+  else
+    echo "==> /dev/kvm 存在但不可用 (探测无 SeaBIOS), 改用 TCG (会很慢)"
+  fi
+else
+  echo "==> TCG 模式 (无 KVM 或 FORCE_TCG=1)"
+fi
+
+if [[ "$OFFLINE_NIC" -eq 1 ]]; then
+  # 无网卡: 证明安装不依赖外网
+  QEMU_ARGS+=(-nic none)
+  echo "==> 离线网卡模式 (-nic none)"
+else
+  QEMU_ARGS+=(-nic user,model=virtio)
+fi
 
 if [[ "$MODE" == "uefi" ]]; then
   OVMF=""
@@ -53,7 +81,7 @@ fi
 
 echo "==> 串口日志: $LOG"
 echo "==> 开始装机, 完成后自动退出..."
-timeout 3600 qemu-system-x86_64 "${QEMU_ARGS[@]}" || echo "(qemu 退出码 $?)"
+timeout "${QEMU_TIMEOUT:-7200}" qemu-system-x86_64 "${QEMU_ARGS[@]}" || echo "(qemu 退出码 $?)"
 
 echo
 if command -v virt-cat >/dev/null 2>&1; then

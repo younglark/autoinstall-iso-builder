@@ -138,7 +138,7 @@ cat /var/log/autoinstall/20-docker.log
 | `--no-provision` | 不执行 `software/`，只做裸装机 |
 | `--skip "30 70"` | 跳过脚本：编号前缀或完整名均可（`30` / `30-jenkins`） |
 | `--strict` | 任一软件装失败就中止安装（默认记日志继续） |
-| `--offline` | `updates: none` + apt 允许 `offline-install` |
+| `--offline` | apt `fallback: offline-install`（`updates` 仍为 Subiquity 合法值 `security`；无 `none`） |
 | `--debs DIR` | 把目录下 `.deb` 打进 `/pool` 并离线安装 |
 | `--storage-layout` | `direct`（默认）/ `lvm` / `zfs` |
 | `--ssh-allow-pw` | 未注入公钥时**必须为 true**，否则装完登不进去；与 `10-openssh.sh` 保持一致 |
@@ -153,7 +153,8 @@ cat /var/log/autoinstall/20-docker.log
 
 - 推荐先验证官方 `SHA256SUMS.gpg`（用 Ubuntu CD Image signing key），再传 `--iso-sha256sums SHA256SUMS`；脚本只验证 SHA256，不替代 GPG 签名验证。
 - `--pin-grok 具体版本` / `--pin-opencode 具体版本` / `--pin-openmausbot 具体版本` 可避免 `latest` 漂移。默认仍为 `latest`，以保持原有行为。
-- `--pin-node 24` 只钉主版本；NodeSource、Docker、Jenkins 仍跟随其稳定仓库，尚未做完整 apt 版本锁。若要求严格复现，应使用内网快照源并固定 `.deb` 版本。当前默认行为不变，不承诺 bit-for-bit 可复现。
+- `--pin-node 24` 只钉主版本；NodeSource、Docker、Jenkins 仍跟随其稳定仓库，尚未做完整 apt 版本锁。
+- Jenkins apt 源自 2026-01 起需 `jenkins.io-2026.key`（2023 密钥已过期）；本仓库脚本已切换。若要求严格复现，应使用内网快照源并固定 `.deb` 版本。当前默认行为不变，不承诺 bit-for-bit 可复现。
 - `apt.primary` 暂保留 legacy 格式以兼容 22.04 的旧版 Subiquity（且安装器刷新关闭）；24.04-only 项目可迁移到 `mirror-selection.primary`。
 
 ### 快速校验与 CI
@@ -164,9 +165,54 @@ bash test/local-check.sh
 
 覆盖 Python 语法、grub 转义/幂等/旧参数修复、user-data YAML、公钥、pool-before-provision 顺序与 skip 前缀。`.github/workflows/ci.yml` 在 PR/push 上运行 ShellCheck 与这些校验。完整 `build-iso.sh --dry-run` 仍需真实 ISO；BIOS/UEFI/QEMU 与 Secure Boot 验证见下文，不在轻量 CI 下载 ISO。
 
+### 全离线模式（`--offline` + `--offline-bundle`）
+
+目标：装机过程**零外网请求**，装完仍有 Docker / Jenkins / Node 24 / Grok / OpenCode / OpenMausBot。
+
+```bash
+# 1) 构建期联网抓取捆绑（按发行版缓存，可复用）
+./tools/fetch-offline-bundle.sh --release noble --out cache/offline-bundles/noble-amd64 \
+  --packages "vim,curl,htop,net-tools"
+
+# jammy (22.04) 同理:
+# ./tools/fetch-offline-bundle.sh --release jammy --out cache/offline-bundles/jammy-amd64
+
+# 2) 烧进 ISO
+./build-iso.sh --iso ubuntu-24.04.x-live-server-amd64.iso \
+  --out out/ubuntu-24.04-offline.iso \
+  --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
+  --offline --offline-bundle cache/offline-bundles/noble-amd64 \
+  --packages "vim,curl,htop,net-tools"
+
+# 或一步：--fetch-offline 自动抓取后再打包
+# ./build-iso.sh ... --offline --fetch-offline --packages "vim,curl"
+
+# 3) 无网卡冒烟（需本机 qemu）
+bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
+```
+
+原理简述：
+
+| 阶段 | 行为 |
+|---|---|
+| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + Jenkins + NodeSource），`dpkg-scanpackages` 生成本地 apt 源；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball 兜底 |
+| ISO | 写入 `/offline/{apt,npm,node,manifest.json}` |
+| 装机 late-commands | 拷到 `/opt/offline`，临时只启用 `deb [trusted=yes] file:/opt/offline/apt ./`，再跑 `software/`（`OFFLINE=1`） |
+| `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压 |
+
+体积与缓存：
+
+- 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；有 `manifest.json` 时默认复用（`--force` 重建）。
+- 实测（本仓库验证机，2026-11）：**noble+npm ≈ 648 MB**（150 debs + npm prefix ≈329 MB 压缩）；**jammy apt-only（--skip-npm）≈ 312 MB**（127 debs）。含 OpenMausBot 时 npm 树是大头；U 盘请预留 ≥ 镜像+捆绑余量。
+- `--packages` 会并进捆绑；全离线时 autoinstall 的 `packages:` 置空，改由 `00-base.sh` 从本地 apt 安装，避免安装器阶段无索引。
+
+兼容：`--debs DIR` 旧局部离线仍可用；与全离线捆绑互斥场景下优先 `--offline-bundle`。
+
 ### 离线限制（重要）
 
-`--offline` 只对 **apt 包**有效。当前这套软件栈里：
+> 若使用上文「全离线模式」，可忽略本段。
+
+**无捆绑**时的旧 `--offline` 只影响 autoinstall apt fallback；第三方脚本仍会联网。当前这套软件栈里：
 
 - Docker / Jenkins / NodeSource 走各自第三方仓库 → 需要下载 `.deb` 后配 `--debs`
 - Grok / OpenCode / OpenMausBot 是 **npm 全局包** → 需要预建 npm 缓存（`npm cache add`）或打成 tarball 后离线 `npm install -g ./xxx.tgz`

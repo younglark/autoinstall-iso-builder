@@ -3,15 +3,11 @@
 # Ubuntu Server 22.04 / 24.04 autoinstall 配置模板
 #
 # 所有双 @ 包裹的占位符由 tools/render-user-data.py 自动替换, 不要手工改这里。
-# 校验:  python3 -c "import yaml,sys;yaml.safe_load(open('user-data'))"
-#
-# apt.primary 仍用 legacy 格式 (非 mirror-selection), 以同时兼容 22.04 / 24.04
-# 且 refresh-installer.update=false 时的旧版 Subiquity。
+# apt.primary 用 legacy 格式以兼容 22.04; 全离线时 primary 为空列表 + offline offline-install。
 # ---------------------------------------------------------------------------
 autoinstall:
   version: 1
 
-  # 无人值守的关键: 不弹出任何交互页面
   interactive-sections: []
 
   locale: @@LOCALE@@
@@ -23,12 +19,10 @@ autoinstall:
   identity:
     hostname: @@HOSTNAME@@
     username: @@USERNAME@@
-    # 必须是 crypt(3) 哈希, 明文会被 subiquity 拒绝
     password: "@@PASSWORD_HASH@@"
 
   ssh:
     install-server: true
-    # 未注入 authorized-keys 时必须为 true, 否则装完无法登录
     allow-pw: @@SSH_ALLOW_PW@@
     authorized-keys:
 @@SSH_AUTHORIZED_KEYS_BLOCK@@
@@ -36,14 +30,10 @@ autoinstall:
   apt:
     geoip: false
     preserve_sources_list: false
-    primary:
-      - arches: [amd64, i386]
-        uri: "@@APT_MIRROR@@"
-    # 断网时不要卡在 apt 阶段, 直接降级为离线安装
+@@APT_PRIMARY_BLOCK@@
     fallback: @@APT_FALLBACK@@
 
   refresh-installer:
-    # 避免安装器联网自更新导致同一镜像行为漂移
     update: false
 
   updates: @@UPDATES@@
@@ -51,7 +41,6 @@ autoinstall:
   storage:
     layout:
       name: @@STORAGE_LAYOUT@@
-      # 擦除整盘; 目标机有多块盘时请改用 match: 精确匹配
       match:
         size: largest
 
@@ -61,7 +50,6 @@ autoinstall:
   late-commands:
 @@LATE_COMMANDS_BLOCK@@
 
-  # 安装失败时把日志落到目标盘, 便于事后定位
   error-commands:
     - [sh, -c, "mkdir -p /target/var/log/autoinstall && cp -a /var/log/installer /target/var/log/autoinstall/ 2>/dev/null || true"]
 
