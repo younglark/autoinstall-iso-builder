@@ -4,16 +4,26 @@
 #
 # 装机约 8-15 分钟 (取决于机器)。装完自动关机 (shutdown 时的 reboot + -no-reboot),
 # 随后用 libguestfs 直接读目标盘里的包清单做断言 —— 这是唯一可信的验收方式。
+#
+# 选项:
+#   --uefi          UEFI 固件
+#   --offline-nic   不给虚拟机网卡 (验证全离线捆绑; 需 ISO 已含 /offline)
 # =============================================================================
 set -Eeuo pipefail
 
 ISO="${1:-}"
 shift || true
 MODE="bios"
-[[ "${1:-}" == "--uefi" ]] && MODE="uefi"
+OFFLINE_NIC=0
+for arg in "$@"; do
+  case "$arg" in
+    --uefi) MODE="uefi" ;;
+    --offline-nic) OFFLINE_NIC=1 ;;
+  esac
+done
 
 if [[ -z "$ISO" || ! -f "$ISO" ]]; then
-  echo "用法: $0 <iso> [--uefi]" >&2
+  echo "用法: $0 <iso> [--uefi] [--offline-nic]" >&2
   exit 1
 fi
 
@@ -34,6 +44,14 @@ QEMU_ARGS=(
   -no-reboot
 )
 [[ -x /dev/kvm ]] && QEMU_ARGS+=(-enable-kvm -cpu host)
+
+if [[ "$OFFLINE_NIC" -eq 1 ]]; then
+  # 无网卡: 证明安装不依赖外网
+  QEMU_ARGS+=(-nic none)
+  echo "==> 离线网卡模式 (-nic none)"
+else
+  QEMU_ARGS+=(-nic user,model=virtio)
+fi
 
 if [[ "$MODE" == "uefi" ]]; then
   OVMF=""

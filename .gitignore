@@ -15,3 +15,7 @@ provision-failed.txt
 .DS_Store
 .vscode/
 .idea/
+
+# offline bundles
+cache/
+

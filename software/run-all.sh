@@ -6,6 +6,7 @@
 # 需要"失败即中止"时, 在 provision.env 里设 STRICT=1。
 #
 # --skip 接受编号前缀或完整名: "30 70" 与 "30-jenkins 70-openmausbot" 均可。
+# OFFLINE=1 时各脚本走 /opt/offline 本地源, 零外网请求。
 set -uo pipefail
 
 HERE="$(cd -- "$(dirname -- "$0")" && pwd)"
@@ -16,7 +17,7 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export HOME=/root
 
-# provision.env 由 build-iso.sh 生成, 带 TARGET_USER / STRICT / PROVISION_SKIP / PIN_* / SSH_ALLOW_PW
+# provision.env 由 build-iso.sh 生成
 if [ -f "$HERE/provision.env" ]; then
   # shellcheck disable=SC1091
   . "$HERE/provision.env"
@@ -27,10 +28,15 @@ export PIN_NODE_MAJOR="${PIN_NODE_MAJOR:-24}"
 export PIN_GROK="${PIN_GROK:-latest}"
 export PIN_OPENCODE="${PIN_OPENCODE:-latest}"
 export PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
+export OFFLINE="${OFFLINE:-0}"
+export OFFLINE_ROOT="${OFFLINE_ROOT:-/opt/offline}"
+export EXTRA_APT_PACKAGES="${EXTRA_APT_PACKAGES:-}"
 STRICT="${STRICT:-0}"
 PROVISION_SKIP="${PROVISION_SKIP:-}"
 
-# 接受编号前缀 (30) 或完整脚本名 (30-jenkins)
+# 把 lib-offline.sh 放到 PATH 旁, 供子脚本 source
+export PROVISION_LIB="$HERE/lib-offline.sh"
+
 should_skip() {
   local name="$1" tok
   # shellcheck disable=SC2086
@@ -44,14 +50,20 @@ should_skip() {
 }
 
 echo "=============================================================="
-echo " provisioning target user=$TARGET_USER strict=$STRICT"
+echo " provisioning target user=$TARGET_USER strict=$STRICT offline=$OFFLINE"
 echo " pins: node>=$PIN_NODE_MAJOR grok=$PIN_GROK opencode=$PIN_OPENCODE openmausbot=$PIN_OPENMAUSBOT"
 [ -n "$PROVISION_SKIP" ] && echo " skipping: $PROVISION_SKIP"
+[ -n "$EXTRA_APT_PACKAGES" ] && echo " extra apt: $EXTRA_APT_PACKAGES"
 echo "=============================================================="
 
 : > "$LOG/provision-failed.txt"
 FAILED=""
 DONE=""
+
+# 确保 lib 可被数字脚本找到 (ISO 打包时一并复制)
+if [ ! -f "$HERE/lib-offline.sh" ] && [ -f "${PROVISION_LIB:-}" ]; then
+  cp -a "$PROVISION_LIB" "$HERE/lib-offline.sh" 2>/dev/null || true
+fi
 
 shopt -s nullglob
 for s in "$HERE"/[0-9][0-9]-*.sh; do

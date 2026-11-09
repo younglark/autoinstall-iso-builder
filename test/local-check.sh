@@ -80,6 +80,38 @@ else
   fail "yaml/order check"
 fi
 
+
+echo "== full-offline render =="
+if python3 tools/render-user-data.py \
+  --template autoinstall/user-data.tmpl \
+  --out "$tmp/user-data-offline" \
+  --password-hash "$HASH" \
+  --packages "vim,curl" \
+  --offline --full-offline --provision; then
+  :
+else
+  fail "full-offline render"
+fi
+if python3 -c "import yaml; d=yaml.safe_load(open('$tmp/user-data-offline')); ai=d['autoinstall']; assert ai['updates']=='none'; assert ai['apt']['fallback']=='offline-install'; assert ai['apt'].get('primary') in ([], None) or ai['apt']['primary']==[]; assert ai['packages'] in ([], None); late=ai['late-commands']; assert any('cdrom/offline' in str(c) for c in late); assert any('00-offline-bundle' in str(c) or 'file:/opt/offline/apt' in str(c) for c in late); i_off=next(i for i,c in enumerate(late) if 'offline' in str(c)); i_prov=next(i for i,c in enumerate(late) if 'run-all.sh' in str(c)); assert i_off < i_prov"; then
+  pass "full-offline yaml semantics"
+else
+  fail "full-offline yaml semantics"
+fi
+
+echo "== fetch-offline-bundle.sh syntax =="
+if bash -n tools/fetch-offline-bundle.sh; then
+  pass "fetch-offline-bundle syntax"
+else
+  fail "fetch-offline-bundle syntax"
+fi
+
+echo "== offline lib helpers =="
+if bash -c 'OFFLINE=1 OFFLINE_ROOT=/tmp/nonexistent; . software/lib-offline.sh; offline_enabled || exit 1; offline_apt_ready && exit 1; echo ok'; then
+  pass "lib-offline helpers"
+else
+  fail "lib-offline helpers"
+fi
+
 echo "== skip prefix matching =="
 SKIP_TEST="$(mktemp)"
 cat > "$SKIP_TEST" <<'S'
@@ -127,7 +159,7 @@ fi
 
 echo "== shellcheck (if available) =="
 if command -v shellcheck >/dev/null; then
-  if shellcheck -x build-iso.sh software/run-all.sh software/*.sh test/local-check.sh \
+  if shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh test/local-check.sh \
     && shellcheck -e SC2054,SC2001 -x test/qemu-smoke.sh; then
     pass "shellcheck"
   else
