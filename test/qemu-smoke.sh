@@ -40,10 +40,20 @@ QEMU_ARGS=(
   -drive file="$DISK",if=virtio,format=qcow2
   -cdrom "$ISO"
   -boot order=d,menu=off
-  -nographic -serial file:"$LOG" -monitor none
+  -display none -serial file:"$LOG" -monitor none
   -no-reboot
 )
-[[ -x /dev/kvm ]] && QEMU_ARGS+=(-enable-kvm -cpu host)
+# Probe KVM: nested/broken hosts hang with 0% CPU and empty serial. Fall back to TCG.
+if [[ "${FORCE_TCG:-0}" != 1 ]] && { [[ -e /dev/kvm ]] || [[ -c /dev/kvm ]]; }; then
+  if timeout 5 qemu-system-x86_64 -enable-kvm -cpu host -m 256 -nographic -monitor none -nic none 2>/dev/null       | grep -q SeaBIOS; then
+    QEMU_ARGS+=(-enable-kvm -cpu host)
+    echo "==> KVM 可用"
+  else
+    echo "==> /dev/kvm 存在但不可用 (探测无 SeaBIOS), 改用 TCG (会很慢)"
+  fi
+else
+  echo "==> TCG 模式 (无 KVM 或 FORCE_TCG=1)"
+fi
 
 if [[ "$OFFLINE_NIC" -eq 1 ]]; then
   # 无网卡: 证明安装不依赖外网
@@ -71,7 +81,7 @@ fi
 
 echo "==> 串口日志: $LOG"
 echo "==> 开始装机, 完成后自动退出..."
-timeout 3600 qemu-system-x86_64 "${QEMU_ARGS[@]}" || echo "(qemu 退出码 $?)"
+timeout "${QEMU_TIMEOUT:-7200}" qemu-system-x86_64 "${QEMU_ARGS[@]}" || echo "(qemu 退出码 $?)"
 
 echo
 if command -v virt-cat >/dev/null 2>&1; then

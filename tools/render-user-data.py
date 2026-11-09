@@ -139,7 +139,7 @@ def main() -> int:
     ap.add_argument("--ssh-authorized-keys", default="")
     ap.add_argument("--storage-layout", default="direct", choices=["direct", "lvm", "zfs"])
     ap.add_argument("--offline", action="store_true",
-                    help="apt fallback offline-install + updates none")
+                    help="apt fallback offline-install; updates stays security (Subiquity enum has no none)")
     ap.add_argument("--full-offline", action="store_true",
                     help="全离线: 使用 /cdrom/offline 捆绑, packages 改 late 安装")
     ap.add_argument("--with-pool", action="store_true")
@@ -165,12 +165,11 @@ def main() -> int:
     full_offline = bool(args.full_offline)
     offline = bool(args.offline) or full_offline
 
-    if offline:
-        updates = "none"
-        fallback = "offline-install"
-    else:
-        updates = "security"
-        fallback = "offline-install"
+    # Subiquity only accepts updates in {security, all}; there is no "none".
+    # Offline installs rely on apt.fallback: offline-install so mirror/update
+    # probes do not block when the NIC is absent.
+    updates = "security"
+    fallback = "offline-install"
 
     # 全离线: 不在 autoinstall.packages 装第三方/额外包 (安装器阶段无网/无捆绑索引)
     render_packages = [] if full_offline else packages

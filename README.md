@@ -138,7 +138,7 @@ cat /var/log/autoinstall/20-docker.log
 | `--no-provision` | 不执行 `software/`，只做裸装机 |
 | `--skip "30 70"` | 跳过脚本：编号前缀或完整名均可（`30` / `30-jenkins`） |
 | `--strict` | 任一软件装失败就中止安装（默认记日志继续） |
-| `--offline` | `updates: none` + apt 允许 `offline-install` |
+| `--offline` | apt `fallback: offline-install`（`updates` 仍为 Subiquity 合法值 `security`；无 `none`） |
 | `--debs DIR` | 把目录下 `.deb` 打进 `/pool` 并离线安装 |
 | `--storage-layout` | `direct`（默认）/ `lvm` / `zfs` |
 | `--ssh-allow-pw` | 未注入公钥时**必须为 true**，否则装完登不进去；与 `10-openssh.sh` 保持一致 |
