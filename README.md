@@ -2,7 +2,7 @@
 
 一条命令产出一块自动装机 U 盘：默认停在**硬盘选择**页由你确认（避免误抹盘），确认后自动装完并带全套预装软件。
 
-适用：Ubuntu Server **22.04 / 24.04**（24.04 Desktop 亦可，改 `--menu-regex`）。
+适用：Ubuntu Server **22.04 / 24.04**，以及 Ubuntu **Desktop 24.04**（`--edition desktop`，默认按 ISO 自动识别，见「[Ubuntu Desktop 24.04](#ubuntu-desktop-2404)」）。
 
 ---
 
@@ -106,6 +106,64 @@ bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso --uefi
 
 ---
 
+## Ubuntu Desktop 24.04
+
+24.04 起桌面安装器（`ubuntu-desktop-bootstrap`，Flutter 前端 + Subiquity 后端）与 Server 共用 autoinstall，所以同一套 NoCloud 种子 + grub 注入可直接用于 Desktop ISO。
+
+```bash
+# 校验后构建（--edition 可省略：ISO 会被自动识别为 desktop）
+./build-iso.sh --iso ubuntu-24.04.5.1-desktop-amd64.iso \
+  --iso-sha256sums SHA256SUMS \
+  --out out/ubuntu-24.04-desktop-autoinstall.iso \
+  --edition desktop \
+  --desktop-source minimal \
+  --hostname desk01 --username alice --realname "Alice" \
+  --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
+  --ssh-authorized-keys ~/.ssh/id_ed25519.pub
+
+# 全离线 Desktop：同一份 noble 捆绑可直接复用（见「全离线模式」）
+./build-iso.sh --iso ubuntu-24.04.5.1-desktop-amd64.iso \
+  --out out/ubuntu-24.04-desktop-offline.iso \
+  --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
+  --offline --offline-bundle cache/offline-bundles/noble-amd64
+```
+
+### 与 Server 的差异（脚本自动处理）
+
+| 项 | Server | Desktop 24.04 |
+|---|---|---|
+| 识别 | `install-sources.yaml` 里 `variant: server` | `variant: desktop`（`.disk/info` 兜底） |
+| 注入的菜单 | `Try or Install`（含 `Try or Install Ubuntu Server`） | `Try or Install Ubuntu` **和** `Ubuntu (safe graphics)`（N 卡/新显卡黑屏时用后者，同样自动装）；正则锚定，**不会**误匹配 Server 菜单 |
+| `source.id` | 不写（ISO 默认 `ubuntu-server`） | `ubuntu-desktop-minimal`（默认，与桌面安装器默认一致、体积小）或 `--desktop-source standard` → `ubuntu-desktop`（含 LibreOffice 等） |
+| `identity.realname` | 仅在 `--realname` 时写 | 必写，默认 = `--username` |
+| 网络 | `autoinstall.network` 写 en*/eth* DHCP（networkd） | **不写** `autoinstall.network`（live 会话由 NetworkManager 管，写 networkd 配置会互相打架）；late-command 写 `/etc/netplan/50-autoinstall-dhcp.yaml`，带 `renderer: NetworkManager` + en*/eth* DHCP，并关掉 cloud-init 网络改写。`--network none` 则只保留桌面默认（NetworkManager 自动 DHCP） |
+| SSH | 安装器 `install-server: true`（Server ISO 自带 openssh-server） | 在线：同左，但**需要联网**（官方：Desktop ISO 不含 openssh-server）；全离线：`install-server: false`，改由 `10-openssh.sh` 从离线捆绑安装（因此全离线 Desktop 不允许 `--no-provision`） |
+| 选盘 | 默认停在选盘页 | 同左：图形安装器停在「安装类型/磁盘」页，确认后继续 |
+| 配置投递 | `/nocloud` + 内核参数 | 同左；另在 ISO 根放一份 `/autoinstall.yaml` 兜底（Subiquity 优先级：内核参数 > live 根 > cloud-config > 介质根，正常不会用到） |
+
+`software/*.sh` 在 Desktop 目标上不需要改：Desktop minimal 不带 curl/git/openssh-server，`00-base`/`10-openssh` 会补装；已装的包（ca-certificates、gnupg、jq 等）照旧跳过。Docker / Jenkins / Node / 三个 CLI 与 Server 相同。
+
+### 离线：Desktop 能不能全离线？
+
+能，且**不需要单独的 Desktop 捆绑**。`fetch-offline-bundle.sh` 在最小 `ubuntu:24.04` 容器里强制下载**完整递归依赖闭包**（含容器里已装的库），因此与目标系统已装了什么无关；Desktop 目标上 apt 只会挑缺的/需升级的包。注意：
+
+- Desktop ISO 自带的 `/pool`（约 360 个包，主要是驱动/语言包/引导相关）**不含** openssh-server、curl、git、Docker 等，不能代替捆绑。
+- 桌面本身（GNOME 等）来自 ISO 的 `minimal*.squashfs` 分层镜像，装机阶段本来就不联网。
+- 输出 ISO ≈ 6 GB（+ 捆绑约 0.6–0.8 GB），**只能写 U 盘**（≥ 8 GB），DVD 装不下。
+- 已验证（2026-11）：把 24.04.5.1 Desktop 的 `casper/minimal.squashfs` 解包成 rootfs，在**无网络命名空间**里按 late-commands 顺序执行 `enable-offline-apt.sh` → `run-all.sh` → `restore-online-apt.sh`，9 个脚本全部成功（openssh-server / curl / git / Docker 29 / Jenkins + JDK 21 / Node 24 / grok / opencode / openmausbot），`dpkg --audit` 干净。完整图形装机 E2E 另行在实体机/KVM 上验证。
+
+### 限制与已知问题
+
+- **只支持 24.04+ Desktop**。22.04 Desktop 是 Ubiquity（preseed），没有 `casper/install-sources.yaml`，脚本会直接报错退出。
+- Desktop 安装器是图形界面，串口（`console=ttyS0`）看不到进度；`qemu-smoke.sh` 只能靠装完后读盘断言。Desktop 建议 `QEMU_MEM=8192 QEMU_DISK=40G`。
+- 带 interactive-sections 时 Subiquity 忽略 `reporting`；旧版桌面安装器在部分交互时「确认页」可能显示空白（[ubuntu-desktop-provision#926](https://github.com/canonical/ubuntu-desktop-provision/issues/926)，2026-08 已有人报告修复），返回再前进即可。
+- `drivers` / `codecs` / `oem` 未设置，沿用 Subiquity 默认值。
+- UEFI：24.04 Desktop 的 ESP 里只有 `bootx64/grubx64/mmx64.efi`，没有 grub.cfg 副本，所以改 `/boot/grub/grub.cfg` 即同时对 BIOS/UEFI 生效（已在 24.04.5.1 Desktop ISO 上确认）。
+
+参考：[Autoinstall 参考](https://canonical-subiquity.readthedocs-hosted.com/en/latest/reference/autoinstall-reference.html)（`source.id`、`ssh.install-server`、`interactive-sections`），[Providing autoinstall](https://github.com/canonical/subiquity/blob/main/doc/tutorial/providing-autoinstall.rst)（投递方式与优先级）。
+
+---
+
 ## 注入后 ISO 里到底改了什么
 
 改动全在 ISO 根目录，不碰任何引导二进制：
@@ -116,6 +174,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso --uefi
 /provision/*.sh           # 软件预装脚本 + provision.env
 /boot/grub/grub.cfg       # linux 行追加 autoinstall ds=nocloud\;s=/cdrom/nocloud/
 /boot/grub/loopback.cfg   # 同上（Ventoy / 多启动 U 盘走这个）
+/autoinstall.yaml         # 仅 Desktop：同一份配置的兜底副本
 ```
 
 装到一半出问题，可以单独重跑某个脚本：
@@ -152,7 +211,10 @@ cat /var/log/autoinstall/20-docker.log
 | `--iso-sha256sums FILE` | 按 ISO basename 在 SHA256SUMS 文件中查找校验和；优先于 `--iso-sha256` |
 | `--pin-node N` | Node 主版本（默认 24）；环境变量 `PIN_NODE_MAJOR` |
 | `--pin-grok / --pin-opencode / --pin-openmausbot VER` | npm 包版本（默认 latest）；亦可用 `PIN_GROK` / `PIN_OPENCODE` / `PIN_OPENMAUSBOT` |
-| `--menu-regex` | 要注入的菜单标题正则；Desktop 版用 `Try or Install Ubuntu` |
+| `--edition` | `auto`（默认）/ `server` / `desktop`。`auto` 读 ISO 的 `casper/install-sources.yaml`（`variant: desktop/server`），退回 `.disk/info`；显式指定优先 |
+| `--desktop-source` | 仅 desktop：`minimal`（默认，`ubuntu-desktop-minimal`）/ `standard`（`ubuntu-desktop`）/ 任意 source id；会对照 ISO 的 install-sources.yaml 校验 |
+| `--realname` | `identity.realname`（登录界面显示名）；desktop 默认等于 `--username` |
+| `--menu-regex` | 要注入的菜单标题正则。默认 server `Try or Install`；desktop `^(Try or Install Ubuntu\|Ubuntu \(safe graphics\))$` |
 
 
 ### 默认 DHCP 网络
@@ -191,7 +253,7 @@ cat /var/log/autoinstall/20-docker.log
 bash test/local-check.sh
 ```
 
-覆盖 Python 语法、grub 转义/幂等/旧参数修复、user-data YAML、默认 interactive storage / `--auto-disk`、公钥、pool-before-provision 顺序与 skip 前缀。`.github/workflows/ci.yml` 在 PR/push 上运行 ShellCheck 与这些校验。完整 `build-iso.sh --dry-run` 仍需真实 ISO；BIOS/UEFI/QEMU 与 Secure Boot 验证见下文，不在轻量 CI 下载 ISO。
+覆盖 Python 语法、grub 转义/幂等/旧参数修复、user-data YAML、默认 interactive storage / `--auto-disk`、公钥、pool-before-provision 顺序与 skip 前缀，以及 Desktop 24.04（基于真实 24.04.5.1 Desktop ISO 抽出的 grub.cfg / loopback.cfg / install-sources.yaml 夹具）的版本识别、菜单注入与渲染语义。`.github/workflows/ci.yml` 在 PR/push 上运行 ShellCheck 与这些校验。完整 `build-iso.sh --dry-run` 仍需真实 ISO；BIOS/UEFI/QEMU 与 Secure Boot 验证见下文，不在轻量 CI 下载 ISO。
 
 ### 全离线模式（`--offline` + `--offline-bundle`）
 
@@ -284,7 +346,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 - **22.04 / 24.04**：`preseed` 已彻底废弃，只有 autoinstall；ISO 挂载点都是 `/cdrom`。
 - **24.04**：仍是 casper + subiquity，`/boot/grub/grub.cfg` 与 `loopback.cfg` 结构不变，菜单文案为 `Try or Install Ubuntu Server`，默认正则能匹配。
 - **22.04 注意**：`openjdk-21-jre-headless` 不一定有，脚本会自动退到 17，Jenkins 仍可用。
-- **Desktop 版**：24.04+ 支持 autoinstall，菜单文案是 `Try or Install Ubuntu`，建议补 `identity.realname`。
+- **Desktop 版**：24.04+ 支持（`--edition desktop` 或自动识别），菜单 `Try or Install Ubuntu` / `Ubuntu (safe graphics)` 都会注入，自动补 `identity.realname` 与 `source.id`；22.04 Desktop（Ubiquity）不支持。
 - **镜像点版本升级**：直接拿新 ISO 重跑脚本，`xorriso -boot_image any replay` 会自动适配新的引导布局。
 
 ---

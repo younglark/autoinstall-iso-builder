@@ -33,10 +33,11 @@ WORKDIR="$(mktemp -d -t qemu-smoke-XXXXXX)"
 DISK="$WORKDIR/disk.qcow2"
 LOG="$WORKDIR/serial.log"
 
-qemu-img create -f qcow2 "$DISK" 30G >/dev/null
+# Desktop 24.04 建议 QEMU_MEM=8192 QEMU_DISK=40G (GUI 安装器 + standard 源更吃内存/磁盘)
+qemu-img create -f qcow2 "$DISK" "${QEMU_DISK:-30G}" >/dev/null
 
 QEMU_ARGS=(
-  -m 4096 -smp 2 -machine q35
+  -m "${QEMU_MEM:-4096}" -smp "${QEMU_SMP:-2}" -machine q35
   -drive file="$DISK",if=virtio,format=qcow2
   -cdrom "$ISO"
   -boot order=d,menu=off
