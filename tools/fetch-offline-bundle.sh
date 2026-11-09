@@ -9,6 +9,7 @@
 #     npm/prefix.tar.gz    # 预装的全局 npm 树 (解压到 /usr/local)
 #     node/                # 官方 Node tarball (nodesource 失败时的兜底)
 #     unity-cli/           # Unity CLI 二进制 + version/sha256（不含 Editor）
+#     godot/               # Godot 4.7.2 Linux x86_64 zip + sha512（不含 export templates）
 #     package-list.txt
 #
 # 依赖: docker (推荐), 宿主机 node/npm (打 npm 包)。无 docker 时退出并提示。
@@ -50,7 +51,7 @@ usage() {
   --pin-unity-cli VER   Unity CLI 版本 (默认拉 latest/latest-beta)
   --ubuntu-mirror URL   容器内 Ubuntu 源
   --skip-npm            不打包 npm 全局树 (调试用)
-  --force               忽略已有 manifest, 强制重建 (新加 gh/ripgrep/unity-cli 等时需 --force)
+  --force               忽略已有 manifest, 强制重建 (新加 gh/ripgrep/unity-cli/godot 等时需 --force)
 USAGE
 }
 
@@ -307,7 +308,7 @@ if command -v sudo >/dev/null; then
 fi
 
 # 同步到 OUT (保留可复用)
-rm -rf "$OUT/apt" "$OUT/node" "$OUT/unity-cli" "$OUT/package-list.txt" "$OUT/java-package.txt"
+rm -rf "$OUT/apt" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/package-list.txt" "$OUT/java-package.txt"
 mkdir -p "$OUT"
 cp -a "$WORK/out/." "$OUT/"
 
@@ -385,6 +386,30 @@ printf '%s\n' "$UNITY_SHA256" > "$UNITY_DIR/sha256"
 printf '%s\n' "$UNITY_FILENAME" > "$UNITY_DIR/binary.name"
 ok "Unity CLI $UNITY_VERSION ($(du -h "$UNITY_DIR/unity" | cut -f1))"
 
+# --------------- Godot Engine binary (host; zip only, no export templates) ---------------
+# 官方 4.7.2 Linux x86_64：GitHub releases + SHA512-SUMS.txt
+log "下载 Godot 4.7.2 (linux.x86_64)"
+GODOT_VERSION="4.7.2"
+# asset: Godot_v4.7.2-stable_linux.x86_64.zip
+GODOT_TAG="${GODOT_VERSION}-stable"
+GODOT_ZIP="Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+GODOT_SHA512="9aa00f7a605200940bce3027a567b782f49bd8e940dd06ae9e987bd65aee1b1467edd56ed84fcdcbdd44354bf613bdbb4e5d2913e925850368e150c59ed54c65"
+GODOT_DIR="$OUT/godot"
+mkdir -p "$GODOT_DIR"
+GODOT_URL="https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/${GODOT_ZIP}"
+GODOT_FALLBACK="https://downloads.godotengine.org/?version=${GODOT_VERSION}&flavor=stable&slug=linux.x86_64.zip&platform=linux.64"
+if ! curl -fL --retry 3 --retry-delay 2 -o "$GODOT_DIR/$GODOT_ZIP" "$GODOT_URL"; then
+  warn "GitHub 下载失败，尝试 downloads.godotengine.org"
+  curl -fL --retry 3 --retry-delay 2 -o "$GODOT_DIR/$GODOT_ZIP" "$GODOT_FALLBACK" \
+    || die "下载 Godot 失败: $GODOT_ZIP"
+fi
+echo "${GODOT_SHA512}  $GODOT_DIR/$GODOT_ZIP" | sha512sum -c - \
+  || die "Godot sha512 校验失败"
+printf '%s\n' "$GODOT_VERSION" > "$GODOT_DIR/version"
+printf '%s\n' "$GODOT_SHA512" > "$GODOT_DIR/sha512"
+printf '%s\n' "$GODOT_ZIP" > "$GODOT_DIR/zip.name"
+ok "Godot $GODOT_VERSION ($(du -h "$GODOT_DIR/$GODOT_ZIP" | cut -f1); 不含 export templates)"
+
 # --------------- manifest ---------------
 APT_COUNT=0
 [[ -f "$OUT/package-list.txt" ]] && APT_COUNT=$(wc -l < "$OUT/package-list.txt")
@@ -409,6 +434,15 @@ if ud.exists():
       "filename": (ud/"binary.name").read_text().strip() if (ud/"binary.name").exists() else None,
       "present": (ud/"unity").exists() or any(ud.glob("unity-*")),
     }
+godot_meta = {}
+gd = out/"godot"
+if gd.exists():
+    godot_meta = {
+      "version": (gd/"version").read_text().strip() if (gd/"version").exists() else None,
+      "sha512": (gd/"sha512").read_text().strip() if (gd/"sha512").exists() else None,
+      "zip": (gd/"zip.name").read_text().strip() if (gd/"zip.name").exists() else None,
+      "present": any(gd.glob("Godot_*.zip")) or any(gd.glob("*.zip")),
+    }
 manifest = {
   "schema": 1,
   "release": "${RELEASE}",
@@ -421,6 +455,7 @@ manifest = {
     "opencode": "${PIN_OPENCODE}",
     "openmausbot": "${PIN_OPENMAUSBOT}",
     "unity_cli": "${PIN_UNITY_CLI}" or (unity_meta.get("version") or ""),
+    "godot": "4.7.2",
   },
   "extra_packages": [p.strip() for p in "${PACKAGES}".split(",") if p.strip()],
   "apt_deb_count": len(debs),
@@ -430,6 +465,7 @@ manifest = {
   "node_tarballs": node,
   "java_package": (out/"java-package.txt").read_text().strip() if (out/"java-package.txt").exists() else None,
   "unity_cli": unity_meta or None,
+  "godot": godot_meta or None,
 }
 (out/"manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
 print(json.dumps(manifest, indent=2, ensure_ascii=False))
