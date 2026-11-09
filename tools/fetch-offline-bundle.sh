@@ -6,6 +6,7 @@
 #   <out>/
 #     manifest.json
 #     apt/                 # file:/ apt 源 (Packages + *.deb)
+#     apt-sources/         # 第三方 keyring + .list/.sources (装完写回, 供联网更新)
 #     npm/prefix.tar.gz    # 预装的全局 npm 树 (解压到 /usr/local)
 #     node/                # 官方 Node tarball (nodesource 失败时的兜底)
 #     unity-cli/           # Unity CLI 二进制 + version/sha256（不含 Editor）
@@ -98,7 +99,7 @@ docker info >/dev/null 2>&1 || die "dockerd 不可用: docker info 失败"
 expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" <<'FP'
 import hashlib, json, sys
 payload = {
-  "schema": 2,
+  "schema": 3,
   "release": sys.argv[1],
   "arch": sys.argv[2],
   "pins": {
@@ -113,7 +114,7 @@ payload = {
   "seeds": [
     "git", "ripgrep", "openssh-server", "gh",
     "docker-ce", "nvidia-container-toolkit", "jenkins", "nodejs",
-    "unity-cli", "godot",
+    "unity-cli", "godot", "apt-sources",
   ],
 }
 print(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16])
@@ -221,6 +222,30 @@ curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o /tmp/ns.sh
 bash /tmp/ns.sh
 
 apt-get update
+
+# 导出第三方 apt 源种子: 装机 restore-online-apt.sh 写回 keyring + list/sources
+# 与 software/*.sh 在线路径使用同一批 URL/密钥; 捆绑里有的全部写回 (不按 --skip 裁剪)
+mkdir -p "$OUTDIR/apt-sources/keyrings" "$OUTDIR/apt-sources/sources.list.d"
+cp -a /etc/apt/keyrings/docker.asc \
+  /etc/apt/keyrings/nvidia-container-toolkit.asc \
+  /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+  /etc/apt/keyrings/jenkins-keyring.asc \
+  "$OUTDIR/apt-sources/keyrings/"
+# NodeSource 官方 setup 落在 /usr/share/keyrings + deb822 .sources
+cp -a /usr/share/keyrings/nodesource.gpg "$OUTDIR/apt-sources/keyrings/"
+cp -a /etc/apt/sources.list.d/docker.list \
+  /etc/apt/sources.list.d/nvidia-container-toolkit.list \
+  /etc/apt/sources.list.d/github-cli.list \
+  /etc/apt/sources.list.d/jenkins.list \
+  /etc/apt/sources.list.d/nodesource.sources \
+  "$OUTDIR/apt-sources/sources.list.d/"
+cat > "$OUTDIR/apt-sources/README.txt" <<'ASR'
+Third-party apt keyrings + sources captured at fetch time.
+restore-online-apt.sh copies every seed here onto the installed system after
+leaving offline mode (Docker CE, GitHub CLI, NVIDIA container toolkit,
+Jenkins, NodeSource). Online installs never use this directory.
+ASR
+ls -la "$OUTDIR/apt-sources/keyrings" "$OUTDIR/apt-sources/sources.list.d"
 
 JAVA_PKG=""
 for p in openjdk-21-jre-headless openjdk-17-jre-headless; do
@@ -341,7 +366,7 @@ if command -v sudo >/dev/null; then
 fi
 
 # 同步到 OUT (保留可复用)
-rm -rf "$OUT/apt" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/package-list.txt" "$OUT/java-package.txt"
+rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/package-list.txt" "$OUT/java-package.txt"
 mkdir -p "$OUT"
 cp -a "$WORK/out/." "$OUT/"
 
@@ -476,8 +501,15 @@ if gd.exists():
       "zip": (gd/"zip.name").read_text().strip() if (gd/"zip.name").exists() else None,
       "present": any(gd.glob("Godot_*.zip")) or any(gd.glob("*.zip")),
     }
+apt_src = out/"apt-sources"
+apt_sources_meta = None
+if apt_src.is_dir():
+    apt_sources_meta = {
+      "keyrings": sorted(p.name for p in (apt_src/"keyrings").iterdir() if p.is_file()) if (apt_src/"keyrings").is_dir() else [],
+      "sources": sorted(p.name for p in (apt_src/"sources.list.d").iterdir() if p.is_file()) if (apt_src/"sources.list.d").is_dir() else [],
+    }
 manifest = {
-  "schema": 2,
+  "schema": 3,
   "fingerprint": "${expected_fp}",
   "release": "${RELEASE}",
   "arch": "${ARCH}",
@@ -500,6 +532,7 @@ manifest = {
   "java_package": (out/"java-package.txt").read_text().strip() if (out/"java-package.txt").exists() else None,
   "unity_cli": unity_meta or None,
   "godot": godot_meta or None,
+  "apt_sources": apt_sources_meta,
 }
 (out/"manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
 print(json.dumps(manifest, indent=2, ensure_ascii=False))

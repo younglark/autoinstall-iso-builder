@@ -101,6 +101,22 @@ done
 if [[ "$need_npm" -eq 1 ]]; then
   [[ -f "$BUNDLE/npm/prefix.tar.gz" ]] || missing_dirs+=("npm/prefix.tar.gz")
 fi
+
+# 第三方 apt 源种子 (装完 restore-online-apt 写回; 捆绑内有则全部校验)
+# 不按 --skip 裁剪: fetch 总是抓全套, restore 也总是全写回
+missing_srcs=()
+if [[ ! -d "$BUNDLE/apt-sources/keyrings" || ! -d "$BUNDLE/apt-sources/sources.list.d" ]]; then
+  missing_dirs+=("apt-sources/{keyrings,sources.list.d}/")
+else
+  for f in docker.asc githubcli-archive-keyring.gpg nvidia-container-toolkit.asc \
+           jenkins-keyring.asc nodesource.gpg; do
+    [[ -f "$BUNDLE/apt-sources/keyrings/$f" ]] || missing_srcs+=("apt-sources/keyrings/$f")
+  done
+  for f in docker.list github-cli.list nvidia-container-toolkit.list \
+           jenkins.list nodesource.sources; do
+    [[ -f "$BUNDLE/apt-sources/sources.list.d/$f" ]] || missing_srcs+=("apt-sources/sources.list.d/$f")
+  done
+fi
 if ! should_skip 40-nodejs; then
   if [[ ! -d "$BUNDLE/node" ]] || ! find "$BUNDLE/node" -maxdepth 1 -name 'node-v*-linux-x64.tar.xz' -print -quit | grep -q .; then
     # nodejs deb 已在 NEED_PKGS; tarball 是兜底, 缺也不致命若 deb 在
@@ -152,11 +168,12 @@ done
 hint="请用 --force / --force-fetch 重建离线捆绑:
   ./tools/fetch-offline-bundle.sh --release ${EXPECT_RELEASE:-noble} --out $BUNDLE --force"
 
-if [[ ${#missing[@]} -gt 0 || ${#missing_dirs[@]} -gt 0 || ${#pin_errs[@]} -gt 0 ]]; then
+if [[ ${#missing[@]} -gt 0 || ${#missing_dirs[@]} -gt 0 || ${#missing_srcs[@]} -gt 0 || ${#pin_errs[@]} -gt 0 ]]; then
   {
     echo "离线捆绑不完整或不匹配: $BUNDLE"
     [[ ${#missing[@]} -gt 0 ]] && echo "  apt 缺包: ${missing[*]}"
     [[ ${#missing_dirs[@]} -gt 0 ]] && echo "  缺目录/文件: ${missing_dirs[*]}"
+    [[ ${#missing_srcs[@]} -gt 0 ]] && echo "  缺 apt-sources: ${missing_srcs[*]}"
     for e in "${pin_errs[@]+"${pin_errs[@]}"}"; do echo "  $e"; done
     echo "  $hint"
   } >&2
