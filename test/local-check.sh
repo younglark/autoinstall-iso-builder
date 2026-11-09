@@ -375,6 +375,22 @@ else
   fail "unity-cli script + offline seed + manifest"
 fi
 
+echo "== godot 4.7.2 script + offline seed =="
+if [[ -x software/85-godot.sh ]] \
+  && grep -q '/opt/godot/4.7.2' software/85-godot.sh \
+  && grep -q '/usr/local/bin/godot' software/85-godot.sh \
+  && grep -q 'Godot_v4.7.2-stable_linux.x86_64.zip' software/85-godot.sh \
+  && grep -q 'sha512sum' software/85-godot.sh \
+  && grep -q 'offline_enabled' software/85-godot.sh \
+  && ! grep -qE 'export_templates\.tpz|mono_export_templates' software/85-godot.sh \
+  && grep -q 'godot/' tools/fetch-offline-bundle.sh \
+  && grep -q 'Godot_v4.7.2-stable_linux.x86_64.zip' tools/fetch-offline-bundle.sh \
+  && grep -qE '(^|[[:space:]])godot([[:space:]]|$)' software/99-cleanup.sh; then
+  pass "godot 4.7.2 script + offline seed + manifest (engine only)"
+else
+  fail "godot 4.7.2 script + offline seed + manifest"
+fi
+
 echo "== fetch-offline-bundle recursive depends =="
 if grep -q 'force-download' tools/fetch-offline-bundle.sh && grep -q 'apt-cache depends --recurse' tools/fetch-offline-bundle.sh; then
   pass "fetch recursive depends download"
