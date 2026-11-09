@@ -1,0 +1,10 @@
+# 统一 LF：这批脚本要在 Linux/WSL 里执行，CRLF 会让 bash 直接报错
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.tmpl text eol=lf
+
+*.iso binary
+*.png binary
