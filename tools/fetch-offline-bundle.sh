@@ -198,6 +198,34 @@ apt-get install -y --download-only --reinstall -o Dir::Cache::archives=/var/cach
   "${SEEDS[@]}" || apt-get install -y --download-only -o Dir::Cache::archives=/var/cache/apt/archives \
   "${SEEDS[@]}"
 
+# 已装在容器里的依赖 (如 libcurl4t64) 不会因 --reinstall SEEDS 而被重新下载,
+# 导致离线池缺依赖: curl_X 需要 libcurl4t64(=X) 但池里没有。强制把递归 Depends 也 download。
+mapfile -t _dep_pkgs < <(
+  apt-cache depends --recurse --no-recommends --no-suggests \
+    --no-conflicts --no-breaks --no-replaces --no-enhances \
+    "${SEEDS[@]}" 2>/dev/null \
+    | awk '/^[A-Za-z0-9]/{print $1}' | sort -u
+)
+_dl=()
+for _p in "${_dep_pkgs[@]}"; do
+  # 跳过虚拟包 / 不存在的名字
+  if apt-cache show "$_p" >/dev/null 2>&1; then
+    _dl+=("$_p")
+  fi
+done
+if [ "${#_dl[@]}" -gt 0 ]; then
+  echo "force-download ${#_dl[@]} recursive depends (incl. already-installed)"
+  # 分批, 避免命令行过长; 失败不致命 (个别过渡包可忽略)
+  _i=0
+  while [ "$_i" -lt "${#_dl[@]}" ]; do
+    _chunk=("${_dl[@]:_i:40}")
+    apt-get install -y --download-only --reinstall \
+      -o Dir::Cache::archives=/var/cache/apt/archives \
+      "${_chunk[@]}" || true
+    _i=$((_i + 40))
+  done
+fi
+
 mkdir -p "$OUTDIR/apt"
 # 扁平池: deb [trusted=yes] file:/opt/offline/apt ./
 find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -a {} "$OUTDIR/apt/" \;
