@@ -312,11 +312,14 @@ log "提取 grub 菜单"
 xorriso -osirrox on -indev "$SRC_ISO" \
         -extract /boot/grub/grub.cfg "$WORK/grub.cfg" 2>/dev/null \
   || die "源 ISO 里没有 /boot/grub/grub.cfg, 这不像 Ubuntu Live ISO"
+# ISO Rock Ridge extracts are often mode 0444; patch-grub needs write access.
+chmod u+w "$WORK/grub.cfg" 2>/dev/null || true
 
 HAS_LOOPBACK=0
 if xorriso -osirrox on -indev "$SRC_ISO" \
           -extract /boot/grub/loopback.cfg "$WORK/loopback.cfg" 2>/dev/null; then
   HAS_LOOPBACK=1
+  chmod u+w "$WORK/loopback.cfg" 2>/dev/null || true
 fi
 
 # GRUB 必须转义分号, 否则 ds= 后半段被当成下一条 grub 命令
