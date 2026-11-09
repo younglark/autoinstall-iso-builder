@@ -323,6 +323,18 @@ else
   fail "00-base skip-installed helper"
 fi
 
+echo "== nvidia-container-toolkit script + offline seed =="
+if [[ -x software/25-nvidia-container-toolkit.sh ]] \
+  && grep -q 'nvidia-ctk runtime configure --runtime=docker' software/25-nvidia-container-toolkit.sh \
+  && grep -q 'nvidia.github.io/libnvidia-container' software/25-nvidia-container-toolkit.sh \
+  && grep -q 'nvidia-container-toolkit' tools/fetch-offline-bundle.sh \
+  && grep -q 'nvidia.github.io/libnvidia-container' tools/fetch-offline-bundle.sh \
+  && grep -q 'nvidia-ctk' software/99-cleanup.sh; then
+  pass "nvidia toolkit script + offline seed + manifest"
+else
+  fail "nvidia toolkit script + offline seed + manifest"
+fi
+
 echo "== fetch-offline-bundle recursive depends =="
 if grep -q 'force-download' tools/fetch-offline-bundle.sh && grep -q 'apt-cache depends --recurse' tools/fetch-offline-bundle.sh; then
   pass "fetch recursive depends download"

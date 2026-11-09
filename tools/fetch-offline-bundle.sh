@@ -150,6 +150,13 @@ chmod a+r /etc/apt/keyrings/docker.asc
 echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${RELEASE} stable" \
   > /etc/apt/sources.list.d/docker.list
 
+# NVIDIA Container Toolkit (toolkit only; no GPU driver)
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  -o /etc/apt/keyrings/nvidia-container-toolkit.asc
+chmod a+r /etc/apt/keyrings/nvidia-container-toolkit.asc
+echo "deb [signed-by=/etc/apt/keyrings/nvidia-container-toolkit.asc] https://nvidia.github.io/libnvidia-container/stable/deb/${ARCH} /" \
+  > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
 # Jenkins (2026 signing key; 2023 key expired 2026-03-26)
 KEY_OK=0
 for url in \
@@ -182,6 +189,7 @@ SEEDS=(
   ca-certificates curl gnupg jq git unzip lsb-release apt-transport-https
   openssh-server
   docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  nvidia-container-toolkit
   "$JAVA_PKG" jenkins
   nodejs
 )
