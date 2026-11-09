@@ -15,6 +15,25 @@ except ImportError:
 
 PLACEHOLDER_RE = re.compile(r"@@([A-Z0-9_]+)@@")
 
+# Netplan written into autoinstall.network and /target late-command.
+# match + optional: 装机时无网卡也不会卡住; 首启有网卡时按名通配 DHCP。
+DHCP_NETPLAN = """network:
+  version: 2
+  ethernets:
+    all-en:
+      match:
+        name: "en*"
+      dhcp4: true
+      dhcp6: true
+      optional: true
+    all-eth:
+      match:
+        name: "eth*"
+      dhcp4: true
+      dhcp6: true
+      optional: true
+"""
+
 
 def yaml_list_block(items, indent="    "):
     if not items:
@@ -45,11 +64,45 @@ def build_apt_primary_block(mirror: str, full_offline: bool) -> str:
     )
 
 
+def build_network_block(mode: str) -> str:
+    """autoinstall.network 段。none 时返回空串(省略该键)。"""
+    if mode == "none":
+        return ""
+    # DHCP_NETPLAN starts with "network:"; re-key under autoinstall indent (2 spaces)
+    body = DHCP_NETPLAN.strip()
+    assert body.startswith("network:\n")
+    rest = body[len("network:\n") :]
+    out = ["  network:"]
+    for line in rest.splitlines():
+        out.append("  " + line if line else "")
+    return "\n".join(out) + "\n"
+
+
+def build_dhcp_late_commands() -> list[str]:
+    """
+    Subiquity 在无显式 network 时会按「安装时探测到的网卡」写 00-installer-config.yaml;
+    离线无 NIC 装机后首启就没有 DHCP。即使有 autoinstall.network (match 通配),
+    仍用 late-commands 落盘 50-autoinstall-dhcp.yaml 并关掉 cloud-init 网络改写, 避免冲突。
+    """
+    body_lines = DHCP_NETPLAN.rstrip("\n").splitlines()
+    quoted = " ".join("'" + line.replace("'", "'\\''") + "'" for line in body_lines)
+    return [
+        "mkdir -p /target/etc/netplan /target/etc/cloud/cloud.cfg.d",
+        f"printf '%s\\n' {quoted} > /target/etc/netplan/50-autoinstall-dhcp.yaml",
+        "chmod 600 /target/etc/netplan/50-autoinstall-dhcp.yaml",
+        "printf '%s\\n' 'network: {config: disabled}' "
+        "> /target/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg",
+        "rm -f /target/etc/netplan/00-installer-config.yaml "
+        "/target/etc/netplan/50-cloud-init.yaml",
+    ]
+
+
 def build_late_commands(
     *,
     with_pool: bool,
     provision: bool,
     full_offline: bool,
+    network: str,
 ):
     cmds = []
 
@@ -83,6 +136,9 @@ def build_late_commands(
             "curtin in-target --target=/target -- bash /opt/offline/restore-online-apt.sh"
         )
 
+    if network == "dhcp":
+        cmds += build_dhcp_late_commands()
+
     cmds += [
         "curtin in-target --target=/target -- timedatectl set-ntp true || true",
         "curtin in-target --target=/target -- systemctl enable --now ssh || true",
@@ -91,7 +147,12 @@ def build_late_commands(
         "curtin in-target --target=/target -- sh -c "
         "'mkdir -p /var/log/autoinstall && dpkg -l > /var/log/autoinstall/packages.txt'"
     )
-    return "\n".join(f"    - {c}" for c in cmds)
+    def yaml_cmd(c: str) -> str:
+        # Quote so payloads containing 'key: value' stay valid YAML scalars.
+        escaped = c.replace("\\", "\\\\").replace('"', '\\"')
+        return f'    - "{escaped}"'
+
+    return "\n".join(yaml_cmd(c) for c in cmds)
 
 
 def load_authorized_keys(path: str | None) -> list[str]:
@@ -128,6 +189,12 @@ def main() -> int:
                     help="全离线: 使用 /cdrom/offline 捆绑, packages 改 late 安装")
     ap.add_argument("--with-pool", action="store_true")
     ap.add_argument("--provision", action="store_true")
+    ap.add_argument(
+        "--network",
+        default="dhcp",
+        choices=["dhcp", "none"],
+        help="dhcp(默认): 写入 match en*/eth* 的 netplan + late-command; none: 不写",
+    )
     args = ap.parse_args()
 
     pw = args.password_hash.strip()
@@ -146,6 +213,7 @@ def main() -> int:
         sys.stderr.write("[FAIL] --ssh-allow-pw 必须是 true 或 false\n")
         return 2
 
+    network = args.network
     full_offline = bool(args.full_offline)
     offline = bool(args.offline) or full_offline
 
@@ -172,10 +240,12 @@ def main() -> int:
         "SSH_AUTHORIZED_KEYS_BLOCK": yaml_quoted_list_block(auth_keys, indent="      "),
         "STORAGE_LAYOUT": args.storage_layout,
         "PACKAGES_BLOCK": yaml_list_block(render_packages),
+        "NETWORK_BLOCK": build_network_block(network),
         "LATE_COMMANDS_BLOCK": build_late_commands(
             with_pool=args.with_pool,
             provision=args.provision,
             full_offline=full_offline,
+            network=network,
         ),
     }
 
@@ -194,6 +264,10 @@ def main() -> int:
         sys.stderr.write(f"[FAIL] 未替换的占位符: {leftover}\n")
         return 2
 
+    # When NETWORK_BLOCK is empty, collapse double blank lines left by the placeholder line
+    if network == "none":
+        rendered = re.sub(r"\n{3,}", "\n\n", rendered)
+
     if yaml is not None:
         try:
             doc = yaml.safe_load(rendered)
@@ -209,6 +283,22 @@ def main() -> int:
             if not any("offline" in str(c) for c in late):
                 sys.stderr.write("[FAIL] full-offline 但 late-commands 未引用 offline\n")
                 return 2
+        if network == "dhcp":
+            net = ai.get("network") or {}
+            eth = net.get("ethernets") or {}
+            if "all-en" not in eth or "all-eth" not in eth:
+                sys.stderr.write("[FAIL] network=dhcp 但缺少 all-en/all-eth\n")
+                return 2
+            late = ai.get("late-commands") or []
+            if not any("50-autoinstall-dhcp.yaml" in str(c) for c in late):
+                sys.stderr.write(
+                    "[FAIL] network=dhcp 但 late-commands 未写 50-autoinstall-dhcp.yaml\n"
+                )
+                return 2
+        elif network == "none":
+            if "network" in (ai or {}):
+                sys.stderr.write("[FAIL] network=none 但 YAML 仍含 network 键\n")
+                return 2
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
@@ -216,7 +306,8 @@ def main() -> int:
 
     print(
         f"[ok] wrote {args.out} (packages={len(render_packages)}, "
-        f"ssh_keys={len(auth_keys)}, offline={offline}, full_offline={full_offline})"
+        f"ssh_keys={len(auth_keys)}, offline={offline}, full_offline={full_offline}, "
+        f"network={network})"
     )
     return 0
 

@@ -98,6 +98,39 @@ else
   fail "full-offline yaml semantics"
 fi
 
+
+echo "== network dhcp default =="
+if python3 tools/render-user-data.py \
+  --template autoinstall/user-data.tmpl \
+  --out "$tmp/user-data-dhcp" \
+  --password-hash "$HASH" \
+  --provision; then
+  :
+else
+  fail "network dhcp render"
+fi
+if python3 -c "import yaml; d=yaml.safe_load(open('$tmp/user-data-dhcp')); ai=d['autoinstall']; net=ai['network']; eth=net['ethernets']; assert 'all-en' in eth and 'all-eth' in eth; assert eth['all-en']['dhcp4'] is True; assert eth['all-en'].get('optional') is True; assert eth['all-en']['match']['name']=='en*'; late=ai['late-commands']; assert any('50-autoinstall-dhcp.yaml' in str(c) for c in late); assert any('99-disable-network-config' in str(c) or 'base64' in str(c) for c in late)"; then
+  pass "network dhcp yaml + late-command"
+else
+  fail "network dhcp yaml + late-command"
+fi
+
+echo "== network none omits =="
+if python3 tools/render-user-data.py \
+  --template autoinstall/user-data.tmpl \
+  --out "$tmp/user-data-nonet" \
+  --password-hash "$HASH" \
+  --network none --provision; then
+  :
+else
+  fail "network none render"
+fi
+if python3 -c "import yaml; d=yaml.safe_load(open('$tmp/user-data-nonet')); ai=d['autoinstall']; assert 'network' not in ai; late=ai.get('late-commands') or []; assert not any('50-autoinstall-dhcp.yaml' in str(c) for c in late)"; then
+  pass "network none omits section/late"
+else
+  fail "network none omits section/late"
+fi
+
 echo "== fetch-offline-bundle.sh syntax =="
 if bash -n tools/fetch-offline-bundle.sh; then
   pass "fetch-offline-bundle syntax"
