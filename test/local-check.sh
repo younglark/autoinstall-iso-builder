@@ -323,6 +323,32 @@ else
   fail "00-base skip-installed helper"
 fi
 
+
+echo "== git + ripgrep in base + offline seed =="
+if grep -qE '(^|[[:space:]])git([[:space:]]|$)' software/00-base.sh \
+  && grep -q 'ripgrep' software/00-base.sh \
+  && grep -qE '(^|[[:space:]])git([[:space:]]|$)' tools/fetch-offline-bundle.sh \
+  && grep -q 'ripgrep' tools/fetch-offline-bundle.sh \
+  && grep -qE '(^|[[:space:]])git([[:space:]]|$)' software/99-cleanup.sh \
+  && grep -qE '(^|[[:space:]])rg([[:space:]]|$)' software/99-cleanup.sh; then
+  pass "git + ripgrep in base/seed/manifest"
+else
+  fail "git + ripgrep in base/seed/manifest"
+fi
+
+echo "== github-cli script + offline seed =="
+if [[ -x software/15-github-cli.sh ]] \
+  && grep -q 'cli.github.com/packages' software/15-github-cli.sh \
+  && grep -q 'offline_apt_install gh' software/15-github-cli.sh \
+  && ! grep -qE '^[[:space:]]*gh[[:space:]]+auth' software/15-github-cli.sh \
+  && grep -q 'cli.github.com/packages' tools/fetch-offline-bundle.sh \
+  && grep -qE '(^|[[:space:]])gh([[:space:]]|$)' tools/fetch-offline-bundle.sh \
+  && grep -qE '(^|[[:space:]])gh([[:space:]]|$)' software/99-cleanup.sh; then
+  pass "github-cli script + offline seed + manifest (no auth)"
+else
+  fail "github-cli script + offline seed + manifest"
+fi
+
 echo "== nvidia-container-toolkit script + offline seed =="
 if [[ -x software/25-nvidia-container-toolkit.sh ]] \
   && grep -q 'nvidia-ctk runtime configure --runtime=docker' software/25-nvidia-container-toolkit.sh \

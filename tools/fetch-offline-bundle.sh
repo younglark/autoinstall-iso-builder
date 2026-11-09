@@ -50,7 +50,7 @@ usage() {
   --pin-unity-cli VER   Unity CLI 版本 (默认拉 latest/latest-beta)
   --ubuntu-mirror URL   容器内 Ubuntu 源
   --skip-npm            不打包 npm 全局树 (调试用)
-  --force               忽略已有 manifest, 强制重建 (新加 unity-cli 等时需 --force)
+  --force               忽略已有 manifest, 强制重建 (新加 gh/ripgrep/unity-cli 等时需 --force)
 USAGE
 }
 
@@ -161,6 +161,13 @@ chmod a+r /etc/apt/keyrings/nvidia-container-toolkit.asc
 echo "deb [signed-by=/etc/apt/keyrings/nvidia-container-toolkit.asc] https://nvidia.github.io/libnvidia-container/stable/deb/${ARCH} /" \
   > /etc/apt/sources.list.d/nvidia-container-toolkit.list
 
+# GitHub CLI (official; stable/main, not release-codename)
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+  -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+chmod a+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+  > /etc/apt/sources.list.d/github-cli.list
+
 # Jenkins (2026 signing key; 2023 key expired 2026-03-26)
 KEY_OK=0
 for url in \
@@ -190,8 +197,9 @@ done
 # seed: 预装栈 + base 工具 + 用户 packages
 # shellcheck disable=SC2206
 SEEDS=(
-  ca-certificates curl gnupg jq git unzip lsb-release apt-transport-https
+  ca-certificates curl gnupg jq git ripgrep unzip lsb-release apt-transport-https
   openssh-server
+  gh
   docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   nvidia-container-toolkit
   "$JAVA_PKG" jenkins
