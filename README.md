@@ -29,8 +29,9 @@
 
 | 脚本 | 装什么 | 要点 |
 |---|---|---|
-| `00-base.sh` | 基础依赖 | `policy-rc.d` 拦住 chroot 里的服务启动；修 `resolv.conf`；apt 非交互 |
+| `00-base.sh` | 基础依赖 | `policy-rc.d` 拦住 chroot 里的服务启动；修 `resolv.conf`；apt 非交互；含 **git**、**ripgrep**（`rg`） |
 | `10-openssh.sh` | openssh-server | 幂等兜底，启用 `ssh.service` |
+| `15-github-cli.sh` | GitHub CLI (`gh`) | 官方 apt 源（cli.github.com）；**不**执行 `gh auth` |
 | `20-docker.sh` | Docker CE | 官方仓库（非 `docker.io`），含 compose v2 / buildx，**配了日志轮转** |
 | `25-nvidia-container-toolkit.sh` | NVIDIA Container Toolkit | 官方仓库；`nvidia-ctk` 合并 Docker runtime（保留 daemon.json 日志轮转）；**不装 GPU 驱动** |
 | `30-jenkins.sh` | Jenkins LTS | 优先 JDK 21（不够退 17），jenkins 用户加入 docker 组 |
@@ -56,6 +57,7 @@
 | OpenCode | `opencode auth login` |
 | OpenMausBot | 填 `/etc/openmausbot/env`（0600），再 `systemctl enable --now openmausbot` |
 | Unity CLI | 装机后 `unity auth login`，需要 Editor 再 `unity install <ver>`（镜像**不**预装 Editor） |
+| GitHub CLI | 装机后 `gh auth login`（镜像只预装二进制） |
 
 理由很直接：镜像会被复制、被外传，烤进去的 key 等于公开。而且 OpenMausBot 本身还依赖「本机已登录的 claude / codex / grok CLI」，这层也必须在跑起来之后才配对。
 
@@ -144,7 +146,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso --uefi
 | 选盘 | 默认停在选盘页 | 同左：图形安装器停在「安装类型/磁盘」页，确认后继续 |
 | 配置投递 | `/nocloud` + 内核参数 | 同左；另在 ISO 根放一份 `/autoinstall.yaml` 兜底（Subiquity 优先级：内核参数 > live 根 > cloud-config > 介质根，正常不会用到） |
 
-`software/*.sh` 在 Desktop 目标上不需要改：Desktop minimal 不带 curl/git/openssh-server，`00-base`/`10-openssh` 会补装；已装的包（ca-certificates、gnupg、jq 等）照旧跳过。Docker / NVIDIA Container Toolkit / Jenkins / Node / Grok / OpenCode / OpenMausBot / Unity CLI 与 Server 相同（Toolkit **不含** GPU 驱动；Unity CLI **不含** Editor）。
+`software/*.sh` 在 Desktop 目标上不需要改：Desktop minimal 不带 curl/git/openssh-server，`00-base`/`10-openssh` 会补装；已装的包（ca-certificates、gnupg、jq 等）照旧跳过。GitHub CLI / Docker / NVIDIA Container Toolkit / Jenkins / Node / Grok / OpenCode / OpenMausBot / Unity CLI 与 Server 相同（Toolkit **不含** GPU 驱动；Unity CLI **不含** Editor）。
 
 ### 离线：Desktop 能不能全离线？
 
@@ -297,7 +299,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 体积与缓存：
 
-- 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；有 `manifest.json` 时默认复用（`--force` 重建）。**新加 Unity CLI 等条目后，旧捆绑需 `--force` 才会写入 `unity-cli/`。**
+- 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；有 `manifest.json` 时默认复用（`--force` 重建）。**新加 gh / ripgrep / Unity CLI 等条目后，旧捆绑需 `--force` 才会带上新包（含 `gh` deb 与 `unity-cli/`）。**
 - 实测（本仓库验证机，2026-11）：**noble+npm ≈ 648 MB**（150 debs + npm prefix ≈329 MB 压缩）；**jammy apt-only（--skip-npm）≈ 312 MB**（127 debs）。含 OpenMausBot 时 npm 树是大头；U 盘请预留 ≥ 镜像+捆绑余量。
 - `--packages` 会并进捆绑；全离线时 autoinstall 的 `packages:` 置空，改由 `00-base.sh` 从本地 apt 安装，避免安装器阶段无索引。
 
@@ -309,7 +311,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 **无捆绑**时的旧 `--offline` 只影响 autoinstall apt fallback；第三方脚本仍会联网。当前这套软件栈里：
 
-- Docker / NVIDIA Container Toolkit / Jenkins / NodeSource 走各自第三方仓库 → 需要下载 `.deb` 后配 `--debs`
+- GitHub CLI / Docker / NVIDIA Container Toolkit / Jenkins / NodeSource 走各自第三方仓库 → 需要下载 `.deb` 后配 `--debs`
 - Grok / OpenCode / OpenMausBot 是 **npm 全局包** → 需要预建 npm 缓存（`npm cache add`）或打成 tarball 后离线 `npm install -g ./xxx.tgz`
 - Unity CLI 是 CDN 二进制（`public-cdn.cloud.unity3d.com`）→ 全离线捆绑的 `unity-cli/`；无捆绑时脚本会联网下载
 
@@ -321,7 +323,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 1. `--dry-run` 的 YAML 能被 `yaml.safe_load` 解析（脚本已内置校验）。
 2. `xorriso -indev out.iso -report_el_torito plain` 里 **BIOS 与 UEFI 两个引导项都在**。
-3. 虚拟机 BIOS + UEFI 各装一次，`virt-cat` 读到的 `/var/log/autoinstall/manifest.txt` 里 docker / nvidia-ctk / node / grok / opencode / openmausbot / unity 都有版本号。
+3. 虚拟机 BIOS + UEFI 各装一次，`virt-cat` 读到的 `/var/log/autoinstall/manifest.txt` 里 git / gh / rg / docker / nvidia-ctk / node / grok / opencode / openmausbot / unity 都有版本号。
 4. `provision-failed.txt` 为空。
 5. 重启后 `systemctl status docker jenkins ssh` 三个都是 active。
 
@@ -385,6 +387,6 @@ xorriso -indev ubuntu.iso -outdev out.iso \
 
 - 口令是哈希，不是明文；哈希本身也别提交到公开仓库。
 - 没有任何 API key / 私钥进镜像。SSH **公钥**可通过 `--ssh-authorized-keys` 注入，属于公开信息；私钥绝不注入。
-- 目标机磁盘 ≥ 25 GB，且装机时能访问 docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）。全离线捆绑可免除这些外网依赖。
+- 目标机磁盘 ≥ 25 GB，且装机时能访问 cli.github.com / docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）。全离线捆绑可免除这些外网依赖。
 
 这条线一旦破，后面所有「镜像管理」都失去意义。

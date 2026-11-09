@@ -35,7 +35,7 @@ filter_missing() {
   done
 }
 
-BASE_PKGS=(ca-certificates curl gnupg jq git unzip lsb-release apt-transport-https)
+BASE_PKGS=(ca-certificates curl gnupg jq git ripgrep unzip lsb-release apt-transport-https)
 
 if offline_enabled 2>/dev/null && offline_apt_ready 2>/dev/null; then
   echo "offline: 跳过 DNS/外网, 使用本地 apt"
@@ -77,7 +77,7 @@ else
   fi
   apt-get update
   apt-get install -y --no-install-recommends \
-    ca-certificates curl gnupg jq git unzip lsb-release apt-transport-https
+    ca-certificates curl gnupg jq git ripgrep unzip lsb-release apt-transport-https
 fi
 
 echo "base ok: $(. /etc/os-release && echo "$PRETTY_NAME") offline=${OFFLINE:-0}"
