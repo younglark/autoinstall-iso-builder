@@ -4,7 +4,7 @@
 #
 # 原理: 不重建 ISO, 也不解包 squashfs。
 #   * 在 ISO 根目录新增 /nocloud/{user-data,meta-data} 种子
-#   * 给 grub 菜单注入 "autoinstall ds=nocloud;s=/cdrom/nocloud/"
+#   * 给 grub 菜单注入 "autoinstall ds=nocloud\;s=/cdrom/nocloud/"
 #   * 用 xorriso 复制模式 + `-boot_image any replay` 原样复用引导记录
 #
 # 因此: 不需要 root, 不需要 loop 挂载, BIOS/UEFI 双启动与 Secure Boot 全部保留。
@@ -28,6 +28,7 @@ TIMEZONE_="Asia/Shanghai"
 MIRROR="http://archive.ubuntu.com/ubuntu"
 PACKAGES=""
 SSH_ALLOW_PW="true"
+SSH_AUTHORIZED_KEYS=""
 STORAGE_LAYOUT="direct"
 OFFLINE=0
 DEBS_DIR=""
@@ -37,9 +38,16 @@ KEEP_WORK=0
 PROVISION=1
 STRICT=0
 PROVISION_SKIP=""
+ISO_SHA256=""
+ISO_SHA256SUMS=""
+# 版本钉扎 (可用同名环境变量预置; CLI 优先)
+PIN_NODE_MAJOR="${PIN_NODE_MAJOR:-24}"
+PIN_GROK="${PIN_GROK:-latest}"
+PIN_OPENCODE="${PIN_OPENCODE:-latest}"
+PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 
 usage() {
-  cat <<'EOF'
+  cat <<'USAGE'
 用法:
   ./build-iso.sh --iso <原版ISO> --out <输出ISO> [选项]
 
@@ -58,12 +66,20 @@ usage() {
   --mirror URL          默认 archive.ubuntu.com; 内网请填本地源
   --locale / --keyboard / --timezone
   --ssh-allow-pw BOOL   默认 true (未配公钥时必须为 true, 否则装完登不进去)
+  --ssh-authorized-keys FILE
+                        authorized_keys 文件 (每行一把公钥), 写入 autoinstall ssh.authorized-keys
   --storage-layout L    direct | lvm | zfs, 默认 direct
   --offline             不联网场景: updates=none, apt 允许 offline-install
   --debs DIR            把目录下所有 .deb 打进 ISO 的 /pool 并离线安装
   --no-provision        不执行 software/ 下的软件预装脚本
   --strict              任一软件装失败就中止安装 (默认: 记日志继续)
-  --skip "30 70"        跳过指定编号的软件脚本, 用空格分隔前缀
+  --skip "30 70"        跳过脚本: 编号前缀或完整名均可 (30 或 30-jenkins)
+  --pin-node N          Node 主版本, 默认 24 (也可用环境变量 PIN_NODE_MAJOR)
+  --pin-grok VER        npm 版 @xai-official/grok, 默认 latest (PIN_GROK)
+  --pin-opencode VER    npm 版 opencode-ai, 默认 latest (PIN_OPENCODE)
+  --pin-openmausbot VER npm 版 openmausbot, 默认 latest (PIN_OPENMAUSBOT)
+  --iso-sha256 HEX      校验源 ISO 的 SHA256, 不匹配则失败
+  --iso-sha256sums FILE 用 SHA256SUMS 文件按 basename 校验源 ISO
   --menu-regex REGEX    要注入的菜单项标题正则, 默认 "Try or Install"
   --dry-run             只渲染配置并打印, 不产出 ISO
   --keep-work           保留临时目录便于排查
@@ -74,8 +90,11 @@ usage() {
                  --hostname node01 --username ops \
                  --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
                  --packages "vim,curl,htop,net-tools" \
-                 --mirror http://mirrors.aliyun.com/ubuntu
-EOF
+                 --mirror http://mirrors.aliyun.com/ubuntu \
+                 --iso-sha256sums SHA256SUMS \
+                 --ssh-authorized-keys ~/.ssh/id_ed25519.pub \
+                 --pin-grok 0.1.0
+USAGE
 }
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -97,6 +116,7 @@ while [[ $# -gt 0 ]]; do
     --mirror)         MIRROR="$2"; shift 2 ;;
     --packages)       PACKAGES="$2"; shift 2 ;;
     --ssh-allow-pw)   SSH_ALLOW_PW="$2"; shift 2 ;;
+    --ssh-authorized-keys) SSH_AUTHORIZED_KEYS="$2"; shift 2 ;;
     --storage-layout) STORAGE_LAYOUT="$2"; shift 2 ;;
     --offline)        OFFLINE=1; shift ;;
     --debs)           DEBS_DIR="$2"; shift 2 ;;
@@ -104,6 +124,12 @@ while [[ $# -gt 0 ]]; do
     --no-provision)   PROVISION=0; shift ;;
     --strict)         STRICT=1; shift ;;
     --skip)           PROVISION_SKIP="$2"; shift 2 ;;
+    --pin-node)       PIN_NODE_MAJOR="$2"; shift 2 ;;
+    --pin-grok)       PIN_GROK="$2"; shift 2 ;;
+    --pin-opencode)   PIN_OPENCODE="$2"; shift 2 ;;
+    --pin-openmausbot) PIN_OPENMAUSBOT="$2"; shift 2 ;;
+    --iso-sha256)     ISO_SHA256="$2"; shift 2 ;;
+    --iso-sha256sums) ISO_SHA256SUMS="$2"; shift 2 ;;
     --dry-run)        DRY_RUN=1; shift ;;
     --keep-work)      KEEP_WORK=1; shift ;;
     -h|--help)        usage; exit 0 ;;
@@ -115,6 +141,10 @@ done
 [[ -n "$OUT_ISO" ]] || { usage; die "缺少 --out"; }
 [[ -f "$SRC_ISO" ]] || die "源 ISO 不存在: $SRC_ISO"
 
+if [[ -n "$SSH_AUTHORIZED_KEYS" ]]; then
+  [[ -f "$SSH_AUTHORIZED_KEYS" ]] || die "--ssh-authorized-keys 文件不存在: $SSH_AUTHORIZED_KEYS"
+fi
+
 if [[ -z "$PASS_HASH" && -z "$PASS_PLAIN" ]]; then
   die "必须提供 --password-hash 或 --password (openssl passwd -6 '你的密码')"
 fi
@@ -123,6 +153,34 @@ if [[ -z "$PASS_HASH" ]]; then
   PASS_HASH="$(openssl passwd -6 "$PASS_PLAIN")"
 fi
 [[ "$PASS_HASH" == \$* ]] || die "--password-hash 不像 crypt 哈希 (应以 \$ 开头)"
+
+# ---------------------------------------------------------------- 源 ISO 完整性
+verify_iso_sha256() {
+  local expected="$1" actual
+  actual="$(sha256sum -- "$SRC_ISO" | awk '{print $1}')"
+  expected="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  actual="$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$actual" != "$expected" ]]; then
+    die "源 ISO SHA256 不匹配
+  expected: $expected
+  actual:   $actual"
+  fi
+  ok "源 ISO SHA256 校验通过"
+}
+
+if [[ -n "$ISO_SHA256SUMS" ]]; then
+  [[ -f "$ISO_SHA256SUMS" ]] || die "--iso-sha256sums 文件不存在: $ISO_SHA256SUMS"
+  base="$(basename -- "$SRC_ISO")"
+  # SHA256SUMS 常见格式: <hash>  <filename> 或 <hash> *<filename>
+  line="$(grep -E "[[:space:]](\*?)${base}\$" "$ISO_SHA256SUMS" | head -1 || true)"
+  [[ -n "$line" ]] || die "SHA256SUMS 中找不到 ${base}: $ISO_SHA256SUMS"
+  sum="$(awk '{print $1}' <<<"$line")"
+  log "按 SHA256SUMS 校验 $base"
+  verify_iso_sha256 "$sum"
+elif [[ -n "$ISO_SHA256" ]]; then
+  log "按 --iso-sha256 校验源 ISO"
+  verify_iso_sha256 "$ISO_SHA256"
+fi
 
 for bin in xorriso python3; do
   command -v "$bin" >/dev/null || die "缺少依赖: $bin   (apt install xorriso python3)"
@@ -170,6 +228,7 @@ RENDER_ARGS=(
   --ssh-allow-pw "$SSH_ALLOW_PW"
   --storage-layout "$STORAGE_LAYOUT"
 )
+[[ -n "$SSH_AUTHORIZED_KEYS" ]] && RENDER_ARGS+=(--ssh-authorized-keys "$SSH_AUTHORIZED_KEYS")
 [[ "$OFFLINE" -eq 1 ]] && RENDER_ARGS+=(--offline)
 [[ "$WITH_POOL" -eq 1 ]] && RENDER_ARGS+=(--with-pool)
 [[ "$PROVISION" -eq 1 ]] && RENDER_ARGS+=(--provision)
@@ -192,14 +251,19 @@ if [[ "$PROVISION" -eq 1 ]]; then
   # 只带 .sh 和 env, 不带任何本地残留
   cp "$SCRIPT_DIR/software"/*.sh "$WORK/provision/"
   chmod 0755 "$WORK/provision"/*.sh
-  cat > "$WORK/provision/provision.env" <<EOF
+  cat > "$WORK/provision/provision.env" <<ENV
 # 由 build-iso.sh 生成
 TARGET_USER=$USERNAME_
 STRICT=$STRICT
 PROVISION_SKIP="$PROVISION_SKIP"
-EOF
+SSH_ALLOW_PW=$SSH_ALLOW_PW
+PIN_NODE_MAJOR=$PIN_NODE_MAJOR
+PIN_GROK=$PIN_GROK
+PIN_OPENCODE=$PIN_OPENCODE
+PIN_OPENMAUSBOT=$PIN_OPENMAUSBOT
+ENV
   SCRIPT_COUNT=$(find "$WORK/provision" -maxdepth 1 -name '[0-9][0-9]-*.sh' | wc -l)
-  ok "已打包 $SCRIPT_COUNT 个软件预装脚本"
+  ok "已打包 $SCRIPT_COUNT 个软件预装脚本 (node>=$PIN_NODE_MAJOR grok=$PIN_GROK)"
   [[ -n "$PROVISION_SKIP" ]] && warn "跳过: $PROVISION_SKIP"
 fi
 
@@ -215,18 +279,23 @@ if xorriso -osirrox on -indev "$SRC_ISO" \
   HAS_LOOPBACK=1
 fi
 
+# GRUB 必须转义分号, 否则 ds= 后半段被当成下一条 grub 命令
+GRUB_AUTOINSTALL_PARAMS='autoinstall ds=nocloud\;s=/cdrom/nocloud/'
+
 patch_menu() {
   local f="$1"
   python3 "$SCRIPT_DIR/tools/patch-grub.py" \
     --file "$f" \
     --menu-regex "$MENU_REGEX" \
-    --params "autoinstall ds=nocloud;s=/cdrom/nocloud/" \
+    --params "$GRUB_AUTOINSTALL_PARAMS" \
     --timeout 3
 }
 
 log "注入 autoinstall 内核参数"
 patch_menu "$WORK/grub.cfg" || die "grub.cfg 注入失败, 用 --menu-regex 指定正确的菜单标题"
-[[ "$HAS_LOOPBACK" -eq 1 ]] && patch_menu "$WORK/loopback.cfg" || true
+if [[ "$HAS_LOOPBACK" -eq 1 ]]; then
+  patch_menu "$WORK/loopback.cfg" || true
+fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   log "dry-run: 以下是渲染后的 user-data"
@@ -280,6 +349,9 @@ xorriso -indev "$OUT_ISO" -ls /nocloud 2>/dev/null | grep -q 'user-data' \
 xorriso -osirrox on -indev "$OUT_ISO" -extract /boot/grub/grub.cfg "$WORK/verify.cfg" 2>/dev/null
 grep -q 'autoinstall ds=nocloud' "$WORK/verify.cfg" \
   || die "grub.cfg 里的 autoinstall 参数丢失"
+# 确认 GRUB 分号已转义
+grep -qE 'ds=nocloud\\;s=/cdrom/nocloud/' "$WORK/verify.cfg" \
+  || die "grub.cfg 里 ds= 分号未转义 (应为 ds=nocloud\\;s=...)"
 if [[ "$PROVISION" -eq 1 ]]; then
   xorriso -indev "$OUT_ISO" -ls /provision 2>/dev/null | grep -q 'run-all.sh' \
     || die "/provision/run-all.sh 未写入"
@@ -296,7 +368,7 @@ fi
 
 sha256sum "$OUT_ISO" | tee "$OUT_ISO.sha256"
 ok "完成: $OUT_ISO ($(du -h "$OUT_ISO" | cut -f1))"
-cat <<EOF
+cat <<DONE
 
 下一步:
   1) 写盘:  sudo dd if="$OUT_ISO" of=/dev/sdX bs=4M status=progress oflag=sync
@@ -305,4 +377,4 @@ cat <<EOF
 注意:
   * ISO 内的 md5sum.txt 未更新 —— casper 只在传 integrity-check 时才校验, 默认无影响。
   * 装完会 reboot。U 盘启动务必调整 BIOS 顺序, 否则会再装一遍。
-EOF
+DONE
