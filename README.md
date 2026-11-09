@@ -1,6 +1,6 @@
 # 把 autoinstall 烧进 Ubuntu ISO
 
-一条命令产出一块「插上就自己装完」的 U 盘，装完即带全套预装软件。
+一条命令产出一块自动装机 U 盘：默认停在**硬盘选择**页由你确认（避免误抹盘），确认后自动装完并带全套预装软件。
 
 适用：Ubuntu Server **22.04 / 24.04**（24.04 Desktop 亦可，改 `--menu-regex`）。
 
@@ -92,9 +92,12 @@ chmod +x build-iso.sh test/qemu-smoke.sh tools/*.py software/*.sh
                --packages "vim,tmux,net-tools" \
                --mirror http://mirrors.aliyun.com/ubuntu
 
-# 3. 先在虚拟机跑一遍（务必做，别直接上物理机）
-bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node.iso
-bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node.iso --uefi
+# 3. 无人值守冒烟（QEMU/CI）需加 --auto-disk，否则会停在选盘页
+./build-iso.sh --iso ubuntu-24.04.1-live-server-amd64.iso                --out out/ubuntu-24.04.1-ci-node-autodisk.iso                --hostname ci-node01 --username ops                --password-hash "$(openssl passwd -6 'Ch@ngeMe')"                --auto-disk
+
+# 4. 先在虚拟机跑一遍（务必做，别直接上物理机）
+bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso
+bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso --uefi
 ```
 
 > WSL2 里操作 `/mnt/c/...` 下的文件会慢 3–5 倍，建议把 ISO 放在 `~/` 下再跑。
@@ -140,7 +143,8 @@ cat /var/log/autoinstall/20-docker.log
 | `--strict` | 任一软件装失败就中止安装（默认记日志继续） |
 | `--offline` | apt `fallback: offline-install`（`updates` 仍为 Subiquity 合法值 `security`；无 `none`） |
 | `--debs DIR` | 把目录下 `.deb` 打进 `/pool` 并离线安装 |
-| `--storage-layout` | `direct`（默认）/ `lvm` / `zfs` |
+| `--storage-layout` | `direct`（默认）/ `lvm` / `zfs`。作为选盘页的**预选布局**；默认仍要你在 UI 确认后才继续 |
+| `--auto-disk` | **危险**。跳过硬盘选择，按 `match size: largest` 自动抹最大盘。默认关闭；仅给 QEMU/CI 无人值守。物理机请保持默认 |
 | `--network` | `dhcp`（默认）/ `none`。默认写入 netplan match `en*`/`eth*` 的 DHCP（`optional: true`），并用 late-command 落盘 `/etc/netplan/50-autoinstall-dhcp.yaml`（mode 600）+ 禁用 cloud-init 网络改写，保证**离线无网卡装机**后首启插网也能 DHCP。`none` 则不写。静态 IP 后续再加。 |
 | `--ssh-allow-pw` | 未注入公钥时**必须为 true**，否则装完登不进去；与 `10-openssh.sh` 保持一致 |
 | `--ssh-authorized-keys FILE` | 公钥文件（每行一把，忽略空行/注释），写入 `ssh.authorized-keys`，并经 `/nocloud/write-authorized-keys.sh` late-command 再写入用户 `~/.ssh/authorized_keys`（防 Subiquity 漏写）；建议配合 `--ssh-allow-pw false` |
@@ -162,6 +166,17 @@ cat /var/log/autoinstall/20-docker.log
 
 用 `--network none` 可恢复「不注入网络段」的旧行为。
 
+
+### 默认停在硬盘选择（安全）
+
+默认 `interactive-sections: [storage]`：装机**停在选盘页**，其它步骤（用户名、时区、网络、SSH、软件预装）仍自动。`storage.layout`（含 `match.size: largest`）会作为 Subiquity 界面上的**预选项**，但不会自动开写，需你确认。
+
+- 物理机 / 多盘机：**保持默认**，自己选目标盘。
+- QEMU / CI 无人值守：构建时加 `--auto-disk`（等同 `interactive-sections: []`），才会按 largest 直接抹盘。
+
+确认后 `late-commands`（含 `/provision`、离线捆绑、DHCP netplan、authorized_keys）照常执行。
+
+
 ### 完整性与版本复现
 
 - 推荐先验证官方 `SHA256SUMS.gpg`（用 Ubuntu CD Image signing key），再传 `--iso-sha256sums SHA256SUMS`；脚本只验证 SHA256，不替代 GPG 签名验证。
@@ -176,7 +191,7 @@ cat /var/log/autoinstall/20-docker.log
 bash test/local-check.sh
 ```
 
-覆盖 Python 语法、grub 转义/幂等/旧参数修复、user-data YAML、公钥、pool-before-provision 顺序与 skip 前缀。`.github/workflows/ci.yml` 在 PR/push 上运行 ShellCheck 与这些校验。完整 `build-iso.sh --dry-run` 仍需真实 ISO；BIOS/UEFI/QEMU 与 Secure Boot 验证见下文，不在轻量 CI 下载 ISO。
+覆盖 Python 语法、grub 转义/幂等/旧参数修复、user-data YAML、默认 interactive storage / `--auto-disk`、公钥、pool-before-provision 顺序与 skip 前缀。`.github/workflows/ci.yml` 在 PR/push 上运行 ShellCheck 与这些校验。完整 `build-iso.sh --dry-run` 仍需真实 ISO；BIOS/UEFI/QEMU 与 Secure Boot 验证见下文，不在轻量 CI 下载 ISO。
 
 ### 全离线模式（`--offline` + `--offline-bundle`）
 
@@ -190,17 +205,18 @@ bash test/local-check.sh
 # jammy (22.04) 同理:
 # ./tools/fetch-offline-bundle.sh --release jammy --out cache/offline-bundles/jammy-amd64
 
-# 2) 烧进 ISO
+# 2) 烧进 ISO（QEMU 无人值守冒烟请加 --auto-disk；物理机不要加）
 ./build-iso.sh --iso ubuntu-24.04.x-live-server-amd64.iso \
   --out out/ubuntu-24.04-offline.iso \
   --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
   --offline --offline-bundle cache/offline-bundles/noble-amd64 \
-  --packages "vim,curl,htop,net-tools"
+  --packages "vim,curl,htop,net-tools" \
+  --auto-disk
 
 # 或一步：--fetch-offline 自动抓取后再打包
-# ./build-iso.sh ... --offline --fetch-offline --packages "vim,curl"
+# ./build-iso.sh ... --offline --fetch-offline --packages "vim,curl" --auto-disk
 
-# 3) 无网卡冒烟（需本机 qemu）
+# 3) 无网卡冒烟（需本机 qemu；ISO 需用 --auto-disk 构建）
 bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 ```
 
@@ -254,7 +270,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 | 装完重启又装一遍 | U 盘仍在启动顺序首位 | 装机后拔盘，或在 BIOS 里把硬盘提到前面 |
 | Ventoy 启动不生效 | 走的是 `loopback.cfg` | 确认输出里有 `loopback.cfg` 的 patch 日志；新版 Ventoy 需在菜单按 `F6` 用 grub2 模式 |
 | 装完 SSH 登不进 | `allow-pw: false` 且无公钥 | `--ssh-allow-pw true` |
-| 报 `no disk found` | 目标机是多盘/RAID | 改 `user-data.tmpl` 的 `storage.match`，别用 `size: largest` |
+| 报 `no disk found` / 抹错盘 | 多盘/RAID，或误开 `--auto-disk` | **默认会停在选盘页**，直接在 UI 选对盘。无人值守才加 `--auto-disk`；仍自动失败时可改 `storage.layout.match`（serial/path），勿盲目依赖 `size: largest` |
 | `jenkins.service` 起不来 | Java 版本不对 | 看 `/var/log/autoinstall/30-jenkins.log`；确认装的是 21 或 17 |
 | `npm install` 超时 / 404 | 公网 registry 不通 | 换 `registry.npmmirror.com`，或改走内网 Verdaccio |
 | `docker` 命令要 sudo | 组权限未生效 | 重新登录（组变更需新会话） |

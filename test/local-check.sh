@@ -123,6 +123,40 @@ else
 fi
 
 
+
+echo "== interactive storage default =="
+if python3 tools/render-user-data.py \
+  --template autoinstall/user-data.tmpl \
+  --out "$tmp/user-data-interactive" \
+  --password-hash "$HASH" \
+  --provision; then
+  :
+else
+  fail "interactive default render"
+fi
+if python3 -c "import yaml; d=yaml.safe_load(open('$tmp/user-data-interactive')); ai=d['autoinstall']; assert ai.get('interactive-sections')==['storage']; assert ai['storage']['layout']['name']=='direct'; assert ai['storage']['layout']['match']['size']=='largest'; late=ai.get('late-commands') or []; assert any('run-all.sh' in str(c) for c in late)"; then
+  pass "default interactive storage + layout defaults + late-commands"
+else
+  fail "default interactive storage + layout defaults + late-commands"
+fi
+
+echo "== auto-disk unattended =="
+if python3 tools/render-user-data.py \
+  --template autoinstall/user-data.tmpl \
+  --out "$tmp/user-data-autodisk" \
+  --password-hash "$HASH" \
+  --auto-disk \
+  --provision; then
+  :
+else
+  fail "auto-disk render"
+fi
+if python3 -c "import yaml; d=yaml.safe_load(open('$tmp/user-data-autodisk')); ai=d['autoinstall']; assert ai.get('interactive-sections') in ([], None); assert ai['storage']['layout']['match']['size']=='largest'"; then
+  pass "auto-disk empty interactive-sections"
+else
+  fail "auto-disk empty interactive-sections"
+fi
+
 echo "== network dhcp default =="
 if python3 tools/render-user-data.py \
   --template autoinstall/user-data.tmpl \
