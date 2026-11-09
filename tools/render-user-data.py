@@ -15,6 +15,36 @@ except ImportError:
 
 PLACEHOLDER_RE = re.compile(r"@@([A-Z0-9_]+)@@")
 
+USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+PACKAGE_NAME_RE = re.compile(r"^[a-zA-Z0-9.+_-]+$")
+
+
+def validate_username(name: str) -> None:
+    if not USERNAME_RE.fullmatch(name or ""):
+        raise SystemExit(
+            f"[FAIL] --username 非法 (POSIX: 以小写字母或 _ 开头, 仅 [a-z0-9_-], 最长 32): {name!r}"
+        )
+
+
+def validate_packages_csv(raw: str) -> list[str]:
+    """Require comma-separated package names with no spaces (safe for env files)."""
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    if any(c.isspace() for c in raw):
+        raise SystemExit(
+            "[FAIL] --packages 不能含空格; 请用逗号分隔, 例如: vim,curl,htop"
+        )
+    packages = [p for p in raw.split(",") if p]
+    for p in packages:
+        if not PACKAGE_NAME_RE.fullmatch(p):
+            raise SystemExit(
+                f"[FAIL] --packages 含非法包名 (仅 [a-zA-Z0-9.+_-]): {p!r}"
+            )
+    return packages
+
+
+
 # Netplan written into autoinstall.network and /target late-command.
 # match + optional: 装机时无网卡也不会卡住; 首启有网卡时按名通配 DHCP。
 DHCP_NETPLAN = """network:
@@ -285,12 +315,24 @@ def main() -> int:
         )
         return 2
 
-    packages = [p.strip() for p in args.packages.split(",") if p.strip()]
+    try:
+        validate_username(args.username)
+        packages = validate_packages_csv(args.packages)
+    except SystemExit as e:
+        sys.stderr.write(str(e) + "\n")
+        return 2
+
     auth_keys = load_authorized_keys(args.ssh_authorized_keys or None)
 
     ssh_allow = str(args.ssh_allow_pw).strip().lower()
     if ssh_allow not in ("true", "false"):
         sys.stderr.write("[FAIL] --ssh-allow-pw 必须是 true 或 false\n")
+        return 2
+    if ssh_allow == "false" and not auth_keys:
+        sys.stderr.write(
+            "[FAIL] --ssh-allow-pw false 但未提供任何 SSH 公钥；"
+            "装完将无法登录。请加 --ssh-authorized-keys，或改回 --ssh-allow-pw true\n"
+        )
         return 2
 
     network = args.network
@@ -312,10 +354,13 @@ def main() -> int:
     # 全离线: 不在 autoinstall.packages 装第三方/额外包 (安装器阶段无网/无捆绑索引)
     render_packages = [] if full_offline else packages
 
+    shutdown = "poweroff" if args.auto_disk else "reboot"
+
     values = {
         "HOSTNAME": args.hostname,
         "USERNAME": args.username,
         "PASSWORD_HASH": pw,
+        "SHUTDOWN": shutdown,
         "LOCALE": args.locale,
         "KEYBOARD": args.keyboard,
         "TIMEZONE": args.timezone,
@@ -390,10 +435,20 @@ def main() -> int:
                     f"[FAIL] --auto-disk 但 interactive-sections 不是 []: {isec!r}\n"
                 )
                 return 2
+            if ai.get("shutdown") != "poweroff":
+                sys.stderr.write(
+                    f"[FAIL] --auto-disk 时 shutdown 应为 poweroff (防 U 盘循环抹盘), got {ai.get('shutdown')!r}\n"
+                )
+                return 2
         else:
             if not isinstance(isec, list) or "storage" not in isec:
                 sys.stderr.write(
                     f"[FAIL] 默认应含 interactive-sections: [storage], got {isec!r}\n"
+                )
+                return 2
+            if ai.get("shutdown") != "reboot":
+                sys.stderr.write(
+                    f"[FAIL] 非 --auto-disk 时 shutdown 应为 reboot, got {ai.get('shutdown')!r}\n"
                 )
                 return 2
         if edition == "desktop":
@@ -451,7 +506,8 @@ def main() -> int:
     print(
         f"[ok] wrote {args.out} (packages={len(render_packages)}, "
         f"ssh_keys={len(auth_keys)}, offline={offline}, full_offline={full_offline}, "
-        f"network={network}, auto_disk={bool(args.auto_disk)}, edition={edition}"
+        f"network={network}, auto_disk={bool(args.auto_disk)}, shutdown={shutdown}, "
+        f"edition={edition}"
         + (f", source={source_id}" if source_id else "")
         + ")"
     )

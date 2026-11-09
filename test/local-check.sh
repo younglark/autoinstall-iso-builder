@@ -134,10 +134,10 @@ if python3 tools/render-user-data.py \
 else
   fail "interactive default render"
 fi
-if python3 -c "import yaml; d=yaml.safe_load(open('$tmp/user-data-interactive')); ai=d['autoinstall']; assert ai.get('interactive-sections')==['storage']; assert ai['storage']['layout']['name']=='direct'; assert ai['storage']['layout']['match']['size']=='largest'; late=ai.get('late-commands') or []; assert any('run-all.sh' in str(c) for c in late)"; then
-  pass "default interactive storage + layout defaults + late-commands"
+if python3 -c "import yaml; d=yaml.safe_load(open('$tmp/user-data-interactive')); ai=d['autoinstall']; assert ai.get('interactive-sections')==['storage']; assert ai['storage']['layout']['name']=='direct'; assert ai['storage']['layout']['match']['size']=='largest'; assert ai.get('shutdown')=='reboot'; late=ai.get('late-commands') or []; assert any('run-all.sh' in str(c) for c in late)"; then
+  pass "default interactive storage + layout defaults + late-commands + reboot"
 else
-  fail "default interactive storage + layout defaults + late-commands"
+  fail "default interactive storage + layout defaults + late-commands + reboot"
 fi
 
 echo "== auto-disk unattended =="
@@ -151,10 +151,10 @@ if python3 tools/render-user-data.py \
 else
   fail "auto-disk render"
 fi
-if python3 -c "import yaml; d=yaml.safe_load(open('$tmp/user-data-autodisk')); ai=d['autoinstall']; assert ai.get('interactive-sections') in ([], None); assert ai['storage']['layout']['match']['size']=='largest'"; then
-  pass "auto-disk empty interactive-sections"
+if python3 -c "import yaml; d=yaml.safe_load(open('$tmp/user-data-autodisk')); ai=d['autoinstall']; assert ai.get('interactive-sections') in ([], None); assert ai['storage']['layout']['match']['size']=='largest'; assert ai.get('shutdown')=='poweroff'"; then
+  pass "auto-disk empty interactive-sections + poweroff"
 else
-  fail "auto-disk empty interactive-sections"
+  fail "auto-disk empty interactive-sections + poweroff"
 fi
 
 echo "== network dhcp default =="
@@ -457,9 +457,154 @@ else
   fail "sha match"
 fi
 
+echo "== packages whitelist rejects spaces =="
+if python3 tools/render-user-data.py \
+  --template autoinstall/user-data.tmpl \
+  --out "$tmp/user-data-badpkg" \
+  --password-hash "$HASH" \
+  --packages "vim, htop" 2>"$tmp/badpkg.err"; then
+  fail "packages with spaces should fail"
+else
+  if grep -q '不能含空格' "$tmp/badpkg.err"; then
+    pass "packages with spaces rejected"
+  else
+    fail "packages with spaces rejected (msg): $(head -1 "$tmp/badpkg.err")"
+  fi
+fi
+
+echo "== ssh-allow-pw false without keys rejected =="
+if python3 tools/render-user-data.py \
+  --template autoinstall/user-data.tmpl \
+  --out "$tmp/user-data-nokey-nopw" \
+  --password-hash "$HASH" \
+  --ssh-allow-pw false 2>"$tmp/nokey.err"; then
+  fail "ssh-allow-pw false without keys should fail"
+else
+  if grep -qi '公钥' "$tmp/nokey.err"; then
+    pass "ssh-allow-pw false without keys rejected"
+  else
+    fail "ssh-allow-pw false without keys rejected (msg)"
+  fi
+fi
+
+echo "== provision.env %q is source-safe (vim, htop regression) =="
+# 旧写法: EXTRA_APT_PACKAGES=vim, htop  → source 时 htop 被当命令
+prov_old="$tmp/prov-old.env"
+prov_new="$tmp/prov-new.env"
+printf '%s\n' 'EXTRA_APT_PACKAGES=vim, htop' 'TARGET_USER=ops' > "$prov_old"
+{
+  printf 'TARGET_USER=%q\n' "ops"
+  printf 'EXTRA_APT_PACKAGES=%q\n' "vim,htop"
+} > "$prov_new"
+# 旧文件: 在 bash 里 source 会尝试执行 htop (我们用 PATH 里假命令探测)
+fakebin="$tmp/fakebin"
+mkdir -p "$fakebin"
+printf '#!/bin/bash\necho HIJACKED > "%s/hijacked"\n' "$tmp" > "$fakebin/htop"
+chmod +x "$fakebin/htop"
+rm -f "$tmp/hijacked"
+if PATH="$fakebin:$PATH" bash -c "set +e; . '$prov_old'; true" 2>/dev/null; then
+  :
+fi
+if [[ -f "$tmp/hijacked" ]]; then
+  pass "reproduced old unquoted breakage (htop executed)"
+else
+  # 某些 bash 对 `vim, htop` 可能只赋值为 vim, 仍不安全; 再试直接 eval
+  fail "could not reproduce old breakage (env may differ)"
+fi
+rm -f "$tmp/hijacked"
+# shellcheck disable=SC1090
+PATH="$fakebin:$PATH" bash -c "set -e; . '$prov_new'; printf 'v=%s u=%s\n' \"\$EXTRA_APT_PACKAGES\" \"\$TARGET_USER\"" > "$tmp/prov-out"
+if [[ -f "$tmp/hijacked" ]]; then
+  fail "new provision.env still executed htop"
+elif grep -qx 'v=vim,htop u=ops' "$tmp/prov-out"; then
+  pass "new provision.env source-safe + values intact"
+else
+  fail "new provision.env values: $(cat "$tmp/prov-out")"
+fi
+
+echo "== tar ownership: pack root + extract no-same-owner =="
+tarown="$tmp/tarown"
+mkdir -p "$tarown/src/bin" "$tarown/dst"
+echo '#!/bin/sh' > "$tarown/src/bin/tool"
+echo hi > "$tarown/src/lib.txt"
+# 模拟非 root 打包后再强制 owner 0
+tar --owner=0 --group=0 --numeric-owner -czf "$tarown/prefix.tar.gz" -C "$tarown/src" .
+mkdir -p "$tarown/extract"
+tar --no-same-owner --no-overwrite-dir -xzf "$tarown/prefix.tar.gz" -C "$tarown/extract"
+# 提取后属主应是当前用户 (no-same-owner), 绝不应依赖归档里的 uid
+uid_now="$(id -u)"
+got="$(stat -c %u "$tarown/extract/bin" 2>/dev/null || stat -f %u "$tarown/extract/bin")"
+if [[ "$got" == "$uid_now" ]]; then
+  pass "extract --no-same-owner keeps extractor uid ($got)"
+else
+  fail "extract ownership unexpected: got=$got want=$uid_now"
+fi
+# 归档里记录的应是 0/0
+meta="$(tar -tzvf "$tarown/prefix.tar.gz" | awk 'NR==1{print $2; exit}')"
+# 常见: root/root 或 0/0
+case "$meta" in
+  root/root|0/0|root/0|0/root) pass "pack --owner=0 numeric ($meta)" ;;
+  *)
+    # busybox/gnu 差异: 再查 --numeric
+    if tar --numeric-owner -tzvf "$tarown/prefix.tar.gz" 2>/dev/null | awk 'NR==1{exit !($2=="0/0")}'; then
+      pass "pack --owner=0 numeric (0/0)"
+    else
+      fail "pack ownership meta=$meta"
+    fi
+    ;;
+esac
+
+echo "== lib-offline extract flags =="
+if grep -q -- '--no-same-owner' software/lib-offline.sh \
+  && grep -q -- '--no-overwrite-dir' software/lib-offline.sh \
+  && grep -q '/opt/' software/lib-offline.sh \
+  && grep -q -- '--owner=0' tools/fetch-offline-bundle.sh; then
+  pass "offline tar ownership flags present"
+else
+  fail "offline tar ownership flags present"
+fi
+
+echo "== validate-offline-bundle helper =="
+if [[ -x tools/validate-offline-bundle.sh ]] && bash -n tools/validate-offline-bundle.sh; then
+  # 空假捆绑应失败
+  mkdir -p "$tmp/ob/apt"
+  echo '{"schema":2,"release":"noble","pins":{}}' > "$tmp/ob/manifest.json"
+  : > "$tmp/ob/apt/Packages"
+  if bash tools/validate-offline-bundle.sh --bundle "$tmp/ob" --release noble 2>"$tmp/ob.err"; then
+    fail "validate should fail on empty Packages"
+  else
+    if grep -q '缺包\|不完整' "$tmp/ob.err"; then
+      pass "validate-offline-bundle rejects empty apt"
+    else
+      fail "validate-offline-bundle rejects empty apt: $(head -2 "$tmp/ob.err")"
+    fi
+  fi
+else
+  fail "validate-offline-bundle helper"
+fi
+
+echo "== build-iso force-fetch + provision.env %q markers =="
+if grep -q -- '--force-fetch' build-iso.sh \
+  && grep -q 'EXTRA_APT_PACKAGES=%q' build-iso.sh \
+  && grep -q 'validate-offline-bundle.sh' build-iso.sh \
+  && grep -q 'release_to_codename' build-iso.sh; then
+  pass "build-iso force-fetch + %q + validate hooks"
+else
+  fail "build-iso force-fetch + %q + validate hooks"
+fi
+
+echo "== 99-cleanup sshd/compose/jenkins =="
+if grep -q 'sshd -V' software/99-cleanup.sh \
+  && grep -q 'docker compose version' software/99-cleanup.sh \
+  && grep -q 'jenkins' software/99-cleanup.sh; then
+  pass "99-cleanup manifest helpers"
+else
+  fail "99-cleanup manifest helpers"
+fi
+
 echo "== shellcheck (if available) =="
 if command -v shellcheck >/dev/null; then
-  if shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh test/local-check.sh \
+  if shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh tools/validate-offline-bundle.sh test/local-check.sh \
     && shellcheck -e SC2054,SC2001 -x test/qemu-smoke.sh; then
     pass "shellcheck"
   else

@@ -201,17 +201,19 @@ cat /var/log/autoinstall/20-docker.log
 | `--iso` / `--out` | 输入/输出路径，必填 |
 | `--password-hash` | **推荐**。`openssl passwd -6 '密码'` 的结果 |
 | `--password` | 明文，脚本自动哈希；会进 shell 历史，仅调试用 |
-| `--packages` | 逗号分隔的发行版包名，走 subiquity 的 apt（第三方包走 `software/`） |
+| `--packages` | 逗号分隔、**不要空格**（如 `vim,curl,htop`）；走 subiquity 的 apt（第三方包走 `software/`） |
 | `--mirror` | 内网源务必替换，否则每台机器都从公网拉 |
 | `--no-provision` | 不执行 `software/`，只做裸装机 |
 | `--skip "30 70"` | 跳过脚本：编号前缀或完整名均可（`30` / `30-jenkins`） |
 | `--strict` | 任一软件装失败就中止安装（默认记日志继续） |
 | `--offline` | apt `fallback: offline-install`（`updates` 仍为 Subiquity 合法值 `security`；无 `none`） |
+| `--force-fetch` | 配合 `--fetch-offline`：忽略捆绑 fingerprint，强制重建离线包 |
+| `--offline-bundle DIR` | 使用已抓取的离线捆绑目录；构建前会 `validate-offline-bundle` |
 | `--debs DIR` | 把目录下 `.deb` 打进 `/pool` 并离线安装 |
 | `--storage-layout` | `direct`（默认）/ `lvm` / `zfs`。作为选盘页的**预选布局**；默认仍要你在 UI 确认后才继续 |
-| `--auto-disk` | **危险**。跳过硬盘选择，按 `match size: largest` 自动抹最大盘。默认关闭；仅给 QEMU/CI 无人值守。物理机请保持默认 |
+| `--auto-disk` | **危险**。跳过硬盘选择，按 `match size: largest` 自动抹最大盘。默认关闭；仅给 QEMU/CI 无人值守。物理机请保持默认。开启后 `shutdown: poweroff`（关机不重启），避免 U 盘未拔时循环抹盘 |
 | `--network` | `dhcp`（默认）/ `none`。默认写入 netplan match `en*`/`eth*` 的 DHCP（`optional: true`），并用 late-command 落盘 `/etc/netplan/50-autoinstall-dhcp.yaml`（mode 600）+ 禁用 cloud-init 网络改写，保证**离线无网卡装机**后首启插网也能 DHCP。`none` 则不写。静态 IP 后续再加。 |
-| `--ssh-allow-pw` | 未注入公钥时**必须为 true**，否则装完登不进去；与 `10-openssh.sh` 保持一致 |
+| `--ssh-allow-pw` | 默认 `true`。设为 `false` 时**必须**同时提供 `--ssh-authorized-keys`，否则构建直接失败；与 `10-openssh.sh` 保持一致 |
 | `--ssh-authorized-keys FILE` | 公钥文件（每行一把，忽略空行/注释），写入 `ssh.authorized-keys`，并经 `/nocloud/write-authorized-keys.sh` late-command 再写入用户 `~/.ssh/authorized_keys`（防 Subiquity 漏写）；建议配合 `--ssh-allow-pw false` |
 | `--iso-sha256 HEX` | 可选源 ISO SHA256；不匹配立即失败 |
 | `--iso-sha256sums FILE` | 按 ISO basename 在 SHA256SUMS 文件中查找校验和；优先于 `--iso-sha256` |
@@ -300,7 +302,10 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 体积与缓存：
 
-- 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；有 `manifest.json` 时默认复用（`--force` 重建）。**新加 gh / ripgrep / Unity CLI / Godot 等条目后，旧捆绑需 `--force` 才会带上新包（含 `gh` deb、`unity-cli/`、`godot/`）。**
+- 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；`manifest.json` 含 `fingerprint`（release/arch/pins/seeds）。指纹一致才复用，否则或旧格式需 `--force` 重建。构建时 `validate-offline-bundle.sh` 会核对 apt 种子包与 `unity-cli/`、`godot/` 等目录；失败则提示 `--force` / `--force-fetch`。
+- `--fetch-offline` 用 **ISO 识别到的 release**（非仅文件名）选 jammy/noble；加 `--force-fetch` 等价于给 fetch 传 `--force`。
+- npm/`node` 打包使用 `--owner=0 --group=0`；安装时 `tar --no-same-owner`，Node 解到 `/opt/node-…` 再 symlink，避免 `/usr/local` 属主变成 uid 1000。
+- `provision.env` 全部 `printf %q` 写入，避免 `--packages "vim, htop"` 这类值在 source 时把包名当命令执行。
 - 实测（本仓库验证机，2026-11）：**noble+npm ≈ 648 MB**（150 debs + npm prefix ≈329 MB 压缩）；**jammy apt-only（--skip-npm）≈ 312 MB**（127 debs）。含 OpenMausBot 时 npm 树是大头；U 盘请预留 ≥ 镜像+捆绑余量。
 - `--packages` 会并进捆绑；全离线时 autoinstall 的 `packages:` 置空，改由 `00-base.sh` 从本地 apt 安装，避免安装器阶段无索引。
 
@@ -340,7 +345,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 | `apt` 阶段长时间卡住 | 无网但没加 `--offline` | 加 `--offline`，或换内网 `--mirror` |
 | 装完重启又装一遍 | U 盘仍在启动顺序首位 | 装机后拔盘，或在 BIOS 里把硬盘提到前面 |
 | Ventoy 启动不生效 | 走的是 `loopback.cfg` | 确认输出里有 `loopback.cfg` 的 patch 日志；新版 Ventoy 需在菜单按 `F6` 用 grub2 模式 |
-| 装完 SSH 登不进 | `allow-pw: false` 且无公钥 | `--ssh-allow-pw true` |
+| 装完 SSH 登不进 | `allow-pw: false` 且无公钥 | 构建期已拒绝该组合；补 `--ssh-authorized-keys` 或 `--ssh-allow-pw true` |
 | 报 `no disk found` / 抹错盘 | 多盘/RAID，或误开 `--auto-disk` | **默认会停在选盘页**，直接在 UI 选对盘。无人值守才加 `--auto-disk`；仍自动失败时可改 `storage.layout.match`（serial/path），勿盲目依赖 `size: largest` |
 | `jenkins.service` 起不来 | Java 版本不对 | 看 `/var/log/autoinstall/30-jenkins.log`；确认装的是 21 或 17 |
 | `npm install` 超时 / 404 | 公网 registry 不通 | 换 `registry.npmmirror.com`，或改走内网 Verdaccio |

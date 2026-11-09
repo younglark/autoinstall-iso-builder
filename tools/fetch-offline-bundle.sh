@@ -51,7 +51,7 @@ usage() {
   --pin-unity-cli VER   Unity CLI 版本 (默认拉 latest/latest-beta)
   --ubuntu-mirror URL   容器内 Ubuntu 源
   --skip-npm            不打包 npm 全局树 (调试用)
-  --force               忽略已有 manifest, 强制重建 (新加 gh/ripgrep/unity-cli/godot 等时需 --force)
+  --force               忽略已有 manifest/fingerprint, 强制重建 (参数变更或缺件时需 --force)
 USAGE
 }
 
@@ -94,10 +94,43 @@ fi
 command -v docker >/dev/null || die "需要 docker 来解析目标发行版依赖 (docker pull ubuntu:${RELEASE})"
 docker info >/dev/null 2>&1 || die "dockerd 不可用: docker info 失败"
 
+# 计算期望指纹; 已有捆绑指纹一致才复用 (否则提示 --force)
+expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" <<'FP'
+import hashlib, json, sys
+payload = {
+  "schema": 2,
+  "release": sys.argv[1],
+  "arch": sys.argv[2],
+  "pins": {
+    "node_major": sys.argv[3],
+    "grok": sys.argv[4],
+    "opencode": sys.argv[5],
+    "openmausbot": sys.argv[6],
+    "unity_cli": sys.argv[7],
+    "godot": "4.7.2",
+  },
+  "extra_packages": [p for p in sys.argv[8].split(",") if p],
+  "seeds": [
+    "git", "ripgrep", "openssh-server", "gh",
+    "docker-ce", "nvidia-container-toolkit", "jenkins", "nodejs",
+    "unity-cli", "godot",
+  ],
+}
+print(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16])
+FP
+)"
+
 if [[ "$FORCE" -ne 1 && -f "$OUT/manifest.json" && -d "$OUT/apt" ]]; then
-  ok "复用已有捆绑: $OUT ($(du -sh "$OUT" | cut -f1))"
-  python3 -c "import json;print(json.dumps(json.load(open('$OUT/manifest.json')),indent=2,ensure_ascii=False))" 2>/dev/null || true
-  exit 0
+  have_fp="$(python3 -c "import json;print(json.load(open('$OUT/manifest.json')).get('fingerprint',''))" 2>/dev/null || true)"
+  if [[ -n "$have_fp" && "$have_fp" == "$expected_fp" ]]; then
+    ok "复用已有捆绑 (fingerprint=$have_fp): $OUT ($(du -sh "$OUT" | cut -f1))"
+    python3 -c "import json;print(json.dumps(json.load(open('$OUT/manifest.json')),indent=2,ensure_ascii=False))" 2>/dev/null || true
+    exit 0
+  fi
+  if [[ -n "$have_fp" && "$have_fp" != "$expected_fp" ]]; then
+    die "离线捆绑指纹不匹配 (have=$have_fp want=$expected_fp)。请加 --force 重建: $OUT"
+  fi
+  die "离线捆绑缺少 fingerprint (旧格式)。请加 --force 重建: $OUT"
 fi
 
 mkdir -p "$OUT" "$CACHE_ROOT"
@@ -330,7 +363,7 @@ if [[ "$SKIP_NPM" -eq 0 ]]; then
     "openmausbot@${PIN_OPENMAUSBOT}" \
     --no-audit --no-fund --ignore-scripts
   mkdir -p "$OUT/npm"
-  tar -czf "$OUT/npm/prefix.tar.gz" -C "$NPM_PREFIX" .
+  tar --owner=0 --group=0 --numeric-owner -czf "$OUT/npm/prefix.tar.gz" -C "$NPM_PREFIX" .
   ok "npm prefix $(du -h "$OUT/npm/prefix.tar.gz" | cut -f1)"
 else
   warn "跳过 npm (--skip-npm)"
@@ -444,7 +477,8 @@ if gd.exists():
       "present": any(gd.glob("Godot_*.zip")) or any(gd.glob("*.zip")),
     }
 manifest = {
-  "schema": 1,
+  "schema": 2,
+  "fingerprint": "${expected_fp}",
   "release": "${RELEASE}",
   "arch": "${ARCH}",
   "created_at": "${CREATED}",

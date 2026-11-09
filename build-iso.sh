@@ -33,6 +33,8 @@ SSH_AUTHORIZED_KEYS=""
 STORAGE_LAYOUT="direct"
 NETWORK_MODE="dhcp"
 AUTO_DISK=0
+FORCE_FETCH=0
+FETCH_OFFLINE=0
 OFFLINE=0
 OFFLINE_BUNDLE=""
 FULL_OFFLINE=0
@@ -79,7 +81,7 @@ usage() {
   --packages "a,b,c"    预装软件包, 逗号分隔
   --mirror URL          默认 archive.ubuntu.com; 内网请填本地源
   --locale / --keyboard / --timezone
-  --ssh-allow-pw BOOL   默认 true (未配公钥时必须为 true, 否则装完登不进去)
+  --ssh-allow-pw BOOL   默认 true; false 时必须同时提供 --ssh-authorized-keys, 否则构建失败
   --ssh-authorized-keys FILE
                         authorized_keys 文件 (每行一把公钥); 写入 autoinstall ssh.authorized-keys,
                         并打进 /nocloud + late-command 再写一次到用户家目录 (防 Subiquity 漏写)
@@ -89,9 +91,11 @@ usage() {
   --auto-disk           全自动选盘并抹盘 (interactive-sections: [])。默认停在硬盘选择页
                         由用户确认。危险：按 match size:largest 自动抹最大盘。仅用于
                         QEMU/CI 无人值守；物理机切勿默认开启。
+                        开启后 shutdown=poweroff (关机不重启), 防止 U 盘未拔循环抹盘。
   --offline             全离线安装 (需 --offline-bundle; 零外网请求仍装完全部 software/)
   --offline-bundle DIR  fetch-offline-bundle.sh 产出目录 (含 apt/ npm/ manifest.json)
   --fetch-offline       构建前自动调用 tools/fetch-offline-bundle.sh (需 docker)
+  --force-fetch         配合 --fetch-offline: 忽略缓存指纹, 强制重建离线捆绑
   --debs DIR            把目录下所有 .deb 打进 ISO 的 /pool 并离线安装 (旧局部离线)
   --no-provision        不执行 software/ 下的软件预装脚本
   --strict              任一软件装失败就中止安装 (默认: 记日志继续)
@@ -159,6 +163,7 @@ while [[ $# -gt 0 ]]; do
     --offline)        OFFLINE=1; shift ;;
     --offline-bundle) OFFLINE_BUNDLE="$2"; OFFLINE=1; shift 2 ;;
     --fetch-offline)  FETCH_OFFLINE=1; OFFLINE=1; shift ;;
+    --force-fetch)    FORCE_FETCH=1; FETCH_OFFLINE=1; OFFLINE=1; shift ;;
     --debs)           DEBS_DIR="$2"; shift 2 ;;
     --menu-regex)     MENU_REGEX="$2"; shift 2 ;;
     --edition)        EDITION="$2"; shift 2 ;;
@@ -187,6 +192,37 @@ done
 
 if [[ -n "$SSH_AUTHORIZED_KEYS" ]]; then
   [[ -f "$SSH_AUTHORIZED_KEYS" ]] || die "--ssh-authorized-keys 文件不存在: $SSH_AUTHORIZED_KEYS"
+fi
+
+# username / packages 白名单 (与 render-user-data 一致; 防止 provision.env 注入)
+[[ "$USERNAME_" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]   || die "--username 非法 (POSIX: 以小写字母或 _ 开头, 仅 [a-z0-9_-], 最长 32): $USERNAME_"
+if [[ -n "$PACKAGES" ]]; then
+  if [[ "$PACKAGES" =~ [[:space:]] ]]; then
+    die "--packages 不能含空格; 请用逗号分隔, 例如: vim,curl,htop"
+  fi
+  IFS=',' read -r -a _pkgs <<< "$PACKAGES"
+  for _p in "${_pkgs[@]}"; do
+    [[ -z "$_p" ]] && continue
+    [[ "$_p" =~ ^[a-zA-Z0-9.+_-]+$ ]] || die "--packages 含非法包名: $_p"
+  done
+fi
+# pin 白名单 (字母数字 . _ - 或 latest)
+_pin_ok() { [[ "$1" =~ ^[a-zA-Z0-9._+-]+$ ]] || [[ "$1" == "latest" ]]; }
+_pin_ok "$PIN_NODE_MAJOR" || die "非法 --pin-node: $PIN_NODE_MAJOR"
+_pin_ok "$PIN_GROK" || die "非法 --pin-grok: $PIN_GROK"
+_pin_ok "$PIN_OPENCODE" || die "非法 --pin-opencode: $PIN_OPENCODE"
+_pin_ok "$PIN_OPENMAUSBOT" || die "非法 --pin-openmausbot: $PIN_OPENMAUSBOT"
+[[ -z "$PIN_UNITY_CLI" || "$PIN_UNITY_CLI" =~ ^[a-zA-Z0-9._+-]+$ ]] || die "非法 --pin-unity-cli: $PIN_UNITY_CLI"
+
+# SSH: allow-pw=false 且无公钥 → 装完登不进, 构建期直接拒绝
+_ssh_allow="$(printf '%s' "$SSH_ALLOW_PW" | tr '[:upper:]' '[:lower:]')"
+case "$_ssh_allow" in true|false) ;; *) die "--ssh-allow-pw 必须是 true 或 false" ;; esac
+_has_keys=0
+if [[ -n "$SSH_AUTHORIZED_KEYS" ]] && grep -vE '^[[:space:]]*(#|$)' "$SSH_AUTHORIZED_KEYS" | grep -q .; then
+  _has_keys=1
+fi
+if [[ "$_ssh_allow" == "false" && "$_has_keys" -eq 0 ]]; then
+  die "--ssh-allow-pw false 但未提供任何 SSH 公钥; 装完将无法登录。请加 --ssh-authorized-keys, 或改回 --ssh-allow-pw true"
 fi
 
 if [[ -z "$PASS_HASH" && -z "$PASS_PLAIN" ]]; then
@@ -281,21 +317,33 @@ else
 fi
 
 # ---------------------------------------------------------------- 全离线捆绑
+# ISO_RELEASE 已由 detect-edition 填好 (24.04/22.04); 映射到 jammy/noble
+release_to_codename() {
+  case "$1" in
+    22.04|jammy) echo jammy ;;
+    24.04|noble|*) echo noble ;;
+  esac
+}
+
 if [[ "${FETCH_OFFLINE:-0}" -eq 1 ]]; then
-  REL_HINT="noble"
-  if [[ -n "$SRC_ISO" ]]; then
+  if [[ -n "$ISO_RELEASE" ]]; then
+    REL_HINT="$(release_to_codename "$ISO_RELEASE")"
+  else
+    REL_HINT="noble"
     base="$(basename -- "$SRC_ISO")"
     case "$base" in
       *22.04*|*jammy*) REL_HINT=jammy ;;
       *24.04*|*noble*) REL_HINT=noble ;;
     esac
+    warn "未识别 ISO_RELEASE, 按文件名猜测: $REL_HINT"
   fi
   OB_OUT="${OFFLINE_BUNDLE:-$SCRIPT_DIR/cache/offline-bundles/${REL_HINT}-amd64}"
-  log "自动抓取离线捆绑 -> $OB_OUT"
+  log "自动抓取离线捆绑 -> $OB_OUT (release=$REL_HINT force=${FORCE_FETCH:-0})"
   FETCH_ARGS=(--release "$REL_HINT" --out "$OB_OUT" --packages "$PACKAGES"
     --pin-node "$PIN_NODE_MAJOR" --pin-grok "$PIN_GROK"
     --pin-opencode "$PIN_OPENCODE" --pin-openmausbot "$PIN_OPENMAUSBOT")
   [[ -n "$PIN_UNITY_CLI" ]] && FETCH_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
+  [[ "${FORCE_FETCH:-0}" -eq 1 ]] && FETCH_ARGS+=(--force)
   bash "$SCRIPT_DIR/tools/fetch-offline-bundle.sh" "${FETCH_ARGS[@]}"
   OFFLINE_BUNDLE="$OB_OUT"
 fi
@@ -307,8 +355,21 @@ if [[ -n "$OFFLINE_BUNDLE" ]]; then
   OFFLINE=1
   FULL_OFFLINE=1
   log "全离线捆绑: $OFFLINE_BUNDLE ($(du -sh "$OFFLINE_BUNDLE" | cut -f1))"
+  if [[ "$PROVISION" -eq 1 ]]; then
+    REL_FOR_V=""
+    if [[ -n "$ISO_RELEASE" ]]; then
+      REL_FOR_V="$(release_to_codename "$ISO_RELEASE")"
+    fi
+    VAL_ARGS=(--bundle "$OFFLINE_BUNDLE" --skip "$PROVISION_SKIP"
+      --pin-node "$PIN_NODE_MAJOR" --pin-grok "$PIN_GROK"
+      --pin-opencode "$PIN_OPENCODE" --pin-openmausbot "$PIN_OPENMAUSBOT")
+    [[ -n "$REL_FOR_V" ]] && VAL_ARGS+=(--release "$REL_FOR_V")
+    [[ -n "$PIN_UNITY_CLI" ]] && VAL_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
+    bash "$SCRIPT_DIR/tools/validate-offline-bundle.sh" "${VAL_ARGS[@]}"       || die "离线捆绑校验失败 (见上)。重建: ./tools/fetch-offline-bundle.sh --force ..."
+  fi
 elif [[ "$OFFLINE" -eq 1 && "$PROVISION" -eq 1 ]]; then
-  die "--offline 且启用 provision 时必须提供 --offline-bundle DIR (或 --fetch-offline)。\n  先运行: ./tools/fetch-offline-bundle.sh --release noble --out cache/offline-bundles/noble-amd64"
+  die "--offline 且启用 provision 时必须提供 --offline-bundle DIR (或 --fetch-offline)。
+  先运行: ./tools/fetch-offline-bundle.sh --release noble --out cache/offline-bundles/noble-amd64"
 fi
 
 if [[ "$EDITION" == "desktop" && "$FULL_OFFLINE" -eq 1 ]]; then
@@ -383,7 +444,7 @@ fi
 [[ "$AUTO_DISK" -eq 1 ]] && RENDER_ARGS+=(--auto-disk)
 
 if [[ "$AUTO_DISK" -eq 1 ]]; then
-  warn "--auto-disk 已开启：装机将自动抹除 match size:largest 的磁盘，无确认步骤"
+  warn "--auto-disk 已开启：装机将自动抹除 match size:largest 的磁盘，无确认步骤；装完 shutdown=poweroff"
 else
   log "默认停在硬盘选择页（interactive storage）；无人值守请加 --auto-disk"
 fi
@@ -422,21 +483,36 @@ if [[ "$PROVISION" -eq 1 ]]; then
   # 只带 .sh 和 env, 不带任何本地残留
   cp "$SCRIPT_DIR/software"/*.sh "$WORK/provision/"
   chmod 0755 "$WORK/provision"/*.sh
-  cat > "$WORK/provision/provision.env" <<ENV
-# 由 build-iso.sh 生成
-TARGET_USER=$USERNAME_
-STRICT=$STRICT
-PROVISION_SKIP="$PROVISION_SKIP"
-SSH_ALLOW_PW=$SSH_ALLOW_PW
-PIN_NODE_MAJOR=$PIN_NODE_MAJOR
-PIN_GROK=$PIN_GROK
-PIN_OPENCODE=$PIN_OPENCODE
-PIN_OPENMAUSBOT=$PIN_OPENMAUSBOT
-PIN_UNITY_CLI=$PIN_UNITY_CLI
-OFFLINE=$FULL_OFFLINE
-OFFLINE_ROOT=/opt/offline
-EXTRA_APT_PACKAGES=$PACKAGES
-ENV
+  # 逐行 %q 写入, 保证 source 安全 (旧写法 EXTRA_APT_PACKAGES=vim, htop 会把 htop 当命令执行)
+  {
+    echo "# 由 build-iso.sh 生成 (printf %q; 请勿手改未加引号的值)"
+    printf 'TARGET_USER=%q
+' "$USERNAME_"
+    printf 'STRICT=%q
+' "$STRICT"
+    printf 'PROVISION_SKIP=%q
+' "$PROVISION_SKIP"
+    printf 'SSH_ALLOW_PW=%q
+' "$SSH_ALLOW_PW"
+    printf 'PIN_NODE_MAJOR=%q
+' "$PIN_NODE_MAJOR"
+    printf 'PIN_GROK=%q
+' "$PIN_GROK"
+    printf 'PIN_OPENCODE=%q
+' "$PIN_OPENCODE"
+    printf 'PIN_OPENMAUSBOT=%q
+' "$PIN_OPENMAUSBOT"
+    printf 'PIN_UNITY_CLI=%q
+' "$PIN_UNITY_CLI"
+    printf 'PIN_GODOT=%q
+' "${PIN_GODOT:-4.7.2}"
+    printf 'OFFLINE=%q
+' "$FULL_OFFLINE"
+    printf 'OFFLINE_ROOT=%q
+' "/opt/offline"
+    printf 'EXTRA_APT_PACKAGES=%q
+' "$PACKAGES"
+  } > "$WORK/provision/provision.env"
   SCRIPT_COUNT=$(find "$WORK/provision" -maxdepth 1 -name '[0-9][0-9]-*.sh' | wc -l)
   ok "已打包 $SCRIPT_COUNT 个软件预装脚本 (node>=$PIN_NODE_MAJOR grok=$PIN_GROK)"
   [[ -n "$PROVISION_SKIP" ]] && warn "跳过: $PROVISION_SKIP"
@@ -579,5 +655,5 @@ cat <<DONE
 
 注意:
   * ISO 内的 md5sum.txt 未更新 —— casper 只在传 integrity-check 时才校验, 默认无影响。
-  * 装完会 reboot。U 盘启动务必调整 BIOS 顺序, 否则会再装一遍。
+  * 默认 interactive 装完会 reboot; 加了 --auto-disk 则 poweroff (关机), 避免 U 盘未拔循环抹盘。
 DONE
