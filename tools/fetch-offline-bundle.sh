@@ -14,6 +14,11 @@
 #     package-list.txt
 #
 # 依赖: docker (推荐), 宿主机 node/npm (打 npm 包)。无 docker 时退出并提示。
+#
+# apt 解析方式 (--apt-runner / 环境变量 AIB_APT_RUNNER):
+#   docker  默认。宿主机 `docker run ubuntu:<release>` 解析依赖闭包 (Linux 原生用法不变)
+#   direct  已在「同发行版 + 同架构」的一次性容器里 (如 builder 镜像), 直接在本容器跑 apt,
+#           不需要 docker-in-docker。只允许在容器内使用 (会改写本机 /etc/apt)。
 # =============================================================================
 set -Eeuo pipefail
 
@@ -32,6 +37,7 @@ PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 SKIP_NPM=0
 FORCE=0
+APT_RUNNER="${AIB_APT_RUNNER:-docker}"
 UBUNTU_MIRROR="${UBUNTU_MIRROR:-http://archive.ubuntu.com/ubuntu}"
 
 usage() {
@@ -52,6 +58,7 @@ usage() {
   --pin-unity-cli VER   Unity CLI 版本 (默认拉 latest/latest-beta)
   --ubuntu-mirror URL   容器内 Ubuntu 源
   --skip-npm            不打包 npm 全局树 (调试用)
+  --apt-runner R        docker (默认) | direct (仅限容器内, 见脚本头注释)
   --force               忽略已有 manifest/fingerprint, 强制重建 (参数变更或缺件时需 --force)
 USAGE
 }
@@ -76,6 +83,7 @@ while [[ $# -gt 0 ]]; do
     --ubuntu-mirror) UBUNTU_MIRROR="$2"; shift 2 ;;
     --skip-npm) SKIP_NPM=1; shift ;;
     --force) FORCE=1; shift ;;
+    --apt-runner) APT_RUNNER="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "未知参数: $1" ;;
   esac
@@ -92,8 +100,29 @@ if [[ -z "$OUT" ]]; then
   OUT="$CACHE_ROOT/${RELEASE}-${ARCH}"
 fi
 
-command -v docker >/dev/null || die "需要 docker 来解析目标发行版依赖 (docker pull ubuntu:${RELEASE})"
-docker info >/dev/null 2>&1 || die "dockerd 不可用: docker info 失败"
+in_container() {
+  [[ -f /.dockerenv || -f /run/.containerenv || "${AIB_IN_CONTAINER:-0}" == "1" ]]
+}
+
+case "$APT_RUNNER" in
+  docker)
+    command -v docker >/dev/null || die "需要 docker 来解析目标发行版依赖 (docker pull ubuntu:${RELEASE})。
+  macOS/Windows 请用 scripts/aib.sh / scripts/aib.ps1 (容器内 direct 模式)"
+    docker info >/dev/null 2>&1 || die "dockerd 不可用: docker info 失败"
+    ;;
+  direct)
+    in_container || die "--apt-runner direct 只能在一次性容器内使用 (会改写 /etc/apt); 宿主机请用默认 docker"
+    [[ "$(id -u)" -eq 0 ]] || die "--apt-runner direct 需要 root (容器内 apt-get)"
+    # shellcheck disable=SC1091
+    HOST_CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
+    [[ "$HOST_CODENAME" == "$RELEASE" ]] || die "direct 模式要求容器发行版与 --release 一致: 容器=$HOST_CODENAME 目标=$RELEASE
+  (aib 包装脚本会按 --release 自动选 builder 镜像变体; jammy 用 :<tag>-jammy)"
+    HOST_ARCH="$(dpkg --print-architecture)"
+    [[ "$HOST_ARCH" == "$ARCH" ]] || die "direct 模式要求容器架构与 --arch 一致: 容器=$HOST_ARCH 目标=$ARCH
+  (Apple Silicon 请用 --platform linux/amd64 运行; aib 包装脚本已自动处理)"
+    ;;
+  *) die "--apt-runner 必须是 docker 或 direct (got: $APT_RUNNER)" ;;
+esac
 
 # 计算期望指纹; 已有捆绑指纹一致才复用 (否则提示 --force)
 expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" <<'FP'
@@ -151,8 +180,10 @@ case "$RELEASE" in
   noble) IMG="ubuntu:24.04" ;;
 esac
 
-log "拉取/使用镜像 $IMG"
-docker pull "$IMG" >/dev/null
+if [[ "$APT_RUNNER" == "docker" ]]; then
+  log "拉取/使用镜像 $IMG"
+  docker pull "$IMG" >/dev/null
+fi
 
 # --------------- 容器内: 配源、下载 deb 闭包、生成 Packages ---------------
 cat > "$WORK/fetch-debs.sh" <<'INNER'
@@ -164,7 +195,7 @@ ARCH="$2"
 NODE_MAJOR="$3"
 MIRROR="$4"
 EXTRA_PACKAGES="$5"
-OUTDIR="/out"
+OUTDIR="${FETCH_OUTDIR:-/out}"
 
 echo "== container: $(. /etc/os-release && echo "$PRETTY_NAME") arch=$ARCH =="
 
@@ -353,12 +384,18 @@ chmod +x "$WORK/fetch-debs.sh"
 
 log "在 $IMG 中解析并下载 apt 依赖闭包"
 mkdir -p "$WORK/out"
-docker run --rm --network host \
-  --dns 8.8.8.8 --dns 1.1.1.1 \
-  -v "$WORK/fetch-debs.sh:/fetch-debs.sh:ro" \
-  -v "$WORK/out:/out" \
-  -e DEBIAN_FRONTEND=noninteractive \
-  "$IMG" bash /fetch-debs.sh "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES"
+if [[ "$APT_RUNNER" == "direct" ]]; then
+  log "direct 模式: 直接在当前容器 ($(. /etc/os-release && echo "$PRETTY_NAME"), $(dpkg --print-architecture)) 里跑 apt"
+  FETCH_OUTDIR="$WORK/out" DEBIAN_FRONTEND=noninteractive \
+    bash "$WORK/fetch-debs.sh" "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES"
+else
+  docker run --rm --network host \
+    --dns 8.8.8.8 --dns 1.1.1.1 \
+    -v "$WORK/fetch-debs.sh:/fetch-debs.sh:ro" \
+    -v "$WORK/out:/out" \
+    -e DEBIAN_FRONTEND=noninteractive \
+    "$IMG" bash /fetch-debs.sh "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES"
+fi
 
 # 容器以 root 写 /out, 改回当前用户以免 cleanup/复用失败
 if command -v sudo >/dev/null; then

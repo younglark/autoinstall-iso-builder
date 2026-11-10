@@ -14,11 +14,12 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck python3-yaml openssl
+          sudo apt-get install -y -qq shellcheck python3-yaml openssl xorriso
 
       - name: ShellCheck
         run: |
-          shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh test/local-check.sh
+          shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh test/local-check.sh \
+            docker/entrypoint.sh scripts/aib.sh test/make-fake-iso.sh test/wrapper-dry-run.sh
           # SC2054: qemu -drive file=...,if=... commas are inside one argv, not array separators
           shellcheck -e SC2054,SC2001 -x test/qemu-smoke.sh
 
@@ -28,5 +29,16 @@ jobs:
       - name: Local validators (render / grub / skip / yaml)
         run: bash test/local-check.sh
 
-      # 完整 build-iso --dry-run 需要真实 Ubuntu ISO, CI 不下载 (~2GB)。
-      # 组件级校验已覆盖渲染与 grub 注入。
+      - name: Wrapper dry-run (aib.sh)
+        run: bash test/wrapper-dry-run.sh
+
+      # 真实 Ubuntu ISO 太大 (~2-6GB) 不下载; 用 fixtures 拼的假 ISO 端到端跑 build-iso.sh
+      - name: E2E build-iso.sh with fake ISO (native)
+        run: |
+          set -euo pipefail
+          for e in server desktop; do
+            bash test/make-fake-iso.sh "$e" "$RUNNER_TEMP/fake-$e.iso"
+            bash build-iso.sh --iso "$RUNNER_TEMP/fake-$e.iso" --out "$RUNNER_TEMP/out-$e.iso" \
+              --password-hash "$(openssl passwd -6 ci)" --auto-disk
+            bash test/qemu-smoke.sh "$RUNNER_TEMP/out-$e.iso" --guard-only
+          done

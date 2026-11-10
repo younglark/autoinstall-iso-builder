@@ -1,0 +1,12 @@
+.git
+.github
+cache/
+out/
+*.iso
+*.iso.sha256
+**/__pycache__
+*.pyc
+*.log
+.vscode
+.idea
+.DS_Store
