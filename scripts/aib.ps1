@@ -18,7 +18,7 @@
     --dry-run       只打印将执行的 docker 命令, 不运行 (不需要 docker)
     -h, --help
 
-  子命令: build | fetch-offline | validate-offline | check-iso | local-check | shell | help | version
+  子命令: build | fetch-offline | validate-offline | check-iso | win | win-merge-ventoy | local-check | shell | help | version
 
   路径处理: 当前目录挂到容器 /work; --iso/--out/--offline-bundle 等路径参数若在当前目录外,
   自动把其父目录挂到 /mnt/aibN 并改写参数 (C:\Users\me\Downloads\x.iso -> /mnt/aib1/x.iso)。
@@ -75,8 +75,8 @@ $cmp = if ($OnWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [
 $Cwd = (Get-Location).ProviderPath.TrimEnd('\', '/')
 if ($Cwd -eq '') { $Cwd = [string]$sep }
 
-$PathOpts = @('--iso', '--out', '--offline-bundle', '--ssh-authorized-keys', '--debs', '--iso-sha256sums', '--cache-root', '--bundle', '--apt-cache')
-$OutOpts = @('--out', '--offline-bundle', '--cache-root', '--apt-cache')
+$PathOpts = @('--iso', '--out', '--offline-bundle', '--ssh-authorized-keys', '--debs', '--iso-sha256sums', '--cache-root', '--bundle', '--apt-cache', '--password-file', '--snippet', '--target')
+$OutOpts = @('--out', '--offline-bundle', '--cache-root', '--apt-cache', '--target')
 $MountSrcs = New-Object System.Collections.Generic.List[string]
 $MountDsts = New-Object System.Collections.Generic.List[string]
 
@@ -179,6 +179,8 @@ foreach ($v in @('PIN_NODE_MAJOR', 'PIN_GROK', 'PIN_OPENCODE', 'PIN_OPENMAUSBOT'
   $val = [Environment]::GetEnvironmentVariable($v)
   if ($val) { $Docker.AddRange([string[]]@('-e', "$v=$val")) }
 }
+# Windows 账户密码: 只传变量名, docker 从环境取值, 不出现在命令行 / --dry-run 输出里
+if ([Environment]::GetEnvironmentVariable('AIB_WIN_PASSWORD')) { $Docker.AddRange([string[]]@('-e', 'AIB_WIN_PASSWORD')) }
 foreach ($x in $ExtraDockerArgs) { $Docker.Add($x) }
 $Docker.Add($ImageRef)
 $Docker.Add($SubCmd)

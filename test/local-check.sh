@@ -9,7 +9,7 @@ pass() { printf '[pass] %s\n' "$*"; }
 fail() { printf '[fail] %s\n' "$*" >&2; FAIL=1; }
 
 echo "== python syntax =="
-if python3 -m py_compile tools/patch-grub.py tools/render-user-data.py tools/detect-edition.py; then
+if python3 -m py_compile tools/patch-grub.py tools/render-user-data.py tools/detect-edition.py tools/render-unattend.py tools/merge-ventoy-json.py; then
   pass "py_compile"
 else
   fail "py_compile"
@@ -1514,9 +1514,17 @@ else
   fail "qemu-smoke paths + new tools + guard-only"
 fi
 
+echo "== windows unattend (test/win-check.sh) =="
+if bash test/win-check.sh; then
+  pass "win-check"
+else
+  fail "win-check"
+fi
+
 echo "== shellcheck (if available) =="
 if command -v shellcheck >/dev/null; then
   if shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh tools/ubuntu-mirror.sh tools/validate-offline-bundle.sh tools/apt-deb-reuse.sh \
+      tools/build-win-ventoy.sh test/win-check.sh \
       autoinstall/enable-offline-apt.sh autoinstall/restore-online-apt.sh test/local-check.sh \
     && shellcheck -e SC2054,SC2001 -x test/qemu-smoke.sh; then
     pass "shellcheck"

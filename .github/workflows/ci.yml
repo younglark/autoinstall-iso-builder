@@ -14,17 +14,18 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck python3-yaml openssl xorriso
+          sudo apt-get install -y -qq shellcheck python3-yaml openssl xorriso wimtools p7zip-full libxml2-utils
 
       - name: ShellCheck
         run: |
           shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh tools/ubuntu-mirror.sh tools/validate-offline-bundle.sh tools/apt-deb-reuse.sh test/local-check.sh test/container-x11vnc-reuse.sh \
+            tools/build-win-ventoy.sh test/win-check.sh \
             docker/entrypoint.sh scripts/aib.sh test/make-fake-iso.sh test/wrapper-dry-run.sh
           # SC2054: qemu -drive file=...,if=... commas are inside one argv, not array separators
           shellcheck -e SC2054,SC2001 -x test/qemu-smoke.sh
 
       - name: Python syntax
-        run: python3 -m py_compile tools/patch-grub.py tools/render-user-data.py tools/detect-edition.py
+        run: python3 -m py_compile tools/patch-grub.py tools/render-user-data.py tools/detect-edition.py tools/render-unattend.py tools/merge-ventoy-json.py
 
       - name: Local validators (render / grub / skip / yaml)
         run: bash test/local-check.sh
@@ -66,6 +67,18 @@ jobs:
           scripts/aib.sh version
           scripts/aib.sh local-check
           scripts/aib.sh fetch-offline --help >/dev/null
+
+      - name: Windows Ventoy deliverables via aib.sh (no ISO; password must not leak)
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/win.log"
+          AIB_WIN_PASSWORD='ci-S3cret' scripts/aib.sh win --out out/win-ventoy --ventoy-image /ISO/Win11_test.iso --hostname CI-WIN 2>&1 | tee "$log"
+          test -s out/win-ventoy/ventoy/script/aib-win-safe.xml
+          test -s out/win-ventoy/ventoy/script/aib-win-autodisk.xml
+          test -s out/win-ventoy/aib-win/run-all.ps1
+          test "$(stat -c %u out/win-ventoy/manifest.txt)" = "$(id -u)"
+          ! grep -q 'ci-S3cret' "$log"
+          ! grep -rq 'ci-S3cret' out/win-ventoy
 
       - name: E2E build with fake ISO via aib.sh (server + desktop, ISO outside cwd)
         run: |

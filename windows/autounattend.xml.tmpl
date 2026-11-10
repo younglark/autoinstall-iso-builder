@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  autoinstall-iso-builder: Windows 11 无人值守答案文件模板 (由 tools/render-unattend.py 渲染, 不要直接使用)
+  - 元素名均取自 Microsoft Learn "Unattended Windows Setup Reference" (见 README「Windows 11 无人值守」)
+  - 不含: ProductKey / PreventDeviceEncryption / TPM、Secure Boot、微软账户绕过
+  - 双 @ 包围的大写名为渲染占位符; DISK_CONFIGURATION / INSTALL_TO 两处注释按 safe / autodisk 变体替换
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <settings pass="windowsPE">
+    <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <SetupUILanguage>
+        <UILanguage>@@UI_LANGUAGE@@</UILanguage>
+      </SetupUILanguage>
+      <InputLocale>@@INPUT_LOCALE@@</InputLocale>
+      <SystemLocale>@@LOCALE@@</SystemLocale>
+      <UILanguage>@@UI_LANGUAGE@@</UILanguage>
+      <UserLocale>@@LOCALE@@</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <!--@@DISK_CONFIGURATION@@-->
+      <ImageInstall>
+        <OSImage>
+          <InstallFrom>
+            <MetaData wcm:action="add">
+              <Key>/IMAGE/NAME</Key>
+              <Value>@@EDITION@@</Value>
+            </MetaData>
+          </InstallFrom>
+          <!--@@INSTALL_TO@@-->
+          <WillShowUI>OnError</WillShowUI>
+        </OSImage>
+      </ImageInstall>
+      <UserData>
+        <AcceptEula>true</AcceptEula>
+      </UserData>
+    </component>
+  </settings>
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <ComputerName>@@HOSTNAME@@</ComputerName>
+      <TimeZone>@@TIMEZONE@@</TimeZone>
+    </component>
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>aib: copy aib-win payload from install media to C:\aib</Description>
+          <Path>@@PAYLOAD_COPY_CMD@@</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <InputLocale>@@INPUT_LOCALE@@</InputLocale>
+      <SystemLocale>@@LOCALE@@</SystemLocale>
+      <UILanguage>@@UI_LANGUAGE@@</UILanguage>
+      <UserLocale>@@LOCALE@@</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <AutoLogon>
+        <Enabled>true</Enabled>
+        <LogonCount>1</LogonCount>
+        <Username>@@USERNAME@@</Username>
+        <Password>
+          <Value>@@AUTOLOGON_PASSWORD_VALUE@@</Value>
+          <PlainText>@@PASSWORD_PLAINTEXT@@</PlainText>
+        </Password>
+      </AutoLogon>
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>aib: run C:\aib\run-all.ps1</Description>
+          <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\aib\run-all.ps1</CommandLine>
+        </SynchronousCommand>
+      </FirstLogonCommands>
+      <OOBE>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Name>@@USERNAME@@</Name>
+            <DisplayName>@@USERNAME@@</DisplayName>
+            <Group>Administrators</Group>
+            <Password>
+              <Value>@@ACCOUNT_PASSWORD_VALUE@@</Value>
+              <PlainText>@@PASSWORD_PLAINTEXT@@</PlainText>
+            </Password>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
+    </component>
+  </settings>
+</unattend>
