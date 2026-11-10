@@ -60,6 +60,7 @@ PIN_OPENCODE="${PIN_OPENCODE:-latest}"
 PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 PIN_GITEA="${PIN_GITEA:-latest}"
+PIN_FLCLASH="${PIN_FLCLASH:-latest}"
 # Gitea 管理员 (默认 = --username / --password; 只有哈希时装机生成随机密码)
 GITEA_ADMIN_USER=""
 GITEA_ADMIN_PASSWORD=""
@@ -73,6 +74,7 @@ JENKINS_PLUGINS="${JENKINS_PLUGINS:-$DEFAULT_JENKINS_PLUGINS}"
 DISABLE_WAYLAND=0
 X11VNC=0
 VNC_PASSWORD=""
+NO_FLCLASH=0
 
 usage() {
   cat <<'USAGE'
@@ -125,6 +127,9 @@ usage() {
   --pin-openmausbot VER npm 版 openmausbot, 默认 latest (PIN_OPENMAUSBOT)
   --pin-unity-cli VER  Unity CLI 版本, 默认拉 latest/latest-beta (PIN_UNITY_CLI)
   --pin-gitea VER       Gitea 版本 (如 28.3.0), 默认 latest (PIN_GITEA)
+  --pin-flclash VER     FlClash 版本 (如 0.9.3), 默认 latest (PIN_FLCLASH);
+                        仅 Desktop 预装, 官方 GitHub Release + SHA256SUMS
+  --no-flclash          不预装 FlClash (等价于 --skip 37 / --skip 37-flclash)
   --gitea-admin-user U  Gitea 管理员用户名, 默认 = --username
   --gitea-admin-password P
                         Gitea 管理员密码 (>=8 位), 默认 = --password 明文;
@@ -218,6 +223,8 @@ while [[ $# -gt 0 ]]; do
     --pin-openmausbot) PIN_OPENMAUSBOT="$2"; shift 2 ;;
     --pin-unity-cli)  PIN_UNITY_CLI="$2"; shift 2 ;;
     --pin-gitea)      PIN_GITEA="$2"; shift 2 ;;
+    --pin-flclash)    PIN_FLCLASH="$2"; shift 2 ;;
+    --no-flclash)     NO_FLCLASH=1; shift ;;
     --gitea-admin-user) GITEA_ADMIN_USER="$2"; shift 2 ;;
     --gitea-admin-password) GITEA_ADMIN_PASSWORD="$2"; shift 2 ;;
     --gitea-admin-email) GITEA_ADMIN_EMAIL="$2"; shift 2 ;;
@@ -277,6 +284,16 @@ _pin_ok "$PIN_OPENMAUSBOT" || die "非法 --pin-openmausbot: $PIN_OPENMAUSBOT"
 [[ -z "$PIN_UNITY_CLI" || "$PIN_UNITY_CLI" =~ ^[a-zA-Z0-9._+-]+$ ]] || die "非法 --pin-unity-cli: $PIN_UNITY_CLI"
 [[ "$PIN_GITEA" == "latest" || "$PIN_GITEA" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] \
   || die "非法 --pin-gitea: $PIN_GITEA (latest 或 X.Y.Z, 如 28.3.0)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/tools/flclash-release.sh"
+PIN_FLCLASH="$(flclash_normalize_pin "$PIN_FLCLASH")"
+flclash_pin_ok "$PIN_FLCLASH" || die "非法 --pin-flclash: $PIN_FLCLASH (latest 或 X.Y.Z, 如 0.9.3)"
+if [[ "${NO_FLCLASH:-0}" -eq 1 ]]; then
+  case " $PROVISION_SKIP " in
+    *" 37 "*|*" 37-flclash "*) ;;
+    *) PROVISION_SKIP="${PROVISION_SKIP:+$PROVISION_SKIP }37-flclash" ;;
+  esac
+fi
 
 # Gitea 管理员 (45-gitea.sh)。默认取系统用户名与明文密码
 [[ -n "$GITEA_ADMIN_USER" ]] || GITEA_ADMIN_USER="$USERNAME_"
@@ -489,7 +506,7 @@ if [[ "${FETCH_OFFLINE:-0}" -eq 1 ]]; then
     --pin-opencode "$PIN_OPENCODE" --pin-openmausbot "$PIN_OPENMAUSBOT"
     --ubuntu-mirror "$MIRROR")
   [[ -n "$PIN_UNITY_CLI" ]] && FETCH_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
-  FETCH_ARGS+=(--pin-gitea "$PIN_GITEA" --jenkins-plugins "$JENKINS_PLUGINS")
+  FETCH_ARGS+=(--pin-gitea "$PIN_GITEA" --pin-flclash "$PIN_FLCLASH" --jenkins-plugins "$JENKINS_PLUGINS")
   [[ "${FORCE_FETCH:-0}" -eq 1 ]] && FETCH_ARGS+=(--force)
   bash "$SCRIPT_DIR/tools/fetch-offline-bundle.sh" "${FETCH_ARGS[@]}"
   OFFLINE_BUNDLE="$OB_OUT"
@@ -512,7 +529,7 @@ if [[ -n "$OFFLINE_BUNDLE" ]]; then
       --pin-opencode "$PIN_OPENCODE" --pin-openmausbot "$PIN_OPENMAUSBOT")
     [[ -n "$REL_FOR_V" ]] && VAL_ARGS+=(--release "$REL_FOR_V")
     [[ -n "$PIN_UNITY_CLI" ]] && VAL_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
-    VAL_ARGS+=(--pin-gitea "$PIN_GITEA" --jenkins-plugins "$JENKINS_PLUGINS")
+    VAL_ARGS+=(--pin-gitea "$PIN_GITEA" --pin-flclash "$PIN_FLCLASH" --jenkins-plugins "$JENKINS_PLUGINS")
     [[ "$X11VNC" -eq 1 ]] && VAL_ARGS+=(--require-x11vnc)
     bash "$SCRIPT_DIR/tools/validate-offline-bundle.sh" "${VAL_ARGS[@]}"       || die "离线捆绑校验失败 (见上)。重建: ./tools/fetch-offline-bundle.sh --force ..."
   fi
@@ -637,6 +654,8 @@ if [[ "$PROVISION" -eq 1 ]]; then
   chmod 0755 "$WORK/provision/ubuntu-mirror.sh"
   # Jenkins 插件解析器 (30-jenkins.sh 在线路径用; 与 fetch-offline-bundle 同一份)
   cp "$SCRIPT_DIR/tools/resolve-jenkins-plugins.py" "$WORK/provision/"
+  cp "$SCRIPT_DIR/tools/flclash-release.sh" "$WORK/provision/"
+  chmod 0755 "$WORK/provision/flclash-release.sh"
   # 逐行 %q 写入, 保证 source 安全 (旧写法 EXTRA_APT_PACKAGES=vim, htop 会把 htop 当命令执行)
   {
     echo "# 由 build-iso.sh 生成 (printf %q; 请勿手改未加引号的值)"
@@ -666,6 +685,8 @@ if [[ "$PROVISION" -eq 1 ]]; then
 ' "${PIN_GODOT:-4.7.2}"
     printf 'PIN_GITEA=%q
 ' "$PIN_GITEA"
+    printf 'PIN_FLCLASH=%q
+' "$PIN_FLCLASH"
     printf 'GITEA_ADMIN_USER=%q
 ' "$GITEA_ADMIN_USER"
     printf 'GITEA_ADMIN_EMAIL=%q

@@ -49,6 +49,17 @@ _manifest_ver() {
         echo "(not found)"
       fi
       ;;
+    FlClash)
+      _st="$(dpkg-query -W -f='${Status}' FlClash 2>/dev/null || true)"
+      [ -n "$_st" ] || _st="$(dpkg-query -W -f='${Status}' flclash 2>/dev/null || true)"
+      if echo "$_st" | grep -q 'install ok installed'; then
+        _ver="$(dpkg-query -W -f='${Version}' FlClash 2>/dev/null || true)"
+        [ -n "$_ver" ] || _ver="$(dpkg-query -W -f='${Version}' flclash 2>/dev/null || true)"
+        echo "FlClash ${_ver}"
+      else
+        echo "(not found)"
+      fi
+      ;;
     *)
       # shellcheck disable=SC2086
       if command -v $1 >/dev/null 2>&1 || [ "$1" = "docker compose" ]; then
@@ -65,7 +76,7 @@ mkdir -p /var/log/autoinstall
   echo "# provisioned at $(date -u +%FT%TZ)"
   echo "# host: $(cat /etc/hostname 2>/dev/null)"
   echo
-  for c in git gh rg docker "docker compose" nvidia-ctk java node npm grok opencode openmausbot unity godot gitea jenkins microsoft-edge-stable sshd; do
+  for c in git gh rg docker "docker compose" nvidia-ctk java node npm grok opencode openmausbot unity godot gitea jenkins microsoft-edge-stable FlClash sshd; do
     printf '%-18s ' "$c"
     _manifest_ver "$c" || echo "(not found)"
   done

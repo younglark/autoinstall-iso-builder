@@ -12,6 +12,7 @@
 #     unity-cli/           # Unity CLI 二进制 + version/sha256（不含 Editor）
 #     godot/               # Godot 4.7.2 Linux x86_64 zip + sha512（不含 export templates）
 #     gitea/               # Gitea linux-amd64 二进制 + version/sha256 (官方 dl.gitea.com 校验和)
+#     flclash/             # FlClash linux .deb + version/sha256 (官方 GitHub Release SHA256SUMS)
 #     package-list.txt
 #
 # 依赖: docker (推荐), 宿主机 node/npm (打 npm 包)。无 docker 时退出并提示。
@@ -27,7 +28,7 @@
 #     把「文件名、大小相同且哈希与 Packages 索引一致」的放进 apt 的 archives 目录 (apt 跳过下载前
 #     还会按索引里最强的哈希再校验一次),
 #     apt 只下载缺的。新下的 deb 回写缓存。缓存默认只增不删 (--prune-apt-cache 清掉本次不用的)。
-#   * Unity CLI / Gitea / Godot / Jenkins 插件 / Node tarball: 版本不变且校验和一致时复用旧捆绑里的文件。
+#   * Unity CLI / Gitea / Godot / FlClash / Jenkins 插件 / Node tarball: 版本不变且校验和一致时复用旧捆绑里的文件。
 #   指纹只描述捆绑内容/参数, 与缓存无关。
 # =============================================================================
 set -Eeuo pipefail
@@ -49,6 +50,7 @@ PIN_OPENCODE="${PIN_OPENCODE:-latest}"
 PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 PIN_GITEA="${PIN_GITEA:-latest}"
+PIN_FLCLASH="${PIN_FLCLASH:-latest}"
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger}"
 # Jenkins 插件解析器 (纯 Python 标准库; 与 software/30-jenkins.sh 在线路径同一份)
 RESOLVER="$SCRIPT_DIR/resolve-jenkins-plugins.py"
@@ -77,6 +79,7 @@ usage() {
   --pin-openmausbot VER 默认 latest
   --pin-unity-cli VER   Unity CLI 版本 (默认拉 latest/latest-beta)
   --pin-gitea VER       Gitea 版本 (默认 latest, 由 dl.gitea.com/gitea/version.json 解析)
+  --pin-flclash VER     FlClash 版本 (默认 latest, 由 GitHub releases/latest 解析; 官方 SHA256SUMS 校验)
   --jenkins-plugins "a b"
                         预装 Jenkins 插件 (按捆绑里同一 Jenkins 版本的 update center 解析全部必需依赖)
                         默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger
@@ -113,6 +116,7 @@ while [[ $# -gt 0 ]]; do
     --pin-openmausbot) PIN_OPENMAUSBOT="$2"; shift 2 ;;
     --pin-unity-cli) PIN_UNITY_CLI="$2"; shift 2 ;;
     --pin-gitea) PIN_GITEA="$2"; shift 2 ;;
+    --pin-flclash) PIN_FLCLASH="$2"; shift 2 ;;
     --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
     --ubuntu-mirror) UBUNTU_MIRROR="$2"; shift 2 ;;
     --skip-npm) SKIP_NPM=1; shift ;;
@@ -147,6 +151,10 @@ UBUNTU_MIRROR="$(aib_normalize_mirror "$UBUNTU_MIRROR")"
 
 [[ "$PIN_GITEA" == "latest" || "$PIN_GITEA" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] \
   || die "非法 --pin-gitea: $PIN_GITEA"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/flclash-release.sh"
+PIN_FLCLASH="$(flclash_normalize_pin "$PIN_FLCLASH")"
+flclash_pin_ok "$PIN_FLCLASH" || die "非法 --pin-flclash: $PIN_FLCLASH (latest 或 X.Y.Z)"
 JENKINS_PLUGINS="$(printf '%s' "$JENKINS_PLUGINS" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
 [[ -n "$JENKINS_PLUGINS" ]] || die "--jenkins-plugins 不能为空"
 for _jp in $JENKINS_PLUGINS; do
@@ -187,7 +195,7 @@ case "$APT_RUNNER" in
 esac
 
 # 计算期望指纹; 已有捆绑指纹一致才复用 (否则提示 --force)
-expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$RESOLVER_SHA" <<'FP'
+expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$RESOLVER_SHA" "$PIN_FLCLASH" <<'FP'
 import hashlib, json, sys
 payload = {
   "schema": 3,
@@ -201,6 +209,7 @@ payload = {
     "unity_cli": sys.argv[7],
     "godot": "4.7.2",
     "gitea": sys.argv[9],
+    "flclash": sys.argv[12],
   },
   "extra_packages": [p for p in sys.argv[8].split(",") if p],
   "jenkins_plugins": sorted(set(sys.argv[10].split())),
@@ -209,7 +218,7 @@ payload = {
     "git", "ripgrep", "openssh-server", "gh",
     "docker-ce", "nvidia-container-toolkit", "jenkins", "nodejs",
     "microsoft-edge-stable", "x11vnc", "xauth",
-    "unity-cli", "godot", "gitea", "apt-sources",
+    "unity-cli", "godot", "gitea", "flclash", "apt-sources",
     "fontconfig", "libharfbuzz0b", "python3-bcrypt", "jenkins-plugins",
   ],
 }
@@ -426,6 +435,29 @@ for p in "${EXTRA[@]}"; do
   [ -n "$p" ] && SEEDS+=("$p")
 done
 
+# FlClash 官方 deb (宿主机已校验): 声明依赖并入种子, 稍后把 deb 本身放进 apt 池
+FLCLASH_DEB=""
+FLCLASH_IN="${FETCH_FLCLASH_DIR:-/flclash-in}"
+if [ -z "${FETCH_MINIMAL_SEEDS:-}" ] && [ -d "$FLCLASH_IN" ]; then
+  for _f in "$FLCLASH_IN"/FlClash-*-linux-*.deb; do
+    [ -f "$_f" ] || continue
+    FLCLASH_DEB="$_f"
+    break
+  done
+fi
+if [ -n "$FLCLASH_DEB" ]; then
+  echo "FlClash local deb: $FLCLASH_DEB ($(dpkg-deb -f "$FLCLASH_DEB" Package) $(dpkg-deb -f "$FLCLASH_DEB" Version))"
+  # 声明依赖 (libayatana-appindicator3-1, libsecret-1-0, …) 并入 SEEDS, 走复用/递归闭包
+  while IFS= read -r _d; do
+    [ -n "$_d" ] || continue
+    SEEDS+=("$_d")
+  done < <(dpkg-deb -f "$FLCLASH_DEB" Depends 2>/dev/null | tr ',' '\n' | while IFS= read -r dep; do
+    first="${dep%%|*}"
+    first="$(printf '%s' "$first" | sed 's/([^)]*)//g; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "$first" ] && printf '%s\n' "$first"
+  done)
+fi
+
 echo "seed packages (${#SEEDS[@]}): ${SEEDS[*]}"
 
 # ---- deb 复用: 先按空 archives 解析出本次需要的全部文件 (名 + 大小 + 索引哈希) ----
@@ -505,6 +537,16 @@ if [ "${#_dl[@]}" -gt 0 ]; then
   done
 fi
 
+# 把 FlClash .deb 放进 archives, 并用 apt 再解析一次依赖 (以防 Depends 有遗漏)
+if [ -n "$FLCLASH_DEB" ]; then
+  echo "apt download-only for local FlClash deb (resolve Depends against $RELEASE)"
+  apt-get install -y --download-only --no-install-recommends     -o Dir::Cache::archives="$ARCHIVES"     "$FLCLASH_DEB" || {
+    echo "ERROR: 无法解析/下载 FlClash 的 apt 依赖: $FLCLASH_DEB" >&2
+    exit 1
+  }
+  cp -a "$FLCLASH_DEB" "$ARCHIVES/$(basename "$FLCLASH_DEB")"
+fi
+
 # 统计 + 回写缓存
 _total="$(find "$ARCHIVES" -maxdepth 1 -name '*.deb' | wc -l)"
 echo "apt deb: 共 $_total, 复用 $_reused, 新下载 $((_total - _reused))"
@@ -582,6 +624,40 @@ chmod +x "$WORK/fetch-debs.sh"
 cp "$SCRIPT_DIR/ubuntu-mirror.sh" "$WORK/ubuntu-mirror.sh"
 cp "$SCRIPT_DIR/apt-deb-reuse.sh" "$WORK/apt-deb-reuse.sh"
 
+# --------------- FlClash deb (host; 官方 GitHub Release + SHA256SUMS) ---------------
+# 必须在容器抓 deb 依赖之前下好, 以便把 Depends 并入 noble/jammy apt 闭包。
+if [[ "$ARCH" == "amd64" || "$ARCH" == "arm64" ]]; then
+  log "解析 FlClash ${PIN_FLCLASH} (linux-$ARCH)"
+  flclash_resolve "$PIN_FLCLASH" "$ARCH" || die "无法解析 FlClash $PIN_FLCLASH"
+  mkdir -p "$WORK/flclash-in"
+  # 优先复用旧捆绑里校验和一致的 deb, 避免重复从 GitHub 拉 ~40MB
+  if [[ -d "$OUT/flclash" ]]; then
+    _prev_sums=""
+    [[ -f "$OUT/flclash/SHA256SUMS" ]] && _prev_sums="$OUT/flclash/SHA256SUMS"
+    if [[ -f "$OUT/flclash/$FLCLASH_DEB_NAME" ]]; then
+      _prev_sha=""
+      [[ -f "$OUT/flclash/sha256" ]] && _prev_sha="$(tr -d '[:space:]' < "$OUT/flclash/sha256")"
+      if flclash_verify_deb "$OUT/flclash/$FLCLASH_DEB_NAME" "$_prev_sums" "$_prev_sha" 2>/dev/null; then
+        cp -p "$OUT/flclash/$FLCLASH_DEB_NAME" "$WORK/flclash-in/$FLCLASH_DEB_NAME"
+        if [[ -n "$_prev_sums" ]]; then
+          cp -p "$OUT/flclash/SHA256SUMS" "$WORK/flclash-in/SHA256SUMS" || true
+        fi
+        ok "复用旧捆绑 flclash/$FLCLASH_DEB_NAME (sha256 一致)"
+      fi
+    fi
+  fi
+  flclash_download_to "$WORK/flclash-in" || die "下载/校验 FlClash 失败: $FLCLASH_DEB_URL"
+  printf '%s\n' "$FLCLASH_VERSION" > "$WORK/flclash-in/version"
+  printf '%s\n' "$FLCLASH_SHA256" > "$WORK/flclash-in/sha256"
+  printf '%s\n' "$FLCLASH_DEB_NAME" > "$WORK/flclash-in/deb.name"
+  ok "FlClash $FLCLASH_VERSION ($FLCLASH_DEB_NAME, $(du -h "$WORK/flclash-in/$FLCLASH_DEB_NAME" | cut -f1))"
+else
+  warn "FlClash 官方 linux deb 不支持 arch=$ARCH, 跳过"
+  FLCLASH_VERSION=""
+  FLCLASH_SHA256=""
+  FLCLASH_DEB_NAME=""
+fi
+
 log "在 $IMG 中解析并下载 apt 依赖闭包"
 mkdir -p "$WORK/out"
 if [[ "$APT_RUNNER" == "direct" ]]; then
@@ -591,6 +667,7 @@ if [[ "$APT_RUNNER" == "direct" ]]; then
   FETCH_OUTDIR="$WORK/out" DEBIAN_FRONTEND=noninteractive \
     FETCH_APT_CACHE="$APT_CACHE" FETCH_PREV_APT="$_prev_apt" FETCH_PREV_NODE="$_prev_node" \
     FETCH_PRUNE_APT_CACHE="$PRUNE_APT_CACHE" \
+    FETCH_FLCLASH_DIR="$WORK/flclash-in" \
     bash "$WORK/fetch-debs.sh" "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES"
 else
   REUSE_ARGS=()
@@ -599,6 +676,9 @@ else
   fi
   [[ -d "$OUT/apt" ]] && REUSE_ARGS+=(-v "$(cd -- "$OUT/apt" && pwd):/prev-apt:ro" -e FETCH_PREV_APT=/prev-apt)
   [[ -d "$OUT/node" ]] && REUSE_ARGS+=(-v "$(cd -- "$OUT/node" && pwd):/prev-node:ro" -e FETCH_PREV_NODE=/prev-node)
+  if [[ -d "$WORK/flclash-in" ]] && compgen -G "$WORK/flclash-in"/FlClash-*-linux-*.deb >/dev/null; then
+    REUSE_ARGS+=(-v "$(cd -- "$WORK/flclash-in" && pwd):/flclash-in:ro" -e FETCH_FLCLASH_DIR=/flclash-in)
+  fi
   docker run --rm --network host \
     --dns 8.8.8.8 --dns 1.1.1.1 \
     -v "$WORK/fetch-debs.sh:/fetch-debs.sh:ro" \
@@ -640,9 +720,17 @@ reuse_prev() { # sub name dest algo(sha256|sha512) hex
 }
 
 # 同步到 OUT (保留可复用)
-rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/jenkins-plugins" "$OUT/jenkins-version.txt" "$OUT/package-list.txt" "$OUT/java-package.txt"
+rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/flclash" "$OUT/jenkins-plugins" "$OUT/jenkins-version.txt" "$OUT/package-list.txt" "$OUT/java-package.txt"
 mkdir -p "$OUT"
 cp -a "$WORK/out/." "$OUT/"
+if [[ -n "${FLCLASH_DEB_NAME:-}" && -f "$WORK/flclash-in/$FLCLASH_DEB_NAME" ]]; then
+  mkdir -p "$OUT/flclash"
+  cp -p "$WORK/flclash-in/$FLCLASH_DEB_NAME" "$OUT/flclash/$FLCLASH_DEB_NAME"
+  [[ -f "$WORK/flclash-in/SHA256SUMS" ]] && cp -p "$WORK/flclash-in/SHA256SUMS" "$OUT/flclash/SHA256SUMS"
+  printf '%s\n' "$FLCLASH_VERSION" > "$OUT/flclash/version"
+  printf '%s\n' "$FLCLASH_SHA256" > "$OUT/flclash/sha256"
+  printf '%s\n' "$FLCLASH_DEB_NAME" > "$OUT/flclash/deb.name"
+fi
 
 # --------------- Jenkins 插件 (宿主机 python3; update center sha256 校验) ---------------
 JVER="$(cat "$OUT/jenkins-version.txt")"
@@ -832,6 +920,15 @@ if gt.exists():
       "filename": (gt/"binary.name").read_text().strip() if (gt/"binary.name").exists() else None,
       "present": any(gt.glob("gitea-*-linux-amd64")),
     }
+flclash_meta = {}
+fc = out/"flclash"
+if fc.exists():
+    flclash_meta = {
+      "version": (fc/"version").read_text().strip() if (fc/"version").exists() else None,
+      "sha256": (fc/"sha256").read_text().strip() if (fc/"sha256").exists() else None,
+      "filename": (fc/"deb.name").read_text().strip() if (fc/"deb.name").exists() else None,
+      "present": any(fc.glob("FlClash-*-linux-*.deb")),
+    }
 jenkins_plugins_meta = None
 jp = out/"jenkins-plugins"
 if jp.is_dir():
@@ -866,6 +963,7 @@ manifest = {
     "unity_cli": "${PIN_UNITY_CLI}" or (unity_meta.get("version") or ""),
     "godot": "4.7.2",
     "gitea": "${PIN_GITEA}",
+    "flclash": "${PIN_FLCLASH}",
   },
   "extra_packages": [p.strip() for p in "${PACKAGES}".split(",") if p.strip()],
   "apt_deb_count": len(debs),
@@ -877,6 +975,7 @@ manifest = {
   "unity_cli": unity_meta or None,
   "godot": godot_meta or None,
   "gitea": gitea_meta or None,
+  "flclash": flclash_meta or None,
   "jenkins_plugins": jenkins_plugins_meta,
   "apt_sources": apt_sources_meta,
 }
