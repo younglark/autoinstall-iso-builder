@@ -580,6 +580,148 @@ else
   echo "(xorriso/openssl missing, gitea build test skipped)"
 fi
 
+echo "== jenkins zero-config script + offline plugins + build flags =="
+if [[ -x software/30-jenkins.sh ]] \
+  && grep -q 'runSetupWizard=false' software/30-jenkins.sh \
+  && grep -q 'jenkins.install.InstallUtil.lastExecVersion' software/30-jenkins.sh \
+  && grep -q 'jenkins.install.UpgradeWizard.state' software/30-jenkins.sh \
+  && grep -q 'HudsonPrivateSecurityRealm(false)' software/30-jenkins.sh \
+  && grep -q 'FullControlOnceLoggedInAuthorizationStrategy' software/30-jenkins.sh \
+  && grep -q 'setAllowAnonymousRead(false)' software/30-jenkins.sh \
+  && grep -q 'createAccountWithHashedPassword' software/30-jenkins.sh \
+  && grep -qF '#jbcrypt:' software/30-jenkins.sh \
+  && grep -q 'init.groovy.d/00-autoinstall-admin.groovy' software/30-jenkins.sh \
+  && grep -q 'jenkins-admin.secret' software/30-jenkins.sh \
+  && grep -q '/root/jenkins-admin-password' software/30-jenkins.sh \
+  && grep -q 'libharfbuzz0b' software/30-jenkins.sh \
+  && grep -q 'jenkins-plugins' software/30-jenkins.sh \
+  && grep -q 'JPM_SHA256' software/30-jenkins.sh \
+  && grep -q 'jenkins-plugins' tools/fetch-offline-bundle.sh \
+  && grep -q 'plugins.lock' tools/fetch-offline-bundle.sh \
+  && grep -q '"jenkins_plugins"' tools/fetch-offline-bundle.sh \
+  && grep -q -- '--jenkins-plugins' tools/validate-offline-bundle.sh \
+  && grep -q 'JENKINS_PLUGINS=%q' build-iso.sh \
+  && grep -q 'jenkins-admin.secret' build-iso.sh \
+  && grep -q 'jenkins-admin.secret' software/run-all.sh \
+  && grep -q 'jenkins-admin.secret' software/99-cleanup.sh \
+  && grep -q -- '--jenkins-admin-password' scripts/aib.sh \
+  && grep -q -- '--jenkins-admin-password' scripts/aib.ps1; then
+  pass "jenkins script + offline plugins + manifest + build wiring"
+else
+  fail "jenkins script + offline plugins + manifest + build wiring"
+fi
+# 明文不进 provision.env / 不回显 / groovy 只含哈希
+if ! sed -n '/^  {$/,/provision\/provision.env"$/p' build-iso.sh | grep -q 'JENKINS_ADMIN_PASSWORD' \
+  && ! grep -nE '(echo|printf).*\$\{?ADMIN_PW' software/30-jenkins.sh | grep -vE 'RANDOM_PW_FILE|python3|\.admin-password' | grep -q .; then
+  pass "jenkins admin password not in provision.env / not echoed"
+else
+  fail "jenkins admin password leak path"
+fi
+
+echo "== build-iso jenkins flags (fake ISO) =="
+if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
+  jt="$(mktemp -d)"
+  bash test/make-fake-iso.sh server "$jt/src.iso" >/dev/null 2>&1 || true
+  if [[ -f "$jt/src.iso" ]]; then
+    # 默认: 管理员 = 系统用户, 密码 = 默认密码, 默认插件列表
+    if bash build-iso.sh --iso "$jt/src.iso" --out "$jt/d.iso" >"$jt/d.log" 2>&1 \
+       && xorriso -osirrox on -indev "$jt/d.iso" -extract /provision "$jt/d" >/dev/null 2>&1 \
+       && grep -qx 'JENKINS_ADMIN_USER=ubuntu' "$jt/d/provision.env" \
+       && ( set -a; # shellcheck disable=SC1091
+            . "$jt/d/provision.env"; [[ "$JENKINS_PLUGINS" == "workflow-aggregator git gitea docker-workflow credentials-binding timestamper" ]] ) \
+       && ( # shellcheck disable=SC1091
+            . "$jt/d/jenkins-admin.secret"; [[ "$JENKINS_ADMIN_PASSWORD" == ubuntu1990 ]] ) \
+       && ! grep -q 'ubuntu1990' "$jt/d.log" "$jt/d/provision.env"; then
+      pass "jenkins defaults: admin=ubuntu, default password via secret file, default plugins"
+    else
+      fail "jenkins defaults in provision: $(tail -3 "$jt/d.log")"
+    fi
+    # 覆盖: 独立管理员/密码/插件
+    if bash build-iso.sh --iso "$jt/src.iso" --out "$jt/a.iso" --username ops --password 'Pl@inPass99' \
+         --jenkins-admin-user jadmin --jenkins-admin-password 'J3nk!ns pw' --jenkins-plugins "git  timestamper:1.30" >"$jt/a.log" 2>&1 \
+       && xorriso -osirrox on -indev "$jt/a.iso" -extract /provision "$jt/a" >/dev/null 2>&1 \
+       && grep -qx 'JENKINS_ADMIN_USER=jadmin' "$jt/a/provision.env" \
+       && ( set -a; # shellcheck disable=SC1091
+            . "$jt/a/provision.env"; [[ "$JENKINS_PLUGINS" == "git timestamper:1.30" ]] ) \
+       && ( # shellcheck disable=SC1091
+            . "$jt/a/jenkins-admin.secret"; [[ "$JENKINS_ADMIN_PASSWORD" == 'J3nk!ns pw' ]] ) \
+       && ! grep -q 'J3nk!ns' "$jt/a.log" "$jt/a/provision.env"; then
+      pass "jenkins overrides: admin user / password / plugin list"
+    else
+      fail "jenkins overrides: $(tail -3 "$jt/a.log")"
+    fi
+    # 只有哈希 → 无 secret, 提示随机密码
+    if bash build-iso.sh --iso "$jt/src.iso" --out "$jt/b.iso" --password-hash "$(openssl passwd -6 x)" >"$jt/b.log" 2>&1 \
+       && xorriso -osirrox on -indev "$jt/b.iso" -extract /provision "$jt/b" >/dev/null 2>&1 \
+       && [[ ! -e "$jt/b/jenkins-admin.secret" ]] && grep -q '/root/jenkins-admin-password' "$jt/b.log"; then
+      pass "jenkins hash-only: no secret file, random password notice"
+    else
+      fail "jenkins hash-only build"
+    fi
+    # --skip 30 → 不投递 secret
+    if bash build-iso.sh --iso "$jt/src.iso" --out "$jt/s.iso" --skip 30 >"$jt/s.log" 2>&1 \
+       && xorriso -osirrox on -indev "$jt/s.iso" -extract /provision "$jt/s" >/dev/null 2>&1 \
+       && [[ ! -e "$jt/s/jenkins-admin.secret" ]]; then
+      pass "jenkins --skip 30: no secret delivered"
+    else
+      fail "jenkins --skip 30 still delivers secret"
+    fi
+    for bad in "--jenkins-plugins git;rm" "--jenkins-plugins \$(id)" "--jenkins-admin-user a/b" "--jenkins-admin-user anonymous" "--jenkins-plugins -x"; do
+      # shellcheck disable=SC2086
+      if bash build-iso.sh --iso "$jt/src.iso" --out "$jt/c.iso" --password x $bad --dry-run >/dev/null 2>&1; then
+        fail "should reject: $bad"
+      else
+        pass "rejects: $bad"
+      fi
+    done
+  else
+    fail "make-fake-iso for jenkins test"
+  fi
+  rm -rf "$jt"
+else
+  echo "(xorriso/openssl missing, jenkins build test skipped)"
+fi
+
+echo "== validate-offline-bundle jenkins-plugins =="
+vb="$(mktemp -d)"
+mkdir -p "$vb/apt" "$vb/apt-sources/keyrings" "$vb/apt-sources/sources.list.d" "$vb/jenkins-plugins"
+for p in git ripgrep openssh-server ca-certificates curl jenkins fontconfig libharfbuzz0b python3-bcrypt; do
+  printf 'Package: %s\nVersion: 1\n\n' "$p" >> "$vb/apt/Packages"
+done
+for f in docker.asc githubcli-archive-keyring.gpg nvidia-container-toolkit.asc jenkins-keyring.asc nodesource.gpg; do : > "$vb/apt-sources/keyrings/$f"; done
+for f in docker.list github-cli.list nvidia-container-toolkit.list jenkins.list nodesource.sources; do : > "$vb/apt-sources/sources.list.d/$f"; done
+echo '{"schema":3,"release":"noble","fingerprint":"x","pins":{}}' > "$vb/manifest.json"
+for p in git timestamper scm-api; do echo "$p" > "$vb/jenkins-plugins/$p.jpi"; done
+printf 'git:5.0\nscm-api:1.0\ntimestamper:1.30\n' > "$vb/jenkins-plugins/plugins.lock"
+printf 'git\ntimestamper\n' > "$vb/jenkins-plugins/requested.txt"
+printf '2.580.2' > "$vb/jenkins-plugins/jenkins-version"
+( cd "$vb/jenkins-plugins" && sha256sum ./*.jpi > SHA256SUMS )
+vskip="15 20 25 40 45 50 60 70 80 85"
+if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "timestamper git" >/dev/null 2>&1; then
+  pass "validate accepts complete jenkins-plugins"
+else
+  fail "validate rejects complete jenkins-plugins"
+fi
+if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "git gitea" >/dev/null 2>&1; then
+  pass "validate rejects plugin list mismatch"
+else
+  fail "validate accepted plugin list mismatch"
+fi
+rm "$vb/jenkins-plugins/scm-api.jpi"
+if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "git timestamper" >/dev/null 2>&1; then
+  pass "validate rejects missing dependency jpi"
+else
+  fail "validate accepted missing dependency jpi"
+fi
+rm -rf "$vb/jenkins-plugins"
+if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip 30" >/dev/null 2>&1 \
+   && ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" >/dev/null 2>&1; then
+  pass "validate: jenkins-plugins required unless --skip 30"
+else
+  fail "validate jenkins-plugins skip logic"
+fi
+rm -rf "$vb"
+
 echo "== fetch-offline-bundle recursive depends =="
 if grep -q 'force-download' tools/fetch-offline-bundle.sh && grep -q 'apt-cache depends --recurse' tools/fetch-offline-bundle.sh; then
   pass "fetch recursive depends download"

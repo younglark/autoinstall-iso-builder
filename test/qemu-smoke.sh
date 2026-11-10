@@ -314,7 +314,30 @@ if command -v virt-cat >/dev/null 2>&1; then
     && echo "    [!] /opt/provision/gitea-admin.secret 仍在 (应已删除)"
 
   echo
-  echo "==> Jenkins 与 SSH:"
+  echo "==> Jenkins (30-jenkins.sh, 零配置):"
+  if virt-ls -a "$DISK" /etc/systemd/system/multi-user.target.wants 2>/dev/null | grep -qx 'jenkins.service'; then
+    echo "    jenkins.service enabled"
+  else
+    echo "    [!] jenkins.service 未 enable (若 --skip 30 可忽略)"
+  fi
+  if virt-cat -a "$DISK" /etc/systemd/system/jenkins.service.d/50-autoinstall.conf 2>/dev/null | grep -q 'runSetupWizard=false'; then
+    echo "    安装向导已跳过 (drop-in runSetupWizard=false)"
+  else
+    echo "    [!] 缺 jenkins.service.d/50-autoinstall.conf (若 --skip 30 可忽略)"
+  fi
+  JPLUG="$(virt-ls -a "$DISK" /var/lib/jenkins/plugins 2>/dev/null | grep -c '\.jpi$' || true)"
+  echo "    预装插件: ${JPLUG:-0} 个 .jpi"
+  # 首次启动后 groovy 应已自删, 且 config.xml 启用安全
+  if virt-ls -a "$DISK" /var/lib/jenkins/init.groovy.d 2>/dev/null | grep -q 'autoinstall-admin'; then
+    echo "    [!] init.groovy.d/00-autoinstall-admin.groovy 仍在 (Jenkins 尚未首次启动成功?)"
+  fi
+  virt-cat -a "$DISK" /var/lib/jenkins/config.xml 2>/dev/null \
+    | grep -E 'useSecurity|FullControlOnceLoggedIn|disableSignup' | sed 's/^ */    /'
+  virt-ls -a "$DISK" /opt/provision 2>/dev/null | grep -qx 'jenkins-admin.secret' \
+    && echo "    [!] /opt/provision/jenkins-admin.secret 仍在 (应已删除)"
+
+  echo
+  echo "==> SSH:"
   virt-ls -a "$DISK" /etc/ssh 2>/dev/null | grep -c 'ssh_host' \
     && echo "    SSH 主机密钥已生成"
   virt-cat -a "$DISK" /etc/hostname 2>/dev/null | sed 's/^/    hostname: /'

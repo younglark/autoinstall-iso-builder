@@ -37,6 +37,10 @@ PIN_OPENCODE="${PIN_OPENCODE:-latest}"
 PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 PIN_GITEA="${PIN_GITEA:-latest}"
+JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper}"
+# plugin-installation-manager-tool: 固定版本 + sha256 (与 software/30-jenkins.sh 在线路径一致)
+JPM_VERSION="2.16.0"
+JPM_SHA256="b3e9704f8259ec3d0479703039e2ad5a0a15abb97808ad70d5a59ba2fdd73197"
 SKIP_NPM=0
 FORCE=0
 APT_RUNNER="${AIB_APT_RUNNER:-docker}"
@@ -59,6 +63,9 @@ usage() {
   --pin-openmausbot VER 默认 latest
   --pin-unity-cli VER   Unity CLI 版本 (默认拉 latest/latest-beta)
   --pin-gitea VER       Gitea 版本 (默认 latest, 由 dl.gitea.com/gitea/version.json 解析)
+  --jenkins-plugins "a b"
+                        预装 Jenkins 插件 (按捆绑里同一 jenkins.war 解析全部传递依赖)
+                        默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper
   --ubuntu-mirror URL   容器内 Ubuntu 源
   --skip-npm            不打包 npm 全局树 (调试用)
   --apt-runner R        docker (默认) | direct (仅限容器内, 见脚本头注释)
@@ -84,6 +91,7 @@ while [[ $# -gt 0 ]]; do
     --pin-openmausbot) PIN_OPENMAUSBOT="$2"; shift 2 ;;
     --pin-unity-cli) PIN_UNITY_CLI="$2"; shift 2 ;;
     --pin-gitea) PIN_GITEA="$2"; shift 2 ;;
+    --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
     --ubuntu-mirror) UBUNTU_MIRROR="$2"; shift 2 ;;
     --skip-npm) SKIP_NPM=1; shift ;;
     --force) FORCE=1; shift ;;
@@ -102,6 +110,11 @@ esac
 
 [[ "$PIN_GITEA" == "latest" || "$PIN_GITEA" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] \
   || die "非法 --pin-gitea: $PIN_GITEA"
+JENKINS_PLUGINS="$(printf '%s' "$JENKINS_PLUGINS" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+[[ -n "$JENKINS_PLUGINS" ]] || die "--jenkins-plugins 不能为空"
+for _jp in $JENKINS_PLUGINS; do
+  [[ "$_jp" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*(:[A-Za-z0-9._-]+)?$ ]] || die "--jenkins-plugins 含非法插件名: $_jp"
+done
 
 if [[ -z "$OUT" ]]; then
   OUT="$CACHE_ROOT/${RELEASE}-${ARCH}"
@@ -132,7 +145,7 @@ case "$APT_RUNNER" in
 esac
 
 # 计算期望指纹; 已有捆绑指纹一致才复用 (否则提示 --force)
-expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" <<'FP'
+expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$JPM_VERSION" <<'FP'
 import hashlib, json, sys
 payload = {
   "schema": 3,
@@ -148,10 +161,13 @@ payload = {
     "gitea": sys.argv[9],
   },
   "extra_packages": [p for p in sys.argv[8].split(",") if p],
+  "jenkins_plugins": sorted(set(sys.argv[10].split())),
+  "jenkins_plugin_manager": sys.argv[11],
   "seeds": [
     "git", "ripgrep", "openssh-server", "gh",
     "docker-ce", "nvidia-container-toolkit", "jenkins", "nodejs",
     "unity-cli", "godot", "gitea", "apt-sources",
+    "fontconfig", "libharfbuzz0b", "python3-bcrypt", "jenkins-plugins",
   ],
 }
 print(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16])
@@ -203,6 +219,9 @@ ARCH="$2"
 NODE_MAJOR="$3"
 MIRROR="$4"
 EXTRA_PACKAGES="$5"
+JENKINS_PLUGINS="$6"
+JPM_VERSION="$7"
+JPM_SHA256="$8"
 OUTDIR="${FETCH_OUTDIR:-/out}"
 
 echo "== container: $(. /etc/os-release && echo "$PRETTY_NAME") arch=$ARCH =="
@@ -300,7 +319,7 @@ SEEDS=(
   gh
   docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   nvidia-container-toolkit
-  "$JAVA_PKG" jenkins
+  "$JAVA_PKG" jenkins fontconfig libharfbuzz0b python3-bcrypt
   nodejs
 )
 IFS=',' read -r -a EXTRA <<< "$EXTRA_PACKAGES"
@@ -387,6 +406,34 @@ fi
 
 # 记下 java 包名供安装时使用
 echo "$JAVA_PKG" > "$OUTDIR/java-package.txt"
+
+# Jenkins 插件: 用捆绑里的 jenkins.war 解析 (版本兼容 + 全部传递依赖), 装机时直接拷贝
+JDEB="$(ls /var/cache/apt/archives/jenkins_*.deb | sort -V | tail -1)"
+JVER="$(dpkg-deb -f "$JDEB" Version)"; JVER="${JVER%%-*}"
+echo "resolving Jenkins plugins for jenkins $JVER: $JENKINS_PLUGINS"
+apt-get install -y --no-install-recommends "$JAVA_PKG" unzip
+rm -rf /tmp/jx && mkdir -p /tmp/jx && dpkg-deb -x "$JDEB" /tmp/jx
+curl -fL --retry 3 -o /tmp/jpm.jar \
+  "https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/${JPM_VERSION}/jenkins-plugin-manager-${JPM_VERSION}.jar"
+echo "$JPM_SHA256  /tmp/jpm.jar" | sha256sum -c - || { echo "ERROR: plugin manager sha256 mismatch"; exit 1; }
+PDIR="$OUTDIR/jenkins-plugins"
+rm -rf "$PDIR" && mkdir -p "$PDIR"
+# shellcheck disable=SC2086
+java -jar /tmp/jpm.jar --war /tmp/jx/usr/share/java/jenkins.war \
+  --plugin-download-directory "$PDIR" --plugins $JENKINS_PLUGINS
+printf '%s' "$JVER" > "$PDIR/jenkins-version"
+printf '%s\n' $JENKINS_PLUGINS | sort -u > "$PDIR/requested.txt"
+printf '%s\n' "$JPM_VERSION" > "$PDIR/plugin-manager-version"
+: > "$PDIR/plugins.lock"
+for f in "$PDIR"/*.jpi "$PDIR"/*.hpi; do
+  [ -e "$f" ] || continue
+  v="$(unzip -p "$f" META-INF/MANIFEST.MF | tr -d '\r' | sed -n 's/^Plugin-Version: //p' | head -1)"
+  printf '%s:%s\n' "$(basename "${f%.*}")" "$v" >> "$PDIR/plugins.lock"
+done
+sort -o "$PDIR/plugins.lock" "$PDIR/plugins.lock"
+( cd "$PDIR" && sha256sum ./*.jpi > SHA256SUMS )
+echo "jenkins plugins: $(wc -l < "$PDIR/plugins.lock") ($(du -sh "$PDIR" | cut -f1))"
+rm -rf /tmp/jx
 INNER
 chmod +x "$WORK/fetch-debs.sh"
 
@@ -395,14 +442,16 @@ mkdir -p "$WORK/out"
 if [[ "$APT_RUNNER" == "direct" ]]; then
   log "direct 模式: 直接在当前容器 ($(. /etc/os-release && echo "$PRETTY_NAME"), $(dpkg --print-architecture)) 里跑 apt"
   FETCH_OUTDIR="$WORK/out" DEBIAN_FRONTEND=noninteractive \
-    bash "$WORK/fetch-debs.sh" "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES"
+    bash "$WORK/fetch-debs.sh" "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES" \
+    "$JENKINS_PLUGINS" "$JPM_VERSION" "$JPM_SHA256"
 else
   docker run --rm --network host \
     --dns 8.8.8.8 --dns 1.1.1.1 \
     -v "$WORK/fetch-debs.sh:/fetch-debs.sh:ro" \
     -v "$WORK/out:/out" \
     -e DEBIAN_FRONTEND=noninteractive \
-    "$IMG" bash /fetch-debs.sh "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES"
+    "$IMG" bash /fetch-debs.sh "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES" \
+    "$JENKINS_PLUGINS" "$JPM_VERSION" "$JPM_SHA256"
 fi
 
 # 容器以 root 写 /out, 改回当前用户以免 cleanup/复用失败
@@ -411,7 +460,7 @@ if command -v sudo >/dev/null; then
 fi
 
 # 同步到 OUT (保留可复用)
-rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/package-list.txt" "$OUT/java-package.txt"
+rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/jenkins-plugins" "$OUT/package-list.txt" "$OUT/java-package.txt"
 mkdir -p "$OUT"
 cp -a "$WORK/out/." "$OUT/"
 
@@ -579,6 +628,18 @@ if gt.exists():
       "filename": (gt/"binary.name").read_text().strip() if (gt/"binary.name").exists() else None,
       "present": any(gt.glob("gitea-*-linux-amd64")),
     }
+jenkins_plugins_meta = None
+jp = out/"jenkins-plugins"
+if jp.is_dir():
+    lock = (jp/"plugins.lock").read_text().split() if (jp/"plugins.lock").exists() else []
+    jenkins_plugins_meta = {
+      "jenkins_version": (jp/"jenkins-version").read_text().strip() if (jp/"jenkins-version").exists() else None,
+      "plugin_manager": (jp/"plugin-manager-version").read_text().strip() if (jp/"plugin-manager-version").exists() else None,
+      "requested": (jp/"requested.txt").read_text().split() if (jp/"requested.txt").exists() else [],
+      "count": len(lock),
+      "size_bytes": sum(p.stat().st_size for p in jp.glob("*.jpi")),
+      "lock": lock,
+    }
 apt_src = out/"apt-sources"
 apt_sources_meta = None
 if apt_src.is_dir():
@@ -612,6 +673,7 @@ manifest = {
   "unity_cli": unity_meta or None,
   "godot": godot_meta or None,
   "gitea": gitea_meta or None,
+  "jenkins_plugins": jenkins_plugins_meta,
   "apt_sources": apt_sources_meta,
 }
 (out/"manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")

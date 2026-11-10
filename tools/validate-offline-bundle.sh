@@ -2,7 +2,7 @@
 # validate-offline-bundle.sh — 构建前检查离线捆绑是否覆盖当前 software/ 需求
 # 用法:
 #   ./tools/validate-offline-bundle.sh --bundle DIR [--release noble|jammy|24.04|22.04]
-#       [--skip "30 70"] [--pin-node N] [--pin-grok V] ...
+#       [--skip "30 70"] [--pin-node N] [--pin-grok V] [--jenkins-plugins "a b"] ...
 set -Eeuo pipefail
 
 BUNDLE=""
@@ -15,6 +15,7 @@ PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 PIN_GODOT="${PIN_GODOT:-4.7.2}"
 PIN_GITEA="${PIN_GITEA:-latest}"
+JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper}"
 
 die()  { printf '[fail] %s\n' "$*" >&2; exit 1; }
 ok()   { printf '[ok] %s\n' "$*"; }
@@ -42,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --pin-unity-cli) PIN_UNITY_CLI="$2"; shift 2 ;;
     --pin-godot) PIN_GODOT="$2"; shift 2 ;;
     --pin-gitea) PIN_GITEA="$2"; shift 2 ;;
+    --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,6p' "$0"; exit 0 ;;
     *) die "未知参数: $1" ;;
@@ -64,7 +66,7 @@ NEED_PKGS=(git ripgrep openssh-server ca-certificates curl)
 should_skip 15-github-cli || NEED_PKGS+=(gh)
 should_skip 20-docker || NEED_PKGS+=(docker-ce docker-ce-cli containerd.io)
 should_skip 25-nvidia-container-toolkit || NEED_PKGS+=(nvidia-container-toolkit)
-should_skip 30-jenkins || NEED_PKGS+=(jenkins)
+should_skip 30-jenkins || NEED_PKGS+=(jenkins fontconfig libharfbuzz0b python3-bcrypt)
 should_skip 40-nodejs || NEED_PKGS+=(nodejs)
 
 PACKAGES_FILE="$BUNDLE/apt/Packages"
@@ -88,16 +90,47 @@ done
 
 # 目录类资产
 need_dirs=()
+missing_dirs=()
+jp_errs=()
 should_skip 80-unity-cli || need_dirs+=(unity-cli)
 should_skip 85-godot || need_dirs+=(godot)
 should_skip 45-gitea || need_dirs+=(gitea)
+# Jenkins 插件: 目录 + lock + 与请求列表一致 (按 jenkins 同版本解析)
+if ! should_skip 30-jenkins; then
+  JP="$BUNDLE/jenkins-plugins"
+  if [[ ! -d "$JP" ]]; then
+    missing_dirs+=("jenkins-plugins/")
+  else
+    for f in plugins.lock requested.txt jenkins-version; do
+      [[ -s "$JP/$f" ]] || missing_dirs+=("jenkins-plugins/$f")
+    done
+    if [[ -s "$JP/requested.txt" ]]; then
+      # shellcheck disable=SC2086
+      _want="$(printf '%s\n' $JENKINS_PLUGINS | sort -u | tr '\n' ' ')"
+      _have="$(sort -u < "$JP/requested.txt" | tr '\n' ' ')"
+      [[ "$_want" == "$_have" ]] || jp_errs+=("jenkins-plugins 请求列表 ($_have) != --jenkins-plugins ($_want)")
+    fi
+    if [[ -s "$JP/plugins.lock" ]]; then
+      while IFS=: read -r _n _v; do
+        [[ -n "$_n" ]] || continue
+        [[ -f "$JP/$_n.jpi" || -f "$JP/$_n.hpi" ]] || missing_dirs+=("jenkins-plugins/$_n.jpi")
+        [[ -n "$_v" ]] || jp_errs+=("jenkins-plugins/plugins.lock: $_n 无版本")
+      done < "$JP/plugins.lock"
+      for _p in $JENKINS_PLUGINS; do
+        grep -q "^${_p%%:*}:" "$JP/plugins.lock" || jp_errs+=("jenkins-plugins 缺请求的插件: ${_p%%:*}")
+      done
+    fi
+    if [[ -f "$JP/SHA256SUMS" ]]; then
+      ( cd "$JP" && sha256sum -c --quiet SHA256SUMS >/dev/null 2>&1 ) || jp_errs+=("jenkins-plugins SHA256SUMS 校验失败")
+    fi
+  fi
+fi
 # npm prefix: 只要没全部跳过 npm CLI 就需要
 need_npm=0
 should_skip 50-grok || need_npm=1
 should_skip 60-opencode || need_npm=1
 should_skip 70-openmausbot || need_npm=1
 
-missing_dirs=()
 for d in "${need_dirs[@]+"${need_dirs[@]}"}"; do
   [[ -d "$BUNDLE/$d" ]] || missing_dirs+=("$d/")
 done
@@ -181,6 +214,7 @@ pin_errs=()
 for line in "${meta[@]:2}"; do
   [[ "$line" == ERR:* ]] && pin_errs+=("${line#ERR:}")
 done
+pin_errs+=("${jp_errs[@]+"${jp_errs[@]}"}")
 
 hint="请用 --force / --force-fetch 重建离线捆绑:
   ./tools/fetch-offline-bundle.sh --release ${EXPECT_RELEASE:-noble} --out $BUNDLE --force"

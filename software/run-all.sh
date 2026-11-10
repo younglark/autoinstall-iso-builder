@@ -33,6 +33,8 @@ export PIN_GODOT="${PIN_GODOT:-4.7.2}"
 export PIN_GITEA="${PIN_GITEA:-latest}"
 export GITEA_ADMIN_USER="${GITEA_ADMIN_USER:-}"
 export GITEA_ADMIN_EMAIL="${GITEA_ADMIN_EMAIL:-}"
+export JENKINS_ADMIN_USER="${JENKINS_ADMIN_USER:-}"
+export JENKINS_PLUGINS="${JENKINS_PLUGINS:-}"
 export OFFLINE="${OFFLINE:-0}"
 export OFFLINE_ROOT="${OFFLINE_ROOT:-/opt/offline}"
 export EXTRA_APT_PACKAGES="${EXTRA_APT_PACKAGES:-}"
@@ -92,7 +94,7 @@ for s in "$HERE"/[0-9][0-9]-*.sh; do
 done
 
 # Gitea 管理员明文密码文件: 45-gitea 用后会删; 被 --skip 或失败时这里兜底删除
-rm -f "$HERE/gitea-admin.secret"
+rm -f "$HERE/gitea-admin.secret" "$HERE/jenkins-admin.secret"
 
 echo "--------------------------------------------------------------"
 echo "完成:$DONE"
