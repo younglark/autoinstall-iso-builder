@@ -16,7 +16,6 @@ PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 PIN_GODOT="${PIN_GODOT:-4.7.2}"
 PIN_GITEA="${PIN_GITEA:-latest}"
-PIN_FLCLASH="${PIN_FLCLASH:-latest}"
 REQUIRE_X11VNC=0
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger}"
 
@@ -46,7 +45,6 @@ while [[ $# -gt 0 ]]; do
     --pin-unity-cli) PIN_UNITY_CLI="$2"; shift 2 ;;
     --pin-godot) PIN_GODOT="$2"; shift 2 ;;
     --pin-gitea) PIN_GITEA="$2"; shift 2 ;;
-    --pin-flclash) PIN_FLCLASH="$2"; shift 2 ;;
     --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
     --require-x11vnc) REQUIRE_X11VNC=1; shift ;;
     -h|--help)
@@ -201,9 +199,9 @@ if ! should_skip 40-nodejs; then
 fi
 
 # manifest release / pins
-mapfile -t meta < <(python3 - "$BUNDLE/manifest.json" "$EXPECT_RELEASE" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PIN_GODOT" "$PIN_GITEA" "$(should_skip 45-gitea && echo 1 || echo 0)" "$PIN_FLCLASH" "$(should_skip 37-flclash && echo 1 || echo 0)" <<'PY'
+mapfile -t meta < <(python3 - "$BUNDLE/manifest.json" "$EXPECT_RELEASE" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PIN_GODOT" "$PIN_GITEA" "$(should_skip 45-gitea && echo 1 || echo 0)" "$(should_skip 37-flclash && echo 1 || echo 0)" <<'PY'
 import json, os, sys
-path, expect_rel, node, grok, oc, om, unity, godot, gitea, gitea_skip, flclash, flclash_skip = sys.argv[1:13]
+path, expect_rel, node, grok, oc, om, unity, godot, gitea, gitea_skip, flclash_skip = sys.argv[1:12]
 m = json.load(open(path, encoding="utf-8"))
 errs = []
 rel = str(m.get("release") or "")
@@ -243,15 +241,8 @@ if gitea_skip != "1":
         errs.append("gitea/ 缺二进制或 sha256")
 if flclash_skip != "1":
     fm = m.get("flclash") or {}
-    have_pin = str(pins.get("flclash") or "")
-    have_ver = str(fm.get("version") or "")
-    fdir = os.path.join(os.path.dirname(path), "flclash")
-    if not have_pin and not fm:
+    if not fm and not pins.get("flclash"):
         errs.append("manifest 无 flclash (旧捆绑, 需 --force 重建)")
-    elif flclash and flclash != "latest" and have_ver and have_ver != flclash:
-        errs.append(f"flclash.version={have_ver} != {flclash}")
-    elif flclash and have_pin and have_pin != flclash and not (have_ver and have_ver == flclash):
-        errs.append(f"pins.flclash={have_pin} != {flclash}")
 print(rel or "")
 print(m.get("fingerprint") or "")
 for e in errs:

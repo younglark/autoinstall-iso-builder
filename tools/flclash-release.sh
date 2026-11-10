@@ -7,17 +7,10 @@
 FLCLASH_REPO_URL="${FLCLASH_REPO_URL:-https://github.com/chen08209/FlClash}"
 FLCLASH_API_URL="${FLCLASH_API_URL:-https://api.github.com/repos/chen08209/FlClash}"
 
-flclash_normalize_pin() {
-  local p="${1:-latest}"
-  p="${p#v}"
-  printf '%s' "$p"
-}
-
-# latest 或 X.Y.Z (可带预发布后缀, 如 0.9.3 / 0.9.0-beta.1)
-flclash_pin_ok() {
-  local p
-  p="$(flclash_normalize_pin "$1")"
-  [[ "$p" == "latest" || "$p" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]]
+# 从 tag 去掉可选的 v 前缀
+flclash_version_from_tag() {
+  local t="${1#v}"
+  printf '%s' "$t"
 }
 
 flclash_asset_name() { # ver arch
@@ -36,13 +29,12 @@ flclash_sums_hash() {
   ' "$sums"
 }
 
-# 解析 PIN + ARCH → 设置:
+# 解析当前最新稳定版 + ARCH → 设置:
 #   FLCLASH_VERSION FLCLASH_TAG FLCLASH_DEB_NAME
 #   FLCLASH_DEB_URL FLCLASH_SUMS_URL
-flclash_resolve() {
-  local pin arch tag effective
-  pin="$(flclash_normalize_pin "${1:-latest}")"
-  arch="${2:-amd64}"
+# 始终跟随 GitHub releases/latest (不含预发布), 不支持钉扎旧版本。
+flclash_resolve() { # [arch]
+  local arch="${1:-amd64}" tag effective ver
   case "$arch" in
     amd64|arm64) ;;
     *)
@@ -50,26 +42,24 @@ flclash_resolve() {
       return 1
       ;;
   esac
-  if ! flclash_pin_ok "$pin"; then
-    echo "ERROR: 非法 FlClash 版本: $1 (latest 或 X.Y.Z)" >&2
+  effective="$(curl -fsSL --retry 3 --retry-delay 2 -o /dev/null -w '%{url_effective}' \
+    "$FLCLASH_REPO_URL/releases/latest")" || effective=""
+  tag="${effective##*/}"
+  if [[ ! "$tag" =~ ^v?[0-9]+\.[0-9]+ ]]; then
+    tag="$(curl -fsSL --retry 3 --retry-delay 2 "$FLCLASH_API_URL/releases/latest" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')" || tag=""
+  fi
+  [[ "$tag" =~ ^v?[0-9]+\.[0-9]+ ]] || {
+    echo "ERROR: 无法解析 FlClash 最新稳定版 (GitHub releases/latest)" >&2
+    return 1
+  }
+  ver="$(flclash_version_from_tag "$tag")"
+  if [[ ! "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]]; then
+    echo "ERROR: FlClash 最新稳定版版本号异常: $tag" >&2
     return 1
   fi
-  if [[ "$pin" == "latest" ]]; then
-    effective="$(curl -fsSL --retry 3 --retry-delay 2 -o /dev/null -w '%{url_effective}' \
-      "$FLCLASH_REPO_URL/releases/latest")" || effective=""
-    tag="${effective##*/}"
-    if [[ ! "$tag" =~ ^v?[0-9]+\.[0-9]+ ]]; then
-      tag="$(curl -fsSL --retry 3 --retry-delay 2 "$FLCLASH_API_URL/releases/latest" \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')" || tag=""
-    fi
-    [[ "$tag" =~ ^v?[0-9]+\.[0-9]+ ]] || {
-      echo "ERROR: 无法解析 FlClash latest (GitHub releases/latest)" >&2
-      return 1
-    }
-    pin="$(flclash_normalize_pin "$tag")"
-  fi
-  FLCLASH_VERSION="$pin"
-  FLCLASH_TAG="v${pin}"
+  FLCLASH_VERSION="$ver"
+  FLCLASH_TAG="v${ver}"
   FLCLASH_DEB_NAME="$(flclash_asset_name "$FLCLASH_VERSION" "$arch")"
   FLCLASH_DEB_URL="${FLCLASH_REPO_URL}/releases/download/${FLCLASH_TAG}/${FLCLASH_DEB_NAME}"
   FLCLASH_SUMS_URL="${FLCLASH_REPO_URL}/releases/download/${FLCLASH_TAG}/SHA256SUMS"

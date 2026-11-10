@@ -50,7 +50,6 @@ PIN_OPENCODE="${PIN_OPENCODE:-latest}"
 PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 PIN_GITEA="${PIN_GITEA:-latest}"
-PIN_FLCLASH="${PIN_FLCLASH:-latest}"
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger}"
 # Jenkins 插件解析器 (纯 Python 标准库; 与 software/30-jenkins.sh 在线路径同一份)
 RESOLVER="$SCRIPT_DIR/resolve-jenkins-plugins.py"
@@ -79,7 +78,6 @@ usage() {
   --pin-openmausbot VER 默认 latest
   --pin-unity-cli VER   Unity CLI 版本 (默认拉 latest/latest-beta)
   --pin-gitea VER       Gitea 版本 (默认 latest, 由 dl.gitea.com/gitea/version.json 解析)
-  --pin-flclash VER     FlClash 版本 (默认 latest, 由 GitHub releases/latest 解析; 官方 SHA256SUMS 校验)
   --jenkins-plugins "a b"
                         预装 Jenkins 插件 (按捆绑里同一 Jenkins 版本的 update center 解析全部必需依赖)
                         默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger
@@ -116,7 +114,6 @@ while [[ $# -gt 0 ]]; do
     --pin-openmausbot) PIN_OPENMAUSBOT="$2"; shift 2 ;;
     --pin-unity-cli) PIN_UNITY_CLI="$2"; shift 2 ;;
     --pin-gitea) PIN_GITEA="$2"; shift 2 ;;
-    --pin-flclash) PIN_FLCLASH="$2"; shift 2 ;;
     --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
     --ubuntu-mirror) UBUNTU_MIRROR="$2"; shift 2 ;;
     --skip-npm) SKIP_NPM=1; shift ;;
@@ -153,8 +150,6 @@ UBUNTU_MIRROR="$(aib_normalize_mirror "$UBUNTU_MIRROR")"
   || die "非法 --pin-gitea: $PIN_GITEA"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/flclash-release.sh"
-PIN_FLCLASH="$(flclash_normalize_pin "$PIN_FLCLASH")"
-flclash_pin_ok "$PIN_FLCLASH" || die "非法 --pin-flclash: $PIN_FLCLASH (latest 或 X.Y.Z)"
 JENKINS_PLUGINS="$(printf '%s' "$JENKINS_PLUGINS" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
 [[ -n "$JENKINS_PLUGINS" ]] || die "--jenkins-plugins 不能为空"
 for _jp in $JENKINS_PLUGINS; do
@@ -195,7 +190,7 @@ case "$APT_RUNNER" in
 esac
 
 # 计算期望指纹; 已有捆绑指纹一致才复用 (否则提示 --force)
-expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$RESOLVER_SHA" "$PIN_FLCLASH" <<'FP'
+expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$RESOLVER_SHA" <<'FP'
 import hashlib, json, sys
 payload = {
   "schema": 3,
@@ -209,7 +204,7 @@ payload = {
     "unity_cli": sys.argv[7],
     "godot": "4.7.2",
     "gitea": sys.argv[9],
-    "flclash": sys.argv[12],
+    "flclash": "latest",
   },
   "extra_packages": [p for p in sys.argv[8].split(",") if p],
   "jenkins_plugins": sorted(set(sys.argv[10].split())),
@@ -627,8 +622,8 @@ cp "$SCRIPT_DIR/apt-deb-reuse.sh" "$WORK/apt-deb-reuse.sh"
 # --------------- FlClash deb (host; 官方 GitHub Release + SHA256SUMS) ---------------
 # 必须在容器抓 deb 依赖之前下好, 以便把 Depends 并入 noble/jammy apt 闭包。
 if [[ "$ARCH" == "amd64" || "$ARCH" == "arm64" ]]; then
-  log "解析 FlClash ${PIN_FLCLASH} (linux-$ARCH)"
-  flclash_resolve "$PIN_FLCLASH" "$ARCH" || die "无法解析 FlClash $PIN_FLCLASH"
+  log "解析 FlClash 最新稳定版 (linux-$ARCH)"
+  flclash_resolve "$ARCH" || die "无法解析 FlClash 最新稳定版"
   mkdir -p "$WORK/flclash-in"
   # 优先复用旧捆绑里校验和一致的 deb, 避免重复从 GitHub 拉 ~40MB
   if [[ -d "$OUT/flclash" ]]; then
@@ -963,7 +958,7 @@ manifest = {
     "unity_cli": "${PIN_UNITY_CLI}" or (unity_meta.get("version") or ""),
     "godot": "4.7.2",
     "gitea": "${PIN_GITEA}",
-    "flclash": "${PIN_FLCLASH}",
+    "flclash": "latest",
   },
   "extra_packages": [p.strip() for p in "${PACKAGES}".split(",") if p.strip()],
   "apt_deb_count": len(debs),

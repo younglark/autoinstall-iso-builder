@@ -1,7 +1,7 @@
 #!/bin/bash
 # 37-flclash.sh — 预装 FlClash (ClashMeta 图形客户端)
 # 官方: https://github.com/chen08209/FlClash/releases
-# 默认 Desktop 安装最新稳定版 linux deb (可用 PIN_FLCLASH / --pin-flclash 钉扎)。
+# 默认 Desktop 安装最新稳定版 linux deb (始终跟随 GitHub releases/latest)。
 # Server / 非 amd64,arm64 自动跳过; --skip 37 或 --no-flclash 也可跳过。
 # 只装应用, 不写订阅、不设系统代理、不启用 TUN、不装开机自启。
 set -euo pipefail
@@ -28,9 +28,6 @@ if [ "${EDITION:-}" != "desktop" ]; then
   echo "skip: FlClash 仅在 Desktop 预装 (EDITION=${EDITION:-unset})"
   exit 0
 fi
-
-PIN="$(flclash_normalize_pin "${PIN_FLCLASH:-latest}")"
-flclash_pin_ok "$PIN" || { echo "ERROR: 非法 PIN_FLCLASH=$PIN (latest 或 X.Y.Z)"; exit 1; }
 
 FLCLASH_BIN="/usr/bin/FlClash"
 FLCLASH_OPT="/opt/FlClash/FlClash"
@@ -105,7 +102,7 @@ install_offline() {
 
 install_online() {
   local tmp
-  flclash_resolve "$PIN" "$ARCH"
+  flclash_resolve "$ARCH"
   if already_ok "$FLCLASH_VERSION"; then
     echo "FlClash $FLCLASH_VERSION 已安装, 跳过下载"
     return 0
@@ -118,10 +115,7 @@ install_online() {
 }
 
 if offline_enabled 2>/dev/null; then
-  # 离线捆绑已钉扎具体版本; 不在此处再解析 latest (避免离线还去访问 GitHub)
-  if [ "$PIN" != "latest" ]; then
-    flclash_resolve "$PIN" "$ARCH" || true
-  fi
+  # 离线捆绑已写入抓取时的最新稳定版; 不在此处再访问 GitHub
   install_offline
 else
   install_online

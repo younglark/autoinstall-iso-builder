@@ -39,7 +39,7 @@
 | `30-jenkins.sh` | Jenkins LTS | 优先 JDK 21（不够退 17），jenkins 用户加入 docker 组；**零配置**：跳过安装向导、装机时建好管理员、预装 Pipeline / Git / Gitea / Docker Pipeline / Docker Cloud / Rebuild / AnsiColor / Parameterized Trigger 等插件（含全部依赖），监听 **0.0.0.0:8080** |
 | `35-microsoft-edge.sh` | Microsoft Edge 稳定版 | **仅 Desktop + amd64 默认安装**（Server / 非 amd64 自动跳过，`--skip 35` 也可跳过）。官方 apt 源 `packages.microsoft.com/repos/edge`；设为默认浏览器（`update-alternatives` + 系统/用户 `mimeapps.list`）；GNOME 收藏夹用 Edge 替换 Firefox（Firefox **保留**）；策略关掉首次运行提示，**不**关闭自动更新 |
 | `36-x11vnc-xorg.sh` | 关 Wayland / x11vnc（**可选，默认不装**） | 仅 Desktop。`--disable-wayland` 让 GDM 登录界面、锁屏、会话都走 Xorg；`--x11vnc` 预装 x11vnc，**开机即可连**（登录界面、锁屏、登录后的会话），隐含关 Wayland。详见下文「远程桌面」 |
-| `37-flclash.sh` | FlClash（ClashMeta 图形客户端） | **仅 Desktop 默认安装**（Server / 非 amd64·arm64 自动跳过；`--no-flclash` 或 `--skip 37` 也可跳过）。官方 GitHub Release 的 linux `.deb`（同级 `SHA256SUMS` 校验），默认最新稳定版，可用 `--pin-flclash` 钉扎。**只装应用**：不写订阅、不设系统代理、不启用 TUN、不装开机自启。详见下文 |
+| `37-flclash.sh` | FlClash（ClashMeta 图形客户端） | **仅 Desktop 默认安装**（Server / 非 amd64·arm64 自动跳过；`--no-flclash` 或 `--skip 37` 也可跳过）。官方 GitHub Release 的 linux `.deb`（同级 `SHA256SUMS` 校验），**始终安装最新稳定版**。**只装应用**：不写订阅、不设系统代理、不启用 TUN、不装开机自启。详见下文 |
 | `40-nodejs.sh` | Node.js 24 | NodeSource 优先，官方 tarball 兜底 |
 | `45-gitea.sh` | Gitea（最新稳定版，可 `--pin-gitea`） | 官方 linux-amd64 二进制（sha256 校验）→ `/usr/local/bin/gitea`；系统用户 `git`；SQLite；**装机阶段写好配置并创建管理员**，开机 `gitea.service` 自启。监听 **0.0.0.0:3000**（不与 Jenkins 8080 冲突），开放注册，LFS 开，`OFFLINE_MODE`。SSH 克隆走系统 OpenSSH：`git@host:user/repo.git` |
 | `50-grok.sh` | xAI Grok Build | `@xai-official/grok`，**官方包**，不是社区的 `@vibe-kit/grok-cli` |
@@ -60,7 +60,7 @@
 
 ### FlClash（仅 Desktop）
 
-默认只在 Desktop 预装 [FlClash](https://github.com/chen08209/FlClash)（GPL-3.0，ClashMeta 图形客户端）。Server 与非 amd64/arm64 自动跳过。装的是官方 GitHub Release 的 `FlClash-<版>-linux-<架构>.deb`，用同一发布里的 `SHA256SUMS` 校验（没有 sums 时记录并校验下载文件的 sha256）。默认跟 `latest` 稳定版，可用 `--pin-flclash 0.9.3`（或环境变量 `PIN_FLCLASH`）钉扎。
+默认只在 Desktop 预装 [FlClash](https://github.com/chen08209/FlClash)（GPL-3.0，ClashMeta 图形客户端）。Server 与非 amd64/arm64 自动跳过。装的是官方 GitHub Release 的 `FlClash-<版>-linux-<架构>.deb`，用同一发布里的 `SHA256SUMS` 校验（没有 sums 时记录并校验下载文件的 sha256）。**始终跟随最新稳定版**（GitHub `releases/latest`，不含预发布）。
 
 **只装应用，不做任何代理配置**：不写入订阅/配置文件、不设系统代理、不启用 TUN、不安装或启用 `flclash-helper.service`（应用在用户需要时会自己写）。装完从应用菜单打开，由用户自行添加配置。
 
@@ -479,8 +479,7 @@ cat /var/log/autoinstall/20-docker.log
 | `--pin-grok / --pin-opencode / --pin-openmausbot VER` | npm 包版本（默认 latest）；亦可用 `PIN_GROK` / `PIN_OPENCODE` / `PIN_OPENMAUSBOT` |
 | `--pin-unity-cli VER` | Unity CLI 版本（默认拉 stable，若无则 beta）；亦可用 `PIN_UNITY_CLI` |
 | `--pin-gitea VER` | Gitea 版本（默认 `latest`，从 `dl.gitea.com/gitea/version.json` 解析；亦可 `PIN_GITEA=28.3.0`） |
-| `--pin-flclash VER` | FlClash 版本（默认 `latest`，从 GitHub `releases/latest` 解析官方 linux `.deb` 并用 `SHA256SUMS` 校验；亦可 `PIN_FLCLASH=0.9.3`）。仅 Desktop 预装 |
-| `--no-flclash` | 不预装 FlClash（等价 `--skip 37` / `--skip 37-flclash`） |
+| `--no-flclash` | 不预装 FlClash（等价 `--skip 37` / `--skip 37-flclash`）。Desktop 默认预装最新稳定版（官方 GitHub Release + `SHA256SUMS`） |
 | `--gitea-admin-user U` | Gitea 管理员用户名，默认 = `--username` |
 | `--gitea-admin-password P` | Gitea 管理员密码（至少 8 位），默认 = `--password` 明文；只给了 `--password-hash` 时装机写入 `/root/gitea-admin-password` |
 | `--gitea-admin-email E` | Gitea 管理员邮箱，默认 `<用户名>@localhost` |
@@ -521,7 +520,7 @@ cat /var/log/autoinstall/20-docker.log
 ### 完整性与版本复现
 
 - 推荐先验证官方 `SHA256SUMS.gpg`（用 Ubuntu CD Image signing key），再传 `--iso-sha256sums SHA256SUMS`；脚本只验证 SHA256，不替代 GPG 签名验证。
-- `--pin-grok` / `--pin-opencode` / `--pin-openmausbot` / `--pin-gitea` / `--pin-flclash` 给具体版本可避免 `latest` 漂移。默认仍为 `latest`。
+- `--pin-grok` / `--pin-opencode` / `--pin-openmausbot` / `--pin-gitea` 给具体版本可避免 `latest` 漂移。默认仍为 `latest`。FlClash 始终跟随最新稳定版，不能钉扎。
 - `--pin-node 24` 只钉主版本；NodeSource、Docker、Jenkins 仍跟随其稳定仓库，尚未做完整 apt 版本锁。
 - Jenkins apt 源自 2026-01 起需 `jenkins.io-2026.key`（2023 密钥已过期）；本仓库脚本已切换。若要求严格复现，应使用内网快照源并固定 `.deb` 版本。当前默认行为不变，不承诺 bit-for-bit 可复现。
 - `apt.primary` 暂保留 legacy 格式以兼容 22.04 的旧版 Subiquity（且安装器刷新关闭）；24.04-only 项目可迁移到 `mirror-selection.primary`。默认 URI 是清华源，详见下方「默认 apt 源」。
@@ -595,7 +594,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 - Unity CLI 是 CDN 二进制（`public-cdn.cloud.unity3d.com`）→ 全离线捆绑的 `unity-cli/`；无捆绑时脚本会联网下载
 - Godot 是官方 zip（GitHub releases / downloads.godotengine.org，固定 **4.7.2**）→ 全离线捆绑的 `godot/`；无捆绑时脚本会联网下载；**不含** export templates
 - Gitea 是官方二进制（`dl.gitea.com`，默认 latest，可用 `--pin-gitea`）→ 全离线捆绑的 `gitea/`；无捆绑时脚本会联网下载并用官方 `.sha256` 校验
-- FlClash 是官方 GitHub Release 的 linux `.deb`（默认 latest，可用 `--pin-flclash`）→ 全离线捆绑的 `flclash/` 以及 apt 池里的依赖；无捆绑时脚本会联网下载并用官方 `SHA256SUMS` 校验。仓库没有为 GitHub 资产配置国内代理，抓包/在线安装需要能访问 `github.com`
+- FlClash 是官方 GitHub Release 的 linux `.deb`（始终跟随最新稳定版）→ 全离线捆绑的 `flclash/` 以及 apt 池里的依赖；无捆绑时脚本会联网下载并用官方 `SHA256SUMS` 校验。仓库没有为 GitHub 资产配置国内代理，抓包/在线安装需要能访问 `github.com`
 
 真正要全离线，建议改为「内网镜像源 + 自建 npm registry（Verdaccio）」，比往 ISO 里塞依赖靠谱得多。
 

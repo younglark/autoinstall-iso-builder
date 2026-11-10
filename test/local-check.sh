@@ -683,13 +683,15 @@ if [[ -x software/37-flclash.sh ]] && [[ -f tools/flclash-release.sh ]] \
   && grep -q '只预装应用' software/37-flclash.sh \
   && ! grep -qE 'systemctl enable.*flclash|set-system-proxy|tun-mode|subscription' software/37-flclash.sh \
   && grep -q 'flclash/' tools/fetch-offline-bundle.sh \
-  && grep -q -- '--pin-flclash' tools/fetch-offline-bundle.sh \
-  && grep -q -- '--pin-flclash' tools/validate-offline-bundle.sh \
+  && ! grep -q -- '--pin-flclash' tools/fetch-offline-bundle.sh \
+  && ! grep -q -- '--pin-flclash' tools/validate-offline-bundle.sh \
+  && ! grep -q 'PIN_FLCLASH' build-iso.sh \
+  && ! grep -q 'PIN_FLCLASH' scripts/aib.sh \
+  && ! grep -q 'PIN_FLCLASH' scripts/aib.ps1 \
   && grep -q -- '--no-flclash' build-iso.sh \
-  && grep -q 'PIN_FLCLASH=%q' build-iso.sh \
   && grep -q 'flclash-release.sh' build-iso.sh \
-  && grep -q 'PIN_FLCLASH' scripts/aib.sh \
-  && grep -q 'PIN_FLCLASH' scripts/aib.ps1 \
+  && grep -q 'flclash_resolve' software/37-flclash.sh \
+  && grep -q 'releases/latest' tools/flclash-release.sh \
   && grep -qE '(^|[[:space:]])FlClash([[:space:]]|$)' software/99-cleanup.sh; then
   pass "flclash script + official SHA256SUMS + offline seed + no proxy config"
 else
@@ -713,15 +715,9 @@ if EDITION=desktop FLCLASH_ARCH=riscv64 bash software/37-flclash.sh >"$tmp/flc-a
 else
   fail "flclash skips on unsupported arch: $(cat "$tmp/flc-arch.log" 2>/dev/null)"
 fi
-# 解析 + SHA256SUMS 校验 (使用已下载的官方 sums 夹具)
+# SHA256SUMS 校验 (使用官方 sums 格式夹具, 不访问网络)
 # shellcheck disable=SC1091
 . tools/flclash-release.sh
-if flclash_pin_ok latest && flclash_pin_ok 0.9.3 && flclash_pin_ok v0.9.3 \
-   && ! flclash_pin_ok '0.9;rm' && ! flclash_pin_ok '../x'; then
-  pass "flclash_pin_ok accepts latest / X.Y.Z"
-else
-  fail "flclash_pin_ok"
-fi
 _sums="$(mktemp)"
 printf '%s  ./FlClash-0.9.3-linux-amd64.deb\n' '4064254329bb39c6289c743e16e5726ae56b5853e86d9f88e0145e2af032351b' > "$_sums"
 if [[ "$(flclash_sums_hash "$_sums" FlClash-0.9.3-linux-amd64.deb)" == "4064254329bb39c6289c743e16e5726ae56b5853e86d9f88e0145e2af032351b" ]]; then
@@ -1058,16 +1054,16 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
   bash test/make-fake-iso.sh desktop "$fc/src.iso" >/dev/null 2>&1 || true
   if [[ -f "$fc/src.iso" ]]; then
     if bash build-iso.sh --iso "$fc/src.iso" --out "$fc/a.iso" --edition desktop --password-hash "$(openssl passwd -6 x)" \
-         --pin-flclash 0.9.3 >"$fc/a.log" 2>&1 \
+         >"$fc/a.log" 2>&1 \
        && xorriso -osirrox on -indev "$fc/a.iso" -extract /provision "$fc/a" >/dev/null 2>&1; then
-      if grep -qx 'PIN_FLCLASH=0.9.3' "$fc/a/provision.env" \
+      if ! grep -q 'PIN_FLCLASH' "$fc/a/provision.env" \
          && [[ -f "$fc/a/37-flclash.sh" && -f "$fc/a/flclash-release.sh" ]]; then
-        pass "pin-flclash written to provision.env, helper copied"
+        pass "flclash helper copied, no PIN_FLCLASH in provision.env"
       else
-        fail "pin-flclash provision: $(grep PIN_FLCLASH "$fc/a/provision.env" 2>/dev/null)"
+        fail "flclash provision: $(grep PIN_FLCLASH "$fc/a/provision.env" 2>/dev/null)"
       fi
     else
-      fail "build-iso --pin-flclash: $(tail -5 "$fc/a.log" 2>/dev/null)"
+      fail "build-iso desktop flclash: $(tail -5 "$fc/a.log" 2>/dev/null)"
     fi
     if bash build-iso.sh --iso "$fc/src.iso" --out "$fc/b.iso" --edition desktop --password-hash "$(openssl passwd -6 x)" \
          --no-flclash >"$fc/b.log" 2>&1 \
@@ -1273,15 +1269,15 @@ if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$_vskip_no37 3
   printf '%s  ./FlClash-0.9.3-linux-amd64.deb\n' "$_fsha" > "$vb/flclash/SHA256SUMS"
   printf 'Package: FlClash\nVersion: 0.9.3\n\n' >> "$vb/apt/Packages"
   python3 -c "import json;p='$vb/manifest.json';m=json.load(open(p));m.setdefault('pins',{})['flclash']='latest';m['flclash']={'version':'0.9.3','sha256':open('$vb/flclash/sha256').read().strip(),'filename':'FlClash-0.9.3-linux-amd64.deb'};json.dump(m,open(p,'w'))"
-  if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$_vskip_no37 30" --pin-flclash latest >/dev/null 2>&1; then
+  if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$_vskip_no37 30" >/dev/null 2>&1; then
     echo tampered >> "$vb/flclash/FlClash-0.9.3-linux-amd64.deb"
-    if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$_vskip_no37 30" --pin-flclash latest >/dev/null 2>&1; then
+    if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$_vskip_no37 30" >/dev/null 2>&1; then
       pass "validate: flclash required unless --skip 37; sha256 enforced"
     else
       fail "validate accepted tampered flclash deb"
     fi
   else
-    fail "validate rejected complete flclash: $(bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$_vskip_no37 30" --pin-flclash latest 2>&1 | tail -5)"
+    fail "validate rejected complete flclash: $(bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$_vskip_no37 30" 2>&1 | tail -5)"
   fi
 else
   fail "validate accepted bundle without flclash"
