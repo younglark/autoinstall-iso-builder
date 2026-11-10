@@ -25,7 +25,7 @@ cd "$work/proj"
 proj="$(pwd)"
 
 out="$(bash "$AIB" --dry-run build --iso "../isos dir/u.iso" --out out/n1.iso \
-  --password 'p@ss word' --ssh-authorized-keys "$work/isos dir/k.pub" --hostname n1)"
+  --password 'p@ss word' --gitea-admin-password 'g1tea secret' --ssh-authorized-keys "$work/isos dir/k.pub" --hostname n1)"
 expect "cwd 挂到 /work" "$out" "source=$proj,target=/work"
 expect "cwd 外 ISO 父目录挂载" "$out" "source=$work/isos dir,target=/mnt/aib1"
 expect "ISO 参数改写" "$out" "/mnt/aib1/u.iso"
@@ -37,6 +37,8 @@ expect "默认打印自动构建命令" "$out" "docker build -t autoinstall-iso-
 reject "无 ghcr 默认" "$out" "ghcr.io"
 expect "明文密码打码" "$out" "--password '***'"
 reject "明文密码不泄露" "$out" "p@ss"
+expect "Gitea 密码打码" "$out" "--gitea-admin-password '***'"
+reject "Gitea 密码不泄露" "$out" "g1tea"
 reject "build 不强制平台" "$out" "--platform"
 if [[ -d "$work/proj/out" ]]; then fail "dry-run 不应创建目录"; else pass "dry-run 不创建目录"; fi
 

@@ -30,6 +30,9 @@ export PIN_OPENCODE="${PIN_OPENCODE:-latest}"
 export PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 export PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 export PIN_GODOT="${PIN_GODOT:-4.7.2}"
+export PIN_GITEA="${PIN_GITEA:-latest}"
+export GITEA_ADMIN_USER="${GITEA_ADMIN_USER:-}"
+export GITEA_ADMIN_EMAIL="${GITEA_ADMIN_EMAIL:-}"
 export OFFLINE="${OFFLINE:-0}"
 export OFFLINE_ROOT="${OFFLINE_ROOT:-/opt/offline}"
 export EXTRA_APT_PACKAGES="${EXTRA_APT_PACKAGES:-}"
@@ -53,7 +56,7 @@ should_skip() {
 
 echo "=============================================================="
 echo " provisioning target user=$TARGET_USER strict=$STRICT offline=$OFFLINE"
-echo " pins: node>=$PIN_NODE_MAJOR grok=$PIN_GROK opencode=$PIN_OPENCODE openmausbot=$PIN_OPENMAUSBOT unity-cli=${PIN_UNITY_CLI:-latest} godot=$PIN_GODOT"
+echo " pins: node>=$PIN_NODE_MAJOR grok=$PIN_GROK opencode=$PIN_OPENCODE openmausbot=$PIN_OPENMAUSBOT unity-cli=${PIN_UNITY_CLI:-latest} godot=$PIN_GODOT gitea=$PIN_GITEA"
 [ -n "$PROVISION_SKIP" ] && echo " skipping: $PROVISION_SKIP"
 [ -n "$EXTRA_APT_PACKAGES" ] && echo " extra apt: $EXTRA_APT_PACKAGES"
 echo "=============================================================="
@@ -87,6 +90,9 @@ for s in "$HERE"/[0-9][0-9]-*.sh; do
     tail -n 12 "$LOG/${name}.log" | sed 's/^/      | /'
   fi
 done
+
+# Gitea 管理员明文密码文件: 45-gitea 用后会删; 被 --skip 或失败时这里兜底删除
+rm -f "$HERE/gitea-admin.secret"
 
 echo "--------------------------------------------------------------"
 echo "完成:$DONE"

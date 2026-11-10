@@ -11,6 +11,7 @@
 #     node/                # 官方 Node tarball (nodesource 失败时的兜底)
 #     unity-cli/           # Unity CLI 二进制 + version/sha256（不含 Editor）
 #     godot/               # Godot 4.7.2 Linux x86_64 zip + sha512（不含 export templates）
+#     gitea/               # Gitea linux-amd64 二进制 + version/sha256 (官方 dl.gitea.com 校验和)
 #     package-list.txt
 #
 # 依赖: docker (推荐), 宿主机 node/npm (打 npm 包)。无 docker 时退出并提示。
@@ -35,6 +36,7 @@ PIN_GROK="${PIN_GROK:-latest}"
 PIN_OPENCODE="${PIN_OPENCODE:-latest}"
 PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
+PIN_GITEA="${PIN_GITEA:-latest}"
 SKIP_NPM=0
 FORCE=0
 APT_RUNNER="${AIB_APT_RUNNER:-docker}"
@@ -56,6 +58,7 @@ usage() {
   --pin-opencode VER    默认 latest
   --pin-openmausbot VER 默认 latest
   --pin-unity-cli VER   Unity CLI 版本 (默认拉 latest/latest-beta)
+  --pin-gitea VER       Gitea 版本 (默认 latest, 由 dl.gitea.com/gitea/version.json 解析)
   --ubuntu-mirror URL   容器内 Ubuntu 源
   --skip-npm            不打包 npm 全局树 (调试用)
   --apt-runner R        docker (默认) | direct (仅限容器内, 见脚本头注释)
@@ -80,6 +83,7 @@ while [[ $# -gt 0 ]]; do
     --pin-opencode) PIN_OPENCODE="$2"; shift 2 ;;
     --pin-openmausbot) PIN_OPENMAUSBOT="$2"; shift 2 ;;
     --pin-unity-cli) PIN_UNITY_CLI="$2"; shift 2 ;;
+    --pin-gitea) PIN_GITEA="$2"; shift 2 ;;
     --ubuntu-mirror) UBUNTU_MIRROR="$2"; shift 2 ;;
     --skip-npm) SKIP_NPM=1; shift ;;
     --force) FORCE=1; shift ;;
@@ -95,6 +99,9 @@ case "$RELEASE" in
   24.04) RELEASE=noble ;;
   *) die "--release 必须是 jammy|noble (或 22.04|24.04)" ;;
 esac
+
+[[ "$PIN_GITEA" == "latest" || "$PIN_GITEA" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] \
+  || die "非法 --pin-gitea: $PIN_GITEA"
 
 if [[ -z "$OUT" ]]; then
   OUT="$CACHE_ROOT/${RELEASE}-${ARCH}"
@@ -125,7 +132,7 @@ case "$APT_RUNNER" in
 esac
 
 # 计算期望指纹; 已有捆绑指纹一致才复用 (否则提示 --force)
-expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" <<'FP'
+expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" <<'FP'
 import hashlib, json, sys
 payload = {
   "schema": 3,
@@ -138,12 +145,13 @@ payload = {
     "openmausbot": sys.argv[6],
     "unity_cli": sys.argv[7],
     "godot": "4.7.2",
+    "gitea": sys.argv[9],
   },
   "extra_packages": [p for p in sys.argv[8].split(",") if p],
   "seeds": [
     "git", "ripgrep", "openssh-server", "gh",
     "docker-ce", "nvidia-container-toolkit", "jenkins", "nodejs",
-    "unity-cli", "godot", "apt-sources",
+    "unity-cli", "godot", "gitea", "apt-sources",
   ],
 }
 print(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16])
@@ -403,7 +411,7 @@ if command -v sudo >/dev/null; then
 fi
 
 # 同步到 OUT (保留可复用)
-rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/package-list.txt" "$OUT/java-package.txt"
+rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/package-list.txt" "$OUT/java-package.txt"
 mkdir -p "$OUT"
 cp -a "$WORK/out/." "$OUT/"
 
@@ -505,6 +513,30 @@ printf '%s\n' "$GODOT_SHA512" > "$GODOT_DIR/sha512"
 printf '%s\n' "$GODOT_ZIP" > "$GODOT_DIR/zip.name"
 ok "Godot $GODOT_VERSION ($(du -h "$GODOT_DIR/$GODOT_ZIP" | cut -f1); 不含 export templates)"
 
+# --------------- Gitea binary (host; 官方 dl.gitea.com + .sha256) ---------------
+GITEA_DL="${GITEA_DL_BASE:-https://dl.gitea.com/gitea}"
+if [[ "$PIN_GITEA" == "latest" ]]; then
+  GITEA_VERSION="$(curl -fsSL "$GITEA_DL/version.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["latest"]["version"])')" \
+    || die "无法解析 Gitea 最新版本: $GITEA_DL/version.json"
+else
+  GITEA_VERSION="$PIN_GITEA"
+fi
+[[ "$GITEA_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] || die "Gitea 版本号异常: $GITEA_VERSION"
+log "下载 Gitea $GITEA_VERSION (linux-amd64)"
+GITEA_FILE="gitea-${GITEA_VERSION}-linux-amd64"
+GITEA_DIR="$OUT/gitea"
+mkdir -p "$GITEA_DIR"
+curl -fL --retry 3 --retry-delay 2 -o "$GITEA_DIR/$GITEA_FILE" "$GITEA_DL/$GITEA_VERSION/$GITEA_FILE" \
+  || die "下载 Gitea 失败: $GITEA_DL/$GITEA_VERSION/$GITEA_FILE"
+GITEA_SHA256="$(curl -fsSL "$GITEA_DL/$GITEA_VERSION/$GITEA_FILE.sha256" | awk '{print $1}')"
+[[ "$GITEA_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "无法获取 Gitea 官方 sha256"
+echo "$GITEA_SHA256  $GITEA_DIR/$GITEA_FILE" | sha256sum -c - || die "Gitea sha256 校验失败"
+chmod 0755 "$GITEA_DIR/$GITEA_FILE"
+printf '%s\n' "$GITEA_VERSION" > "$GITEA_DIR/version"
+printf '%s\n' "$GITEA_SHA256" > "$GITEA_DIR/sha256"
+printf '%s\n' "$GITEA_FILE" > "$GITEA_DIR/binary.name"
+ok "Gitea $GITEA_VERSION ($(du -h "$GITEA_DIR/$GITEA_FILE" | cut -f1))"
+
 # --------------- manifest ---------------
 APT_COUNT=0
 [[ -f "$OUT/package-list.txt" ]] && APT_COUNT=$(wc -l < "$OUT/package-list.txt")
@@ -538,6 +570,15 @@ if gd.exists():
       "zip": (gd/"zip.name").read_text().strip() if (gd/"zip.name").exists() else None,
       "present": any(gd.glob("Godot_*.zip")) or any(gd.glob("*.zip")),
     }
+gitea_meta = {}
+gt = out/"gitea"
+if gt.exists():
+    gitea_meta = {
+      "version": (gt/"version").read_text().strip() if (gt/"version").exists() else None,
+      "sha256": (gt/"sha256").read_text().strip() if (gt/"sha256").exists() else None,
+      "filename": (gt/"binary.name").read_text().strip() if (gt/"binary.name").exists() else None,
+      "present": any(gt.glob("gitea-*-linux-amd64")),
+    }
 apt_src = out/"apt-sources"
 apt_sources_meta = None
 if apt_src.is_dir():
@@ -559,6 +600,7 @@ manifest = {
     "openmausbot": "${PIN_OPENMAUSBOT}",
     "unity_cli": "${PIN_UNITY_CLI}" or (unity_meta.get("version") or ""),
     "godot": "4.7.2",
+    "gitea": "${PIN_GITEA}",
   },
   "extra_packages": [p.strip() for p in "${PACKAGES}".split(",") if p.strip()],
   "apt_deb_count": len(debs),
@@ -569,6 +611,7 @@ manifest = {
   "java_package": (out/"java-package.txt").read_text().strip() if (out/"java-package.txt").exists() else None,
   "unity_cli": unity_meta or None,
   "godot": godot_meta or None,
+  "gitea": gitea_meta or None,
   "apt_sources": apt_sources_meta,
 }
 (out/"manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")

@@ -278,6 +278,7 @@ if command -v virt-cat >/dev/null 2>&1; then
     openmausbot
     unity
     godot
+    gitea
     sshd
   )
   missing=0
@@ -292,6 +293,25 @@ if command -v virt-cat >/dev/null 2>&1; then
   if [[ "$missing" -gt 0 ]]; then
     echo "    ↑ $missing 个预装工具未找到（若构建时 --skip 了对应脚本可忽略）"
   fi
+
+  echo
+  echo "==> Gitea (45-gitea.sh):"
+  if virt-ls -a "$DISK" /etc/systemd/system/multi-user.target.wants 2>/dev/null | grep -qx 'gitea.service'; then
+    echo "    gitea.service enabled"
+  else
+    echo "    [!] gitea.service 未 enable (若 --skip 45 可忽略)"
+  fi
+  GITEA_INI="$(virt-cat -a "$DISK" /etc/gitea/app.ini 2>/dev/null || true)"
+  if grep -q '^INSTALL_LOCK = true' <<<"$GITEA_INI"; then
+    echo "    app.ini INSTALL_LOCK = true"
+    grep -E '^(HTTP_ADDR|HTTP_PORT|DB_TYPE|DISABLE_REGISTRATION) ' <<<"$GITEA_INI" | sed 's/^/    /'
+  else
+    echo "    [!] /etc/gitea/app.ini 缺失或无 INSTALL_LOCK (若 --skip 45 可忽略)"
+  fi
+  virt-ls -a "$DISK" /var/lib/gitea/data 2>/dev/null | grep -qx 'gitea.db' \
+    && echo "    SQLite gitea.db 已初始化 (含管理员)"
+  virt-ls -a "$DISK" /opt/provision 2>/dev/null | grep -qx 'gitea-admin.secret' \
+    && echo "    [!] /opt/provision/gitea-admin.secret 仍在 (应已删除)"
 
   echo
   echo "==> Jenkins 与 SSH:"

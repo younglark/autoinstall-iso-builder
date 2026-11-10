@@ -38,6 +38,7 @@
 | `25-nvidia-container-toolkit.sh` | NVIDIA Container Toolkit | 官方仓库；`nvidia-ctk` 合并 Docker runtime（保留 daemon.json 日志轮转）；**不装 GPU 驱动** |
 | `30-jenkins.sh` | Jenkins LTS | 优先 JDK 21（不够退 17），jenkins 用户加入 docker 组 |
 | `40-nodejs.sh` | Node.js 24 | NodeSource 优先，官方 tarball 兜底 |
+| `45-gitea.sh` | Gitea（最新稳定版，可 `--pin-gitea`） | 官方 linux-amd64 二进制（sha256 校验）→ `/usr/local/bin/gitea`；系统用户 `git`；SQLite；**装机阶段写好配置并创建管理员**，开机 `gitea.service` 自启。监听 **0.0.0.0:3000**（不与 Jenkins 8080 冲突），开放注册，LFS 开，`OFFLINE_MODE`。SSH 克隆走系统 OpenSSH：`git@host:user/repo.git` |
 | `50-grok.sh` | xAI Grok Build | `@xai-official/grok`，**官方包**，不是社区的 `@vibe-kit/grok-cli` |
 | `60-opencode.sh` | OpenCode | `opencode-ai` |
 | `70-openmausbot.sh` | OpenMausBot | npm CLI + 一个**故意未启用**的 systemd 单元 |
@@ -49,6 +50,20 @@
 
 - **Node 必须是 24**。Grok 要 ≥20、opencode 要 ≥18、OpenMausBot 要 **≥24**——最后这个决定了版本下限。Ubuntu 24.04 自带的 Node 18 不够用，所以 `40-nodejs.sh` 走 NodeSource 而不是 `apt install nodejs`。
 - **Jenkins 要 Java 17/21**。装成 Java 11 会启动失败，脚本里做了 21→17 的探测回退。
+
+### Gitea：装完即可用
+
+默认预装（`--skip 45` / `--skip 45-gitea` 可跳过）。装机 chroot 里就会：
+
+- 写入 `/etc/gitea/app.ini`（`INSTALL_LOCK=true`，SQLite，每台机器独立生成 `SECRET_KEY` / `INTERNAL_TOKEN` / JWT），并 `gitea migrate`；
+- 创建管理员（默认用户名 = `--username`，密码 = `--password` 明文；可用 `--gitea-admin-user` / `--gitea-admin-password` / `--gitea-admin-email` 覆盖）。只给了 `--password-hash`、没有明文时，会生成随机密码并写入 **`/root/gitea-admin-password`**（root、0600）。构建时的明文密码单独放在 ISO 的 `/provision/gitea-admin.secret`（0600，不进 `provision.env` / 构建日志），装机用完即删。管理员 `must-change-password=false`，**装完请尽快改掉密码**；
+- `systemctl enable gitea.service`（官方单元，`After=network-online.target`）。防火墙规则不动。
+
+开机后浏览器打开 `http://<本机IP>:3000/` 即可（`HTTP_ADDR=0.0.0.0`，局域网可访问）。**开放注册**（`DISABLE_REGISTRATION=false`），局域网里的人都能自助注册；若只想管理员拉人，把该值改成 `true` 后 `sudo systemctl restart gitea`。
+
+网页上显示的克隆地址默认是 `http://localhost:3000/` / `git@localhost:...`（构建时还不知道装到哪台机器）。要改成真实 IP 或域名，编辑 `/etc/gitea/app.ini` 的 `[server]` 段 `ROOT_URL`、`DOMAIN`、`SSH_DOMAIN`，然后重启 Gitea。
+
+SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.ssh/authorized_keys`）。不要用 `--username git`（与该系统用户冲突）；若你事后在 sshd 里加了 `AllowUsers`，请把 `git` 加进去。
 
 ### 密钥一律不进镜像
 
@@ -66,7 +81,7 @@
 
 ### 容量与依赖提醒
 
-- 目标盘预留 **≥ 25 GB**（Docker 镜像 + Jenkins workspace 很吃空间）；这套预装本身约占 1.2–1.5 GB（另加 Godot 解压约 140 MB）。
+- 目标盘预留 **≥ 25 GB**（Docker 镜像 + Jenkins workspace 很吃空间）；这套预装本身约占 1.2–1.5 GB（另加 Godot 解压约 140 MB、Gitea 二进制约 115 MB，数据目录随后增长）。
 - OpenMausBot 是 Electron 应用，npm 包会拉下较大体积的运行时；服务器上只用 `openmausbot serve`，不需要 X11。
 - 首次开机后要跑一次 `apt-get update`——`99-cleanup.sh` 为了缩体积清掉了 `/var/lib/apt/lists`。
 
@@ -262,7 +277,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso --uefi
 | 选盘 | 默认停在选盘页 | 同左：图形安装器停在「安装类型/磁盘」页，确认后继续 |
 | 配置投递 | `/nocloud` + 内核参数 | 同左；另在 ISO 根放一份 `/autoinstall.yaml` 兜底（Subiquity 优先级：内核参数 > live 根 > cloud-config > 介质根，正常不会用到） |
 
-`software/*.sh` 在 Desktop 目标上不需要改：Desktop minimal 不带 curl/git/openssh-server，`00-base`/`10-openssh` 会补装；已装的包（ca-certificates、gnupg、jq 等）照旧跳过。GitHub CLI / Docker / NVIDIA Container Toolkit / Jenkins / Node / Grok / OpenCode / OpenMausBot / Unity CLI / Godot 与 Server 相同（Toolkit **不含** GPU 驱动；Unity CLI **不含** Editor；Godot **不含** export templates）。
+`software/*.sh` 在 Desktop 目标上不需要改：Desktop minimal 不带 curl/git/openssh-server，`00-base`/`10-openssh` 会补装；已装的包（ca-certificates、gnupg、jq 等）照旧跳过。GitHub CLI / Docker / NVIDIA Container Toolkit / Jenkins / Node / Gitea / Grok / OpenCode / OpenMausBot / Unity CLI / Godot 与 Server 相同（Toolkit **不含** GPU 驱动；Unity CLI **不含** Editor；Godot **不含** export templates）。
 
 ### 离线：Desktop 能不能全离线？
 
@@ -276,7 +291,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso --uefi
 ### 限制与已知问题
 
 - **只支持 24.04+ Desktop**。22.04 Desktop 是 Ubiquity（preseed），没有 `casper/install-sources.yaml`，脚本会直接报错退出。
-- Desktop 安装器是图形界面，串口（`console=ttyS0`）看不到进度；`qemu-smoke.sh` 只能靠装完后读盘断言。Desktop 建议 `QEMU_MEM=8192 QEMU_DISK=40G`。冒烟前会检查 ISO 的 `interactive-sections`：非空（默认停选盘）直接退出并提示 `--auto-disk`；装完后会在 `/usr/bin`、`/usr/sbin`、`/usr/local/bin` 核对 `git`/`gh`/`rg`/`docker`/`nvidia-ctk`/`node`/`unity`/`godot`/`sshd` 等。
+- Desktop 安装器是图形界面，串口（`console=ttyS0`）看不到进度；`qemu-smoke.sh` 只能靠装完后读盘断言。Desktop 建议 `QEMU_MEM=8192 QEMU_DISK=40G`。冒烟前会检查 ISO 的 `interactive-sections`：非空（默认停选盘）直接退出并提示 `--auto-disk`；装完后会在 `/usr/bin`、`/usr/sbin`、`/usr/local/bin` 核对 `git`/`gh`/`rg`/`docker`/`nvidia-ctk`/`node`/`unity`/`godot`/`gitea`/`sshd` 等，并检查 `gitea.service` 已 enable、`/etc/gitea/app.ini` 含 `INSTALL_LOCK = true`。
 - 带 interactive-sections 时 Subiquity 忽略 `reporting`；旧版桌面安装器在部分交互时「确认页」可能显示空白（[ubuntu-desktop-provision#926](https://github.com/canonical/ubuntu-desktop-provision/issues/926)，2026-08 已有人报告修复），返回再前进即可。
 - `drivers` / `codecs` / `oem` 未设置，沿用 Subiquity 默认值。
 - UEFI：24.04 Desktop 的 ESP 里只有 `bootx64/grubx64/mmx64.efi`，没有 grub.cfg 副本，所以改 `/boot/grub/grub.cfg` 即同时对 BIOS/UEFI 生效（已在 24.04.5.1 Desktop ISO 上确认）。
@@ -335,6 +350,10 @@ cat /var/log/autoinstall/20-docker.log
 | `--pin-node N` | Node 主版本（默认 24）；环境变量 `PIN_NODE_MAJOR` |
 | `--pin-grok / --pin-opencode / --pin-openmausbot VER` | npm 包版本（默认 latest）；亦可用 `PIN_GROK` / `PIN_OPENCODE` / `PIN_OPENMAUSBOT` |
 | `--pin-unity-cli VER` | Unity CLI 版本（默认拉 stable，若无则 beta）；亦可用 `PIN_UNITY_CLI` |
+| `--pin-gitea VER` | Gitea 版本（默认 `latest`，从 `dl.gitea.com/gitea/version.json` 解析；亦可 `PIN_GITEA=28.3.0`） |
+| `--gitea-admin-user U` | Gitea 管理员用户名，默认 = `--username` |
+| `--gitea-admin-password P` | Gitea 管理员密码（至少 8 位），默认 = `--password` 明文；只给了 `--password-hash` 时装机写入 `/root/gitea-admin-password` |
+| `--gitea-admin-email E` | Gitea 管理员邮箱，默认 `<用户名>@localhost` |
 | `--edition` | `auto`（默认）/ `server` / `desktop`。`auto` 读 ISO 的 `casper/install-sources.yaml`（`variant: desktop/server`），退回 `.disk/info`；显式指定优先 |
 | `--desktop-source` | 仅 desktop：`minimal`（默认，`ubuntu-desktop-minimal`）/ `standard`（`ubuntu-desktop`）/ 任意 source id；会对照 ISO 的 install-sources.yaml 校验 |
 | `--realname` | `identity.realname`（登录界面显示名）；desktop 默认等于 `--username` |
@@ -366,7 +385,7 @@ cat /var/log/autoinstall/20-docker.log
 ### 完整性与版本复现
 
 - 推荐先验证官方 `SHA256SUMS.gpg`（用 Ubuntu CD Image signing key），再传 `--iso-sha256sums SHA256SUMS`；脚本只验证 SHA256，不替代 GPG 签名验证。
-- `--pin-grok 具体版本` / `--pin-opencode 具体版本` / `--pin-openmausbot 具体版本` 可避免 `latest` 漂移。默认仍为 `latest`，以保持原有行为。
+- `--pin-grok` / `--pin-opencode` / `--pin-openmausbot` / `--pin-gitea` 给具体版本可避免 `latest` 漂移。默认仍为 `latest`。
 - `--pin-node 24` 只钉主版本；NodeSource、Docker、Jenkins 仍跟随其稳定仓库，尚未做完整 apt 版本锁。
 - Jenkins apt 源自 2026-01 起需 `jenkins.io-2026.key`（2023 密钥已过期）；本仓库脚本已切换。若要求严格复现，应使用内网快照源并固定 `.deb` 版本。当前默认行为不变，不承诺 bit-for-bit 可复现。
 - `apt.primary` 暂保留 legacy 格式以兼容 22.04 的旧版 Subiquity（且安装器刷新关闭）；24.04-only 项目可迁移到 `mirror-selection.primary`。
@@ -381,7 +400,7 @@ bash test/local-check.sh
 
 ### 全离线模式（`--offline` + `--offline-bundle`）
 
-目标：装机过程**零外网请求**，装完仍有 Docker / Jenkins / Node 24 / Grok / OpenCode / OpenMausBot / Unity CLI。
+目标：装机过程**零外网请求**，装完仍有 Docker / Jenkins / Node 24 / Grok / OpenCode / OpenMausBot / Unity CLI / Godot / Gitea。
 
 ```bash
 # 1) 构建期联网抓取捆绑（按发行版缓存，可复用）
@@ -410,15 +429,15 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 | 阶段 | 行为 |
 |---|---|
-| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）与 Godot 4.7.2 zip（`godot/`，约 75 MB）兜底 |
-| ISO | 写入 `/offline/{apt,apt-sources,npm,node,unity-cli,godot,manifest.json}` |
+| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）兜底 |
+| ISO | 写入 `/offline/{apt,apt-sources,npm,node,unity-cli,godot,gitea,manifest.json}` |
 | 装机 late-commands | 拷到 `/opt/offline`，临时只启用 `deb [trusted=yes] file:/opt/offline/apt ./`，再跑 `software/`（`OFFLINE=1`） |
-| `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装 |
+| `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装 |
 | `restore-online-apt.sh` | 卸掉离线 pin、恢复 Ubuntu 官方源后，把捆绑内 **全部** `apt-sources/` 种子写回（Docker CE / GitHub CLI / NVIDIA toolkit / Jenkins / NodeSource；与在线脚本同一批 URL/密钥）。装机时可能仍无网，此处不做 `apt update`；联网后即可收安全更新。纯在线构建不会调用本脚本 |
 
 体积与缓存：
 
-- 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；`manifest.json` 含 `fingerprint`（schema 3：release/arch/pins/seeds，含 `apt-sources`）。指纹一致才复用，否则或旧格式需 `--force` 重建。构建时 `validate-offline-bundle.sh` 会核对 apt 种子包、`apt-sources/` keyring+list，以及 `unity-cli/`、`godot/` 等目录；失败则提示 `--force` / `--force-fetch`。
+- 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；`manifest.json` 含 `fingerprint`（schema 3：release/arch/pins/seeds，含 `apt-sources`）。指纹一致才复用，否则或旧格式需 `--force` 重建。构建时 `validate-offline-bundle.sh` 会核对 apt 种子包、`apt-sources/` keyring+list，以及 `unity-cli/`、`godot/`、`gitea/` 等目录；失败则提示 `--force` / `--force-fetch`。
 - `--fetch-offline` 用 **ISO 识别到的 release**（非仅文件名）选 jammy/noble；加 `--force-fetch` 等价于给 fetch 传 `--force`。
 - npm/`node` 打包使用 `--owner=0 --group=0`；安装时 `tar --no-same-owner`，Node 解到 `/opt/node-…` 再 symlink，避免 `/usr/local` 属主变成 uid 1000。
 - 全离线装完写回第三方 apt 源：`apt-sources/` 在 fetch 时按在线脚本同款材料抓取；`restore-online-apt.sh` **全量写回**捆绑内种子（不按 `--skip` 裁剪）。旧捆绑缺 `apt-sources/` 时需 `--force` 重建。
@@ -438,6 +457,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 - Grok / OpenCode / OpenMausBot 是 **npm 全局包** → 需要预建 npm 缓存（`npm cache add`）或打成 tarball 后离线 `npm install -g ./xxx.tgz`
 - Unity CLI 是 CDN 二进制（`public-cdn.cloud.unity3d.com`）→ 全离线捆绑的 `unity-cli/`；无捆绑时脚本会联网下载
 - Godot 是官方 zip（GitHub releases / downloads.godotengine.org，固定 **4.7.2**）→ 全离线捆绑的 `godot/`；无捆绑时脚本会联网下载；**不含** export templates
+- Gitea 是官方二进制（`dl.gitea.com`，默认 latest，可用 `--pin-gitea`）→ 全离线捆绑的 `gitea/`；无捆绑时脚本会联网下载并用官方 `.sha256` 校验
 
 真正要全离线，建议改为「内网镜像源 + 自建 npm registry（Verdaccio）」，比往 ISO 里塞依赖靠谱得多。
 
@@ -447,9 +467,9 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 1. `--dry-run` 的 YAML 能被 `yaml.safe_load` 解析（脚本已内置校验）。
 2. `xorriso -indev out.iso -report_el_torito plain` 里 **BIOS 与 UEFI 两个引导项都在**。
-3. 虚拟机 BIOS + UEFI 各装一次，`virt-cat` 读到的 `/var/log/autoinstall/manifest.txt` 里 git / gh / rg / docker / nvidia-ctk / node / grok / opencode / openmausbot / unity / godot 都有版本号。
+3. 虚拟机 BIOS + UEFI 各装一次，`virt-cat` 读到的 `/var/log/autoinstall/manifest.txt` 里 git / gh / rg / docker / nvidia-ctk / node / grok / opencode / openmausbot / unity / godot / gitea 都有版本号。
 4. `provision-failed.txt` 为空。
-5. 重启后 `systemctl status docker jenkins ssh` 三个都是 active。
+5. 重启后 `systemctl status docker jenkins ssh gitea` 都是 active；浏览器打开 `http://<IP>:3000/` 能进（开放注册），用构建时的管理员账号即可登录。
 
 ---
 
@@ -469,6 +489,9 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 | `docker` 命令要 sudo | 组权限未生效 | 重新登录（组变更需新会话） |
 | `docker run --gpus` 失败 | **未装 GPU 驱动**（本镜像只预装 Toolkit） | 在目标机另行安装 NVIDIA 驱动后再用；无 GPU 的 VM 只能验证 `nvidia-ctk --version` / daemon.json |
 | `unity` 能跑但装不了 Editor / 未登录 | **镜像只预装 CLI** | 装机后 `unity auth login`，再 `unity install <ver>`；许可证另激活 |
+| 浏览器打不开 Gitea / 克隆地址是 localhost | 服务未起，或 `ROOT_URL` 仍是默认 | `systemctl status gitea`；确认本机防火墙未拦 3000 端口（脚本**不**改防火墙）。网页显示的地址要改的话，编辑 `/etc/gitea/app.ini` 的 `ROOT_URL` / `DOMAIN` / `SSH_DOMAIN` 后 `systemctl restart gitea` |
+| 忘记 Gitea 管理员密码 | 只给了 `--password-hash` 构建 | 看 `/root/gitea-admin-password`（root 0600）；若用了 `--password`，密码与系统用户相同（装完请改掉） |
+| `git@host:...` SSH 克隆被拒 | `AllowUsers` 没包含 `git`，或没把公钥加到 Gitea | 系统 OpenSSH + 用户 `git`；在 Gitea 里给用户添加 SSH 公钥。sshd 默认没有 `AllowUsers` |
 | `openmausbot` 打不开窗口 | 它是 Electron 应用 | 服务器上只能用 `openmausbot serve` |
 | 装完没有服务自启 | `policy-rc.d` 没删掉 | 确认 `99-cleanup.sh` 跑过；检查 `/usr/sbin/policy-rc.d` 不存在 |
 
@@ -509,8 +532,8 @@ xorriso -indev ubuntu.iso -outdev out.iso \
 
 ## 落盘前最后确认
 
-- 口令是哈希，不是明文；哈希本身也别提交到公开仓库。
+- 口令是哈希，不是明文；哈希本身也别提交到公开仓库。若用 `--password` 构建，Gitea 管理员明文会短暂出现在 ISO 的 `/provision/gitea-admin.secret`（0600），装机后从目标机删除；拿到 ISO 的人在安装前仍可能读到，请勿把此类 ISO 公开分发。
 - 没有任何 API key / 私钥进镜像。SSH **公钥**可通过 `--ssh-authorized-keys` 注入，属于公开信息；私钥绝不注入。
-- 目标机磁盘 ≥ 25 GB，且装机时能访问 cli.github.com / docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）以及 `github.com/godotengine/godot` 或 `downloads.godotengine.org`（Godot 4.7.2）。全离线捆绑可免除这些外网依赖。
+- 目标机磁盘 ≥ 25 GB，且装机时能访问 cli.github.com / docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）、`github.com/godotengine/godot` 或 `downloads.godotengine.org`（Godot 4.7.2），以及 `dl.gitea.com`（Gitea 二进制与 sha256）。全离线捆绑可免除这些外网依赖。
 
 这条线一旦破，后面所有「镜像管理」都失去意义。
