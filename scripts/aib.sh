@@ -5,13 +5,16 @@
 #   ./scripts/aib.sh [包装选项] <子命令> [子命令参数...]
 #
 # 包装选项 (必须写在子命令之前):
-#   --image REF      镜像仓库, 默认 ghcr.io/younglark/autoinstall-iso-builder (或环境变量 AIB_IMAGE)
-#   --tag TAG        镜像 tag, 默认 latest (或 AIB_TAG); 抓 jammy 捆绑时自动用 <tag>-jammy
-#   --local          用本仓库 Dockerfile 现场 docker build (tag: autoinstall-iso-builder:local)
-#   --pull           运行前强制 docker pull
+#   (默认)           用本地镜像 autoinstall-iso-builder:local (抓 22.04 捆绑用 :local-jammy);
+#                    不存在时自动用本仓库 Dockerfile docker build (首次约 3-10 分钟, 之后秒级)
+#   --rebuild        强制重新 docker build 本地镜像 (git pull 更新仓库后用; 仍复用未变的层缓存)
+#   --image REF      改用指定的完整镜像引用 (自建/内网仓库), 不再自动构建 (或环境变量 AIB_IMAGE)
+#   --local          兼容旧用法, 等同默认 (无操作)
 #   --platform P     覆盖 docker --platform (默认: 需要 apt 解析的步骤强制 linux/amd64, 其余原生)
 #   --docker-arg A   追加一个 docker run 参数, 可重复 (如 --docker-arg --network=host);
 #                    也可用环境变量 AIB_DOCKER_ARGS="--network=host -e HTTPS_PROXY=..." (按空白切分)
+#   (环境变量 AIB_BUILD_ARGS="--network=host ..." 追加到自动 docker build, 如代理/DNS 受限环境;
+#    APT_MIRROR=URL 作为 --build-arg 传给 docker build 换 apt 源)
 #   --dry-run        只打印将执行的 docker 命令, 不运行 (不需要 docker)
 #   -h, --help
 #
@@ -25,10 +28,9 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
-IMAGE="${AIB_IMAGE:-ghcr.io/younglark/autoinstall-iso-builder}"
-TAG="${AIB_TAG:-latest}"
-LOCAL_BUILD=0
-PULL=0
+IMAGE="${AIB_IMAGE:-}"          # 空 = 本地构建的镜像
+LOCAL_REPO="autoinstall-iso-builder"
+REBUILD=0
 PLATFORM="${AIB_PLATFORM:-}"
 DRY_RUN=0
 EXTRA_DOCKER_ARGS=()
@@ -49,9 +51,8 @@ OUT_OPTS=" --out --offline-bundle --cache-root "
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --image) [[ $# -ge 2 ]] || die "--image 需要参数"; IMAGE="$2"; shift 2 ;;
-    --tag) [[ $# -ge 2 ]] || die "--tag 需要参数"; TAG="$2"; shift 2 ;;
-    --local) LOCAL_BUILD=1; shift ;;
-    --pull) PULL=1; shift ;;
+    --rebuild) REBUILD=1; shift ;;
+    --local) shift ;;
     --platform) [[ $# -ge 2 ]] || die "--platform 需要参数"; PLATFORM="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --docker-arg) [[ $# -ge 2 ]] || die "--docker-arg 需要参数"; EXTRA_DOCKER_ARGS+=("$2"); shift 2 ;;
@@ -165,11 +166,24 @@ if [[ -z "$PLATFORM" && "$NEEDS_AMD64" -eq 1 ]]; then
   PLATFORM="linux/amd64"
 fi
 
-if [[ "$LOCAL_BUILD" -eq 1 ]]; then
-  IMAGE_REF="autoinstall-iso-builder:local${VARIANT}"
-else
-  IMAGE_REF="${IMAGE}:${TAG}${VARIANT}"
+# 本地镜像 tag: local[-jammy][-<arch>]; 只有强制平台与本机架构不同 (如 Apple Silicon 抓捆绑)
+# 才加架构后缀, 避免同一 tag 在 arm64/amd64 之间来回覆盖
+normalize_arch() {
+  case "$1" in x86_64|amd64) echo amd64 ;; aarch64|arm64) echo arm64 ;; *) echo "$1" ;; esac
+}
+ARCH_SUFFIX=""
+if [[ -n "$PLATFORM" ]]; then
+  want_arch="$(normalize_arch "${PLATFORM#*/}")"
+  if [[ "$want_arch" != "$(normalize_arch "$(uname -m)")" ]]; then ARCH_SUFFIX="-$want_arch"; fi
 fi
+if [[ -n "$IMAGE" ]]; then
+  IMAGE_REF="$IMAGE"
+  AUTO_BUILD=0
+else
+  IMAGE_REF="${LOCAL_REPO}:local${VARIANT}${ARCH_SUFFIX}"
+  AUTO_BUILD=1
+fi
+[[ "$REBUILD" -eq 1 && "$AUTO_BUILD" -eq 0 ]] && die "--rebuild 只作用于本地镜像, 不能与 --image 同用"
 
 # ---------------------------------------------------------------- 组装 docker 命令
 DOCKER=(docker run --rm)
@@ -213,16 +227,30 @@ print_cmd() {
   printf '%s\n' "${line% }"
 }
 
-if [[ "$LOCAL_BUILD" -eq 1 ]]; then
+REVISION=""
+if command -v git >/dev/null && git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+fi
+if [[ "$AUTO_BUILD" -eq 1 ]]; then
+  [[ -f "$REPO_ROOT/Dockerfile" ]] || die "找不到 $REPO_ROOT/Dockerfile; 请在完整仓库里运行, 或用 --image 指定镜像"
   ubuntu_version="24.04"; [[ "$VARIANT" == "-jammy" ]] && ubuntu_version="22.04"
   BUILD_CMD=(docker build -t "$IMAGE_REF" --build-arg "UBUNTU_VERSION=$ubuntu_version")
   [[ -n "$PLATFORM" ]] && BUILD_CMD+=(--platform "$PLATFORM")
+  [[ -n "${APT_MIRROR:-}" ]] && BUILD_CMD+=(--build-arg "APT_MIRROR=$APT_MIRROR")
+  if [[ -n "${AIB_BUILD_ARGS:-}" ]]; then
+    read -r -a _extra_build <<< "$AIB_BUILD_ARGS"
+    BUILD_CMD+=("${_extra_build[@]}")
+  fi
+  # 只打 label, 不传 build-arg (build-arg 变化会让 apt 层缓存失效)
+  [[ -n "$REVISION" ]] && BUILD_CMD+=(--label "aib.revision=$REVISION")
   BUILD_CMD+=("$REPO_ROOT")
 fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  [[ "$LOCAL_BUILD" -eq 1 ]] && print_cmd "${BUILD_CMD[@]}"
-  [[ "$PULL" -eq 1 && "$LOCAL_BUILD" -eq 0 ]] && print_cmd docker pull ${PLATFORM:+--platform "$PLATFORM"} "$IMAGE_REF"
+  if [[ "$AUTO_BUILD" -eq 1 ]]; then
+    if [[ "$REBUILD" -eq 1 ]]; then echo "# --rebuild: 先构建镜像"; else echo "# 本地镜像不存在时先构建:"; fi
+    print_cmd "${BUILD_CMD[@]}"
+  fi
   print_cmd "${DOCKER[@]}"
   exit 0
 fi
@@ -233,11 +261,19 @@ docker info >/dev/null 2>&1 || die "docker 守护进程不可用 (Docker Desktop
 # Git Bash / MSYS: 阻止把 /work 之类参数改写成 Windows 路径
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' ;; esac
 
-if [[ "$LOCAL_BUILD" -eq 1 ]]; then
-  info "本地构建镜像 $IMAGE_REF"
-  "${BUILD_CMD[@]}"
-elif [[ "$PULL" -eq 1 ]]; then
-  docker pull ${PLATFORM:+--platform "$PLATFORM"} "$IMAGE_REF"
+if [[ "$AUTO_BUILD" -eq 1 ]]; then
+  if [[ "$REBUILD" -eq 1 ]]; then
+    info "重新构建本地镜像 $IMAGE_REF"
+    "${BUILD_CMD[@]}" >&2
+  elif ! docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
+    info "本地镜像 $IMAGE_REF 不存在, 首次构建 (约 3-10 分钟, 取决于网络; 国内可设 APT_MIRROR=http://mirrors.aliyun.com/ubuntu)"
+    "${BUILD_CMD[@]}" >&2
+  elif [[ -n "$REVISION" ]]; then
+    have_rev="$(docker image inspect -f '{{ index .Config.Labels "aib.revision" }}' "$IMAGE_REF" 2>/dev/null || true)"
+    if [[ -n "$have_rev" && "$have_rev" != "$REVISION" ]]; then
+      info "提示: 本地镜像构建于 ${have_rev:0:7}, 仓库已是 ${REVISION:0:7}; 如脚本有更新请加 --rebuild"
+    fi
+  fi
 fi
 
 if [[ "$NEEDS_AMD64" -eq 1 && "$(uname -m)" =~ ^(arm64|aarch64)$ ]]; then
