@@ -5,6 +5,14 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "$0")" && pwd)"
 # shellcheck disable=SC1091
 [ -f "$HERE/lib-offline.sh" ] && . "$HERE/lib-offline.sh"
+# shellcheck disable=SC1090,SC1091
+for _m in "$HERE/ubuntu-mirror.sh" "$HERE/../tools/ubuntu-mirror.sh"; do
+  if [ -f "$_m" ]; then
+    . "$_m"
+    break
+  fi
+done
+unset _m
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
@@ -76,6 +84,11 @@ else
       echo "nameserver 223.5.5.5"
       echo "nameserver 1.1.1.1"
     } > /etc/resolv.conf
+  fi
+  # 清华 https 且缺 CA 时先走 http 装 ca-certificates, 再切回 https
+  if command -v aib_ensure_https_apt >/dev/null 2>&1; then
+    aib_ensure_https_apt
+    [ -n "${UBUNTU_MIRROR:-}" ] && aib_apply_final_ubuntu_mirror "$UBUNTU_MIRROR"
   fi
   apt-get update
   apt-get install -y --no-install-recommends \

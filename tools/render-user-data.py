@@ -81,8 +81,20 @@ def yaml_quoted_list_block(items, indent="    "):
     return "\n".join(lines)
 
 
-# 默认 apt 源: 清华大学开源镜像 http (含 -security; apt 走 GPG, 避免干净环境缺 CA)。与 build-iso.sh / fetch-offline-bundle.sh 保持一致。
-DEFAULT_UBUNTU_MIRROR = "http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+# 默认 apt 源: 清华大学开源镜像 https (含 -security)。与 build-iso.sh / fetch-offline-bundle.sh 保持一致。
+# 清华 http 会升为 https; 其它 URL 原样保留。装机阶段缺 CA 时由 ubuntu-mirror.sh 先走 http 引导。
+DEFAULT_UBUNTU_MIRROR = "https://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+TUNA_HOST = "mirrors.tuna.tsinghua.edu.cn"
+
+
+def normalize_ubuntu_mirror(url: str) -> str:
+    """清华源统一成 https; 空值或其它主机原样返回。"""
+    if not url:
+        return url
+    for prefix in ("http://", "https://"):
+        if url.startswith(prefix) and url[len(prefix):].startswith(TUNA_HOST):
+            return "https://" + url[len(prefix):]
+    return url
 
 
 def build_apt_primary_block(mirror: str, full_offline: bool) -> str:
@@ -368,7 +380,7 @@ def main() -> int:
         "LOCALE": args.locale,
         "KEYBOARD": args.keyboard,
         "TIMEZONE": args.timezone,
-        "APT_PRIMARY_BLOCK": build_apt_primary_block(args.mirror, full_offline),
+        "APT_PRIMARY_BLOCK": build_apt_primary_block(normalize_ubuntu_mirror(args.mirror), full_offline),
         "APT_FALLBACK": fallback,
         "UPDATES": updates,
         "SSH_ALLOW_PW": ssh_allow,

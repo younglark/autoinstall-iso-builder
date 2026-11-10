@@ -44,7 +44,7 @@ RESOLVER_SHA="$(sha256sum "$RESOLVER" 2>/dev/null | cut -c1-16)"
 SKIP_NPM=0
 FORCE=0
 APT_RUNNER="${AIB_APT_RUNNER:-docker}"
-# 默认清华源 http (含 -security; apt 走 GPG, http 避免干净容器缺 CA 无法校验证书)。UBUNTU_MIRROR / --ubuntu-mirror 覆盖。
+# 默认清华源 https (含 -security)。缺 CA 时先走 http 装 ca-certificates 再切回 https。UBUNTU_MIRROR / --ubuntu-mirror 覆盖。
 # 非 amd64/i386 在参数解析后改用 ubuntu-ports (见下方)。
 UBUNTU_MIRROR="${UBUNTU_MIRROR:-}"
 
@@ -69,8 +69,9 @@ usage() {
                         预装 Jenkins 插件 (按捆绑里同一 Jenkins 版本的 update center 解析全部必需依赖)
                         默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger
   --ubuntu-mirror URL   抓包时的 Ubuntu 源; 默认清华
-                        http://mirrors.tuna.tsinghua.edu.cn/ubuntu
-                        (非 amd64/i386 默认 .../ubuntu-ports)。含 -security 口袋
+                        https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+                        (非 amd64/i386 默认 .../ubuntu-ports)。含 -security。
+                        清华 http 会升为 https; 其它 URL 原样使用
   --skip-npm            不打包 npm 全局树 (调试用)
   --apt-runner R        docker (默认) | direct (仅限容器内, 见脚本头注释)
   --force               忽略已有 manifest/fingerprint, 强制重建 (参数变更或缺件时需 --force)
@@ -115,10 +116,14 @@ esac
 # --ubuntu-mirror / 环境变量 UBUNTU_MIRROR 优先; 未指定时按架构选清华源
 if [[ -z "$UBUNTU_MIRROR" ]]; then
   case "$ARCH" in
-    amd64|i386) UBUNTU_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu" ;;
-    *)          UBUNTU_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports" ;;
+    amd64|i386) UBUNTU_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu" ;;
+    *)          UBUNTU_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports" ;;
   esac
 fi
+# 清华 http -> https; 用户指定的其它源不动
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/ubuntu-mirror.sh"
+UBUNTU_MIRROR="$(aib_normalize_mirror "$UBUNTU_MIRROR")"
 
 [[ "$PIN_GITEA" == "latest" || "$PIN_GITEA" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] \
   || die "非法 --pin-gitea: $PIN_GITEA"
@@ -235,16 +240,19 @@ OUTDIR="${FETCH_OUTDIR:-/out}"
 
 echo "== container: $(. /etc/os-release && echo "$PRETTY_NAME") arch=$ARCH =="
 
-# 使用指定 Ubuntu 镜像 (默认清华, 含 -security 口袋; 与 -updates 走同一 URL)
-cat > /etc/apt/sources.list <<SL
-deb ${MIRROR} ${RELEASE} main restricted universe multiverse
-deb ${MIRROR} ${RELEASE}-updates main restricted universe multiverse
-deb ${MIRROR} ${RELEASE}-security main restricted universe multiverse
-SL
-# noble+ 可能用 deb822; 清掉以免冲突
-rm -f /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
-
-apt-get update
+# 清华 https 且缺 CA 时, 先走 http 装 ca-certificates 再切回 https
+# shellcheck disable=SC1091
+if [ -f /ubuntu-mirror.sh ]; then
+  . /ubuntu-mirror.sh
+elif [ -f "$(dirname "$0")/ubuntu-mirror.sh" ]; then
+  . "$(dirname "$0")/ubuntu-mirror.sh"
+elif [ -f /opt/aib/tools/ubuntu-mirror.sh ]; then
+  . /opt/aib/tools/ubuntu-mirror.sh
+else
+  echo "ERROR: ubuntu-mirror.sh not found" >&2
+  exit 1
+fi
+aib_bootstrap_apt_mirror "$RELEASE" "$MIRROR"
 apt-get install -y --no-install-recommends \
   ca-certificates curl gnupg dpkg-dev apt-utils xz-utils
 
@@ -429,6 +437,7 @@ JVER="$(dpkg-deb -f "$JDEB" Version)"
 printf '%s' "${JVER%%-*}" > "$OUTDIR/jenkins-version.txt"
 INNER
 chmod +x "$WORK/fetch-debs.sh"
+cp "$SCRIPT_DIR/ubuntu-mirror.sh" "$WORK/ubuntu-mirror.sh"
 
 log "在 $IMG 中解析并下载 apt 依赖闭包"
 mkdir -p "$WORK/out"
@@ -440,6 +449,7 @@ else
   docker run --rm --network host \
     --dns 8.8.8.8 --dns 1.1.1.1 \
     -v "$WORK/fetch-debs.sh:/fetch-debs.sh:ro" \
+    -v "$WORK/ubuntu-mirror.sh:/ubuntu-mirror.sh:ro" \
     -v "$WORK/out:/out" \
     -e DEBIAN_FRONTEND=noninteractive \
     "$IMG" bash /fetch-debs.sh "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES"

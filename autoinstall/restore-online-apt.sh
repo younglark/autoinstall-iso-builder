@@ -72,6 +72,31 @@ if [ -d "$APT_SRC/sources.list.d" ]; then
 fi
 
 echo "restored third-party apt sources from $APT_SRC ($restored files)"
+
+# 把 Ubuntu 源写成构建时的 --mirror (默认清华 https)。ca-certificates 已由 00-base
+# 从离线捆绑装好, 因此现在切 https 是安全的。
+HELPER=""
+for _m in "$OFFLINE_ROOT/ubuntu-mirror.sh" /opt/provision/ubuntu-mirror.sh; do
+  if [ -f "$_m" ]; then HELPER="$_m"; break; fi
+done
+# shellcheck disable=SC1090
+[ -n "$HELPER" ] && . "$HELPER"
+MIRROR_URL=""
+if [ -f "$OFFLINE_ROOT/ubuntu-mirror.url" ]; then
+  MIRROR_URL="$(tr -d '[:space:]' < "$OFFLINE_ROOT/ubuntu-mirror.url")"
+fi
+if [ -z "$MIRROR_URL" ] && [ -f /opt/provision/provision.env ]; then
+  # shellcheck disable=SC1091
+  . /opt/provision/provision.env
+  MIRROR_URL="${UBUNTU_MIRROR:-}"
+fi
+if command -v aib_apply_final_ubuntu_mirror >/dev/null 2>&1 && [ -n "$MIRROR_URL" ]; then
+  aib_apply_final_ubuntu_mirror "$MIRROR_URL"
+  echo "final Ubuntu apt mirror: $MIRROR_URL"
+elif command -v aib_ensure_https_apt >/dev/null 2>&1; then
+  aib_ensure_https_apt
+fi
+
 # 装机时可能仍无网, 不在这里 apt-get update; 联网后自行 update 即可
 if [ -d "$APT_ETC/sources.list.d" ]; then
   find "$APT_ETC/sources.list.d" -maxdepth 1 -type f -printf '  source: %f\n' 2>/dev/null || true
