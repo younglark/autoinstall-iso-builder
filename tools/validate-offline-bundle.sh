@@ -3,6 +3,7 @@
 # 用法:
 #   ./tools/validate-offline-bundle.sh --bundle DIR [--release noble|jammy|24.04|22.04]
 #       [--skip "30 70"] [--pin-node N] [--pin-grok V] [--jenkins-plugins "a b"] ...
+#       [--require-x11vnc]   (build-iso --x11vnc 时: 捆绑里必须有 x11vnc + xauth)
 set -Eeuo pipefail
 
 BUNDLE=""
@@ -15,6 +16,7 @@ PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 PIN_GODOT="${PIN_GODOT:-4.7.2}"
 PIN_GITEA="${PIN_GITEA:-latest}"
+REQUIRE_X11VNC=0
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger}"
 
 die()  { printf '[fail] %s\n' "$*" >&2; exit 1; }
@@ -44,8 +46,9 @@ while [[ $# -gt 0 ]]; do
     --pin-godot) PIN_GODOT="$2"; shift 2 ;;
     --pin-gitea) PIN_GITEA="$2"; shift 2 ;;
     --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
+    --require-x11vnc) REQUIRE_X11VNC=1; shift ;;
     -h|--help)
-      sed -n '2,6p' "$0"; exit 0 ;;
+      sed -n '2,7p' "$0"; exit 0 ;;
     *) die "未知参数: $1" ;;
   esac
 done
@@ -69,6 +72,9 @@ should_skip 25-nvidia-container-toolkit || NEED_PKGS+=(nvidia-container-toolkit)
 should_skip 30-jenkins || NEED_PKGS+=(jenkins fontconfig libharfbuzz0b python3-bcrypt)
 should_skip 40-nodejs || NEED_PKGS+=(nodejs)
 should_skip 35-microsoft-edge || NEED_PKGS+=(microsoft-edge-stable)
+if [[ "$REQUIRE_X11VNC" -eq 1 ]] && ! should_skip 36-x11vnc-xorg; then
+  NEED_PKGS+=(x11vnc xauth)
+fi
 
 PACKAGES_FILE="$BUNDLE/apt/Packages"
 if [[ ! -f "$PACKAGES_FILE" && -f "$BUNDLE/apt/Packages.gz" ]]; then

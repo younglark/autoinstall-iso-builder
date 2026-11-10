@@ -69,6 +69,10 @@ JENKINS_ADMIN_USER=""
 JENKINS_ADMIN_PASSWORD=""
 DEFAULT_JENKINS_PLUGINS="workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger"
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-$DEFAULT_JENKINS_PLUGINS}"
+# 远程桌面 (仅 Desktop, 默认关闭): 关 Wayland / x11vnc 开机即可连 (隐含关 Wayland)
+DISABLE_WAYLAND=0
+X11VNC=0
+VNC_PASSWORD=""
 
 usage() {
   cat <<'USAGE'
@@ -134,6 +138,13 @@ usage() {
   --jenkins-plugins "a b c"
                         预装的 Jenkins 插件 (自动带全部依赖; 可写 name:version), 空格分隔
                         默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger
+  --disable-wayland     仅 desktop: GDM 关闭 Wayland (/etc/gdm3/custom.conf WaylandEnable=false),
+                        登录界面 / 锁屏 / 用户会话全部走 Xorg。默认不关
+  --x11vnc              仅 desktop: 预装 x11vnc, 开机即可在 GDM 登录界面、锁屏和登录后的会话里
+                        用 VNC 连上本地桌面 (端口 5900, 仅限局域网; 不加密)。隐含 --disable-wayland,
+                        并关闭合盖挂起 / 空闲自动挂起 (锁屏保留)。默认不装
+  --vnc-password P      x11vnc 密码 (VNC 只用前 8 个字符)。默认 = --password 明文 (含默认密码);
+                        只给了 --password-hash 时装机生成随机密码写入 /root/x11vnc-password
   --iso-sha256 HEX      校验源 ISO 的 SHA256, 不匹配则失败
   --iso-sha256sums FILE 用 SHA256SUMS 文件按 basename 校验源 ISO
   --menu-regex REGEX    要注入的菜单项标题正则。默认 server: "Try or Install";
@@ -213,6 +224,9 @@ while [[ $# -gt 0 ]]; do
     --jenkins-admin-user) JENKINS_ADMIN_USER="$2"; shift 2 ;;
     --jenkins-admin-password) JENKINS_ADMIN_PASSWORD="$2"; shift 2 ;;
     --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
+    --disable-wayland) DISABLE_WAYLAND=1; shift ;;
+    --x11vnc)         X11VNC=1; shift ;;
+    --vnc-password)   VNC_PASSWORD="$2"; shift 2 ;;
     --iso-sha256)     ISO_SHA256="$2"; shift 2 ;;
     --iso-sha256sums) ISO_SHA256SUMS="$2"; shift 2 ;;
     --dry-run)        DRY_RUN=1; shift ;;
@@ -407,6 +421,46 @@ else
   [[ -n "$MENU_REGEX" ]] || MENU_REGEX="Try or Install"
 fi
 
+# ---------------------------------------------------------------- 远程桌面 (Desktop 可选)
+VNC_PW_SOURCE=""
+if [[ "$EDITION" != "desktop" ]]; then
+  if [[ "$DISABLE_WAYLAND" -eq 1 || "$X11VNC" -eq 1 ]]; then
+    warn "--disable-wayland / --x11vnc 只用于 Desktop; 当前 edition=$EDITION, 忽略"
+  fi
+  DISABLE_WAYLAND=0
+  X11VNC=0
+fi
+if [[ "$X11VNC" -eq 1 ]]; then
+  if [[ "$DISABLE_WAYLAND" -ne 1 ]]; then
+    warn "--x11vnc 需要 Xorg: 自动启用 --disable-wayland (登录界面/锁屏/会话全部走 Xorg)"
+    DISABLE_WAYLAND=1
+  fi
+  if [[ -n "$VNC_PASSWORD" ]]; then
+    [[ "$VNC_PASSWORD" != *$'\n'* ]] || die "--vnc-password 不能含换行"
+    [[ "${#VNC_PASSWORD}" -ge 6 ]] || die "--vnc-password 至少 6 位"
+    VNC_PW_SOURCE="explicit"
+  elif [[ -n "$PASS_PLAIN" ]]; then
+    VNC_PASSWORD="$PASS_PLAIN"
+    VNC_PW_SOURCE="password"
+  else
+    VNC_PW_SOURCE="random"
+  fi
+  if [[ -n "$VNC_PASSWORD" && "${#VNC_PASSWORD}" -gt 8 ]]; then
+    warn "VNC 密码超过 8 位: VNC 协议只校验前 8 个字符"
+  fi
+  if [[ "$VNC_PW_SOURCE" == "password" && "$USED_DEFAULT_PASSWORD" -eq 1 ]]; then
+    warn "x11vnc 使用默认密码 (与用户 $USERNAME_ 相同, 公开的默认值); 装完请改: sudo x11vnc -storepasswd /etc/x11vnc.pass && sudo systemctl restart x11vnc"
+  fi
+elif [[ -n "$VNC_PASSWORD" ]]; then
+  warn "--vnc-password 只在 --x11vnc 时生效, 忽略"
+  VNC_PASSWORD=""
+fi
+if [[ "$DISABLE_WAYLAND" -eq 1 || "$X11VNC" -eq 1 ]]; then
+  [[ "$PROVISION" -eq 1 ]] || die "--disable-wayland / --x11vnc 由 software/36-x11vnc-xorg.sh 落地, 不能与 --no-provision 同用"
+  should_skip_script 36-x11vnc-xorg && warn "--skip 跳过了 36-x11vnc-xorg: --disable-wayland / --x11vnc 不会生效"
+  log "远程桌面: disable-wayland=$DISABLE_WAYLAND x11vnc=$X11VNC${VNC_PW_SOURCE:+ vnc-password=$VNC_PW_SOURCE}"
+fi
+
 # ---------------------------------------------------------------- 全离线捆绑
 # ISO_RELEASE 已由 detect-edition 填好 (24.04/22.04); 映射到 jammy/noble
 release_to_codename() {
@@ -459,6 +513,7 @@ if [[ -n "$OFFLINE_BUNDLE" ]]; then
     [[ -n "$REL_FOR_V" ]] && VAL_ARGS+=(--release "$REL_FOR_V")
     [[ -n "$PIN_UNITY_CLI" ]] && VAL_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
     VAL_ARGS+=(--pin-gitea "$PIN_GITEA" --jenkins-plugins "$JENKINS_PLUGINS")
+    [[ "$X11VNC" -eq 1 ]] && VAL_ARGS+=(--require-x11vnc)
     bash "$SCRIPT_DIR/tools/validate-offline-bundle.sh" "${VAL_ARGS[@]}"       || die "离线捆绑校验失败 (见上)。重建: ./tools/fetch-offline-bundle.sh --force ..."
   fi
 elif [[ "$OFFLINE" -eq 1 && "$PROVISION" -eq 1 ]]; then
@@ -617,6 +672,8 @@ if [[ "$PROVISION" -eq 1 ]]; then
 ' "$GITEA_ADMIN_EMAIL"
     printf 'JENKINS_ADMIN_USER=%q\n' "$JENKINS_ADMIN_USER"
     printf 'JENKINS_PLUGINS=%q\n' "$JENKINS_PLUGINS"
+    printf 'DISABLE_WAYLAND=%q\n' "$DISABLE_WAYLAND"
+    printf 'X11VNC=%q\n' "$X11VNC"
     printf 'OFFLINE=%q
 ' "$FULL_OFFLINE"
     printf 'OFFLINE_ROOT=%q
@@ -639,6 +696,14 @@ if [[ "$PROVISION" -eq 1 ]]; then
     ok "Jenkins 管理员 $JENKINS_ADMIN_USER: 密码随 ISO 投递 (装机时转 bcrypt, 删除明文)"
   elif ! should_skip_script 30-jenkins; then
     warn "Jenkins 管理员 $JENKINS_ADMIN_USER: 无明文密码 (只给了 --password-hash), 装机生成随机密码 → /root/jenkins-admin-password"
+  fi
+  # x11vnc 明文密码同理: 0600 文件, 36-x11vnc-xorg.sh 转成 /etc/x11vnc.pass 后删除
+  if [[ "$X11VNC" -eq 1 && -n "$VNC_PASSWORD" ]] && ! should_skip_script 36-x11vnc-xorg; then
+    ( umask 077; printf 'VNC_PASSWORD=%q\n' "$VNC_PASSWORD" > "$WORK/provision/x11vnc.secret" )
+    chmod 0600 "$WORK/provision/x11vnc.secret"
+    ok "x11vnc: 密码随 ISO 投递 (装机时写 /etc/x11vnc.pass, 删除明文)"
+  elif [[ "$X11VNC" -eq 1 ]] && ! should_skip_script 36-x11vnc-xorg; then
+    warn "x11vnc: 无明文密码 (只给了 --password-hash), 装机生成随机密码 → /root/x11vnc-password"
   fi
   SCRIPT_COUNT=$(find "$WORK/provision" -maxdepth 1 -name '[0-9][0-9]-*.sh' | wc -l)
   ok "已打包 $SCRIPT_COUNT 个软件预装脚本 (node>=$PIN_NODE_MAJOR grok=$PIN_GROK)"

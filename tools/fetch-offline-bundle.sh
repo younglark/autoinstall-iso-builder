@@ -20,6 +20,15 @@
 #   docker  默认。宿主机 `docker run ubuntu:<release>` 解析依赖闭包 (Linux 原生用法不变)
 #   direct  已在「同发行版 + 同架构」的一次性容器里 (如 builder 镜像), 直接在本容器跑 apt,
 #           不需要 docker-in-docker。只允许在容器内使用 (会改写本机 /etc/apt)。
+#
+# 避免重复下载 (--force 也适用):
+#   * apt deb: 先按「空缓存」解析出本次需要的全部 deb (文件名 + 大小 + 索引哈希),
+#     再从本地 deb 缓存 (默认 cache/apt-archives/<release>-<arch>/) 和旧捆绑 apt/ 里
+#     把「文件名、大小相同且哈希与 Packages 索引一致」的放进 apt 的 archives 目录 (apt 跳过下载前
+#     还会按索引里最强的哈希再校验一次),
+#     apt 只下载缺的。新下的 deb 回写缓存。缓存默认只增不删 (--prune-apt-cache 清掉本次不用的)。
+#   * Unity CLI / Gitea / Godot / Jenkins 插件 / Node tarball: 版本不变且校验和一致时复用旧捆绑里的文件。
+#   指纹只描述捆绑内容/参数, 与缓存无关。
 # =============================================================================
 set -Eeuo pipefail
 
@@ -31,6 +40,9 @@ ARCH="amd64"
 OUT=""
 PACKAGES=""
 CACHE_ROOT="${OFFLINE_CACHE_ROOT:-$ROOT/cache/offline-bundles}"
+APT_CACHE="${AIB_APT_CACHE:-}"   # 空 = <cache-root 的上级>/apt-archives/<release>-<arch>
+NO_APT_CACHE=0
+PRUNE_APT_CACHE=0
 PIN_NODE_MAJOR="${PIN_NODE_MAJOR:-24}"
 PIN_GROK="${PIN_GROK:-latest}"
 PIN_OPENCODE="${PIN_OPENCODE:-latest}"
@@ -74,7 +86,12 @@ usage() {
                         清华 http 会升为 https; 其它 URL 原样使用
   --skip-npm            不打包 npm 全局树 (调试用)
   --apt-runner R        docker (默认) | direct (仅限容器内, 见脚本头注释)
-  --force               忽略已有 manifest/fingerprint, 强制重建 (参数变更或缺件时需 --force)
+  --force               忽略已有 manifest/fingerprint, 强制重建 (参数变更或缺件时需 --force);
+                        仍会复用缓存/旧捆绑里 sha256 一致的 deb 等文件, 只下载变化的
+  --apt-cache DIR       本地 deb 缓存目录, 默认 <cache-root>/../apt-archives/<release>-<arch>
+                        (默认即 cache/apt-archives/noble-amd64; 环境变量 AIB_APT_CACHE)
+  --no-apt-cache        不读写 deb 缓存 (旧捆绑 apt/ 仍会复用)
+  --prune-apt-cache     抓完后删掉缓存里本次没用到的 deb (默认不删)
 USAGE
 }
 
@@ -101,6 +118,9 @@ while [[ $# -gt 0 ]]; do
     --skip-npm) SKIP_NPM=1; shift ;;
     --force) FORCE=1; shift ;;
     --apt-runner) APT_RUNNER="$2"; shift 2 ;;
+    --apt-cache) APT_CACHE="$2"; shift 2 ;;
+    --no-apt-cache) NO_APT_CACHE=1; shift ;;
+    --prune-apt-cache) PRUNE_APT_CACHE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "未知参数: $1" ;;
   esac
@@ -135,6 +155,11 @@ done
 
 if [[ -z "$OUT" ]]; then
   OUT="$CACHE_ROOT/${RELEASE}-${ARCH}"
+fi
+if [[ "$NO_APT_CACHE" -eq 1 ]]; then
+  APT_CACHE=""
+elif [[ -z "$APT_CACHE" ]]; then
+  APT_CACHE="$(dirname -- "$CACHE_ROOT")/apt-archives/${RELEASE}-${ARCH}"
 fi
 
 in_container() {
@@ -183,7 +208,7 @@ payload = {
   "seeds": [
     "git", "ripgrep", "openssh-server", "gh",
     "docker-ce", "nvidia-container-toolkit", "jenkins", "nodejs",
-    "microsoft-edge-stable",
+    "microsoft-edge-stable", "x11vnc", "xauth",
     "unity-cli", "godot", "gitea", "apt-sources",
     "fontconfig", "libharfbuzz0b", "python3-bcrypt", "jenkins-plugins",
   ],
@@ -206,6 +231,7 @@ if [[ "$FORCE" -ne 1 && -f "$OUT/manifest.json" && -d "$OUT/apt" ]]; then
 fi
 
 mkdir -p "$OUT" "$CACHE_ROOT"
+[[ -n "$APT_CACHE" ]] && mkdir -p "$APT_CACHE"
 WORK="$(mktemp -d -t offline-bundle-XXXXXX)"
 cleanup() {
   if command -v sudo >/dev/null; then
@@ -238,6 +264,12 @@ NODE_MAJOR="$3"
 MIRROR="$4"
 EXTRA_PACKAGES="$5"
 OUTDIR="${FETCH_OUTDIR:-/out}"
+# deb 复用来源 (可为空): 持久缓存 (可写) 与旧捆绑 apt/ (只读)
+APT_CACHE_DIR="${FETCH_APT_CACHE:-}"
+PREV_APT_DIR="${FETCH_PREV_APT:-}"
+PREV_NODE_DIR="${FETCH_PREV_NODE:-}"
+PRUNE_APT_CACHE="${FETCH_PRUNE_APT_CACHE:-0}"
+ARCHIVES=/var/cache/apt/archives
 
 echo "== container: $(. /etc/os-release && echo "$PRETTY_NAME") arch=$ARCH =="
 
@@ -253,10 +285,25 @@ else
   echo "ERROR: ubuntu-mirror.sh not found" >&2
   exit 1
 fi
+# deb 复用 helper (tools/apt-deb-reuse.sh)
+# shellcheck disable=SC1091
+if [ -f /apt-deb-reuse.sh ]; then
+  . /apt-deb-reuse.sh
+elif [ -f "$(dirname "$0")/apt-deb-reuse.sh" ]; then
+  . "$(dirname "$0")/apt-deb-reuse.sh"
+else
+  . /opt/aib/tools/apt-deb-reuse.sh
+fi
 aib_bootstrap_apt_mirror "$RELEASE" "$MIRROR"
 apt-get install -y --no-install-recommends \
   ca-certificates curl gnupg dpkg-dev apt-utils xz-utils
 
+# 测试钩子 (test/container-x11vnc-reuse.sh): FETCH_MINIMAL_SEEDS="a b" 只用官方源抓这几个包,
+# 跳过第三方源 / Node / Jenkins, 用来验证 deb 复用与离线安装。正常抓包不要设置。
+if [ -n "${FETCH_MINIMAL_SEEDS:-}" ]; then
+  # shellcheck disable=SC2206
+  SEEDS=($FETCH_MINIMAL_SEEDS)
+else
 install -m 0755 -d /etc/apt/keyrings
 
 # Docker CE
@@ -366,11 +413,13 @@ SEEDS=(
   nvidia-container-toolkit
   "$JAVA_PKG" jenkins fontconfig libharfbuzz0b python3-bcrypt
   nodejs
+  x11vnc xauth
 )
 # Microsoft Edge 仅 amd64; 非 amd64 跳过以免 apt 解析失败
 if [ "$ARCH" = "amd64" ]; then
   SEEDS+=(microsoft-edge-stable)
 fi
+fi  # FETCH_MINIMAL_SEEDS
 IFS=',' read -r -a EXTRA <<< "$EXTRA_PACKAGES"
 for p in "${EXTRA[@]}"; do
   p="$(echo "$p" | xargs)"
@@ -379,10 +428,15 @@ done
 
 echo "seed packages (${#SEEDS[@]}): ${SEEDS[*]}"
 
-# 下载完整依赖闭包到 archives (容器极简, 几乎全部会下)
-apt-get install -y --download-only --reinstall -o Dir::Cache::archives=/var/cache/apt/archives \
-  "${SEEDS[@]}" || apt-get install -y --download-only -o Dir::Cache::archives=/var/cache/apt/archives \
-  "${SEEDS[@]}"
+# ---- deb 复用: 先按空 archives 解析出本次需要的全部文件 (名 + 大小 + 索引哈希) ----
+NEED_LIST="$(mktemp)"
+EMPTY_ARCH="$(mktemp -d)"
+mkdir -p "$EMPTY_ARCH/partial"
+# 输出格式: 'URI' 文件名 大小 SHA256:hex
+print_uris() {
+  apt-get -qq -y --print-uris -o Dir::Cache::archives="$EMPTY_ARCH" "$@" 2>/dev/null \
+    | awk -F"'" 'NF>=3 {print $3}' | awk 'NF>=3 {print $1, $2, $3}'
+}
 
 # 已装在容器里的依赖 (如 libcurl4t64) 不会因 --reinstall SEEDS 而被重新下载,
 # 导致离线池缺依赖: curl_X 需要 libcurl4t64(=X) 但池里没有。强制把递归 Depends 也 download。
@@ -399,6 +453,35 @@ for _p in "${_dep_pkgs[@]}"; do
     _dl+=("$_p")
   fi
 done
+# 解析阶段: SEEDS 闭包 + 递归依赖 (与下面实际下载同样的分批/逐个回退)
+{
+  print_uris install --download-only --reinstall "${SEEDS[@]}" \
+    || print_uris install --download-only "${SEEDS[@]}" || true
+  _j=0
+  while [ "$_j" -lt "${#_dl[@]}" ]; do
+    _c=("${_dl[@]:_j:40}")
+    if ! print_uris install --download-only --reinstall "${_c[@]}"; then
+      for _q in "${_c[@]}"; do print_uris download "$_q" || true; done
+    fi
+    _j=$((_j + 40))
+  done
+} | sort -u -k1,1 > "$NEED_LIST"
+rm -rf "$EMPTY_ARCH"
+echo "deb 需求: $(wc -l < "$NEED_LIST") 个文件"
+
+REUSED_LIST="$(mktemp)"
+_reused=0
+if [ -n "$APT_CACHE_DIR$PREV_APT_DIR" ]; then
+  _reused="$(aib_deb_seed "$NEED_LIST" "$ARCHIVES" "$REUSED_LIST" "$APT_CACHE_DIR" "$PREV_APT_DIR")"
+fi
+echo "deb 复用 (缓存/旧捆绑, 大小+索引哈希一致): $_reused"
+# 复用的文件已在 archives: 下面的 apt 下载会按索引哈希确认并跳过
+
+# 下载完整依赖闭包到 archives (容器极简, 几乎全部会下; 已复用的跳过)
+apt-get install -y --download-only --reinstall -o Dir::Cache::archives=/var/cache/apt/archives \
+  "${SEEDS[@]}" || apt-get install -y --download-only -o Dir::Cache::archives=/var/cache/apt/archives \
+  "${SEEDS[@]}"
+
 if [ "${#_dl[@]}" -gt 0 ]; then
   echo "force-download ${#_dl[@]} recursive depends (incl. already-installed)"
   # 分批, 避免命令行过长; 失败不致命 (个别过渡包可忽略)
@@ -411,13 +494,26 @@ if [ "${#_dl[@]}" -gt 0 ]; then
       # 整批是一个事务: 批内有互斥的候选 (如 libqt5gui5t64 vs libqt5gui5-gles) 时整批作废,
       # 会把同批的 libpsl5t64 / python3.12 等一起漏掉。逐个 apt-get download (不解析依赖, 不会冲突)。
       echo "chunk failed; per-package download fallback (${#_chunk[@]})"
+      # 已在 archives 的 (复用或已下载) 跳过
       ( cd /var/cache/apt/archives && for _q in "${_chunk[@]}"; do
+          _want="$(print_uris download "$_q" | awk '{print $1}' | head -1 || true)"
+          if [ -n "$_want" ] && [ -f "$_want" ]; then continue; fi
           apt-get download -o APT::Sandbox::User=root "$_q" >/dev/null 2>&1 || echo "  skip: $_q"
         done )
     fi
     _i=$((_i + 40))
   done
 fi
+
+# 统计 + 回写缓存
+_total="$(find "$ARCHIVES" -maxdepth 1 -name '*.deb' | wc -l)"
+echo "apt deb: 共 $_total, 复用 $_reused, 新下载 $((_total - _reused))"
+if [ -n "$APT_CACHE_DIR" ]; then
+  read -r _synced _pruned < <(aib_deb_sync_cache "$ARCHIVES" "$APT_CACHE_DIR" "$REUSED_LIST" "$PRUNE_APT_CACHE")
+  echo "deb 缓存 $APT_CACHE_DIR: 新增/更新 $_synced, 清理 $_pruned, 现有 $(find "$APT_CACHE_DIR" -maxdepth 1 -name '*.deb' | wc -l)"
+fi
+printf 'reused=%s\ndownloaded=%s\ntotal=%s\n' "$_reused" "$((_total - _reused))" "$_total" > "$OUTDIR/.apt-reuse-stats"
+rm -f "$NEED_LIST" "$REUSED_LIST"
 
 mkdir -p "$OUTDIR/apt"
 # 扁平池: deb [trusted=yes] file:/opt/offline/apt ./
@@ -449,14 +545,28 @@ REL
 ls -1 *.deb | sort > "$OUTDIR/package-list.txt"
 echo "deb count: $(wc -l < "$OUTDIR/package-list.txt")"
 du -sh "$OUTDIR/apt"
+# 测试钩子: 只抓最小种子时到此为止 (不要 node / jenkins)
+[ -n "${FETCH_MINIMAL_SEEDS:-}" ] && exit 0
 
 # Node 官方 tarball 兜底
 mkdir -p "$OUTDIR/node"
 TARBALL=$(curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/" \
   | grep -oE "node-v${NODE_MAJOR}\\.[0-9.]*-linux-x64\\.tar\\.xz" | head -1 || true)
 if [ -n "$TARBALL" ]; then
-  curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/${TARBALL}" \
-    -o "$OUTDIR/node/${TARBALL}"
+  NODE_SHA="$(curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/SHASUMS256.txt" 2>/dev/null \
+    | awk -v f="$TARBALL" '$2==f {print $1}' || true)"
+  if [ -n "$NODE_SHA" ] && [ -n "$PREV_NODE_DIR" ] && [ -f "$PREV_NODE_DIR/$TARBALL" ] \
+     && [ "$(sha256sum "$PREV_NODE_DIR/$TARBALL" | cut -d' ' -f1)" = "$NODE_SHA" ]; then
+    cp -p "$PREV_NODE_DIR/$TARBALL" "$OUTDIR/node/${TARBALL}"
+    echo "node tarball 复用 (sha256 一致): $TARBALL"
+  else
+    curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/${TARBALL}" \
+      -o "$OUTDIR/node/${TARBALL}"
+    if [ -n "$NODE_SHA" ]; then
+      echo "$NODE_SHA  $OUTDIR/node/${TARBALL}" | sha256sum -c - >/dev/null \
+        || { echo "ERROR: node tarball sha256 不匹配"; exit 1; }
+    fi
+  fi
   echo "$TARBALL" > "$OUTDIR/node/tarball.name"
 fi
 
@@ -470,19 +580,33 @@ printf '%s' "${JVER%%-*}" > "$OUTDIR/jenkins-version.txt"
 INNER
 chmod +x "$WORK/fetch-debs.sh"
 cp "$SCRIPT_DIR/ubuntu-mirror.sh" "$WORK/ubuntu-mirror.sh"
+cp "$SCRIPT_DIR/apt-deb-reuse.sh" "$WORK/apt-deb-reuse.sh"
 
 log "在 $IMG 中解析并下载 apt 依赖闭包"
 mkdir -p "$WORK/out"
 if [[ "$APT_RUNNER" == "direct" ]]; then
   log "direct 模式: 直接在当前容器 ($(. /etc/os-release && echo "$PRETTY_NAME"), $(dpkg --print-architecture)) 里跑 apt"
+  _prev_apt=""; [[ -d "$OUT/apt" ]] && _prev_apt="$OUT/apt"
+  _prev_node=""; [[ -d "$OUT/node" ]] && _prev_node="$OUT/node"
   FETCH_OUTDIR="$WORK/out" DEBIAN_FRONTEND=noninteractive \
+    FETCH_APT_CACHE="$APT_CACHE" FETCH_PREV_APT="$_prev_apt" FETCH_PREV_NODE="$_prev_node" \
+    FETCH_PRUNE_APT_CACHE="$PRUNE_APT_CACHE" \
     bash "$WORK/fetch-debs.sh" "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES"
 else
+  REUSE_ARGS=()
+  if [[ -n "$APT_CACHE" ]]; then
+    REUSE_ARGS+=(-v "$(cd -- "$APT_CACHE" && pwd):/apt-cache" -e FETCH_APT_CACHE=/apt-cache)
+  fi
+  [[ -d "$OUT/apt" ]] && REUSE_ARGS+=(-v "$(cd -- "$OUT/apt" && pwd):/prev-apt:ro" -e FETCH_PREV_APT=/prev-apt)
+  [[ -d "$OUT/node" ]] && REUSE_ARGS+=(-v "$(cd -- "$OUT/node" && pwd):/prev-node:ro" -e FETCH_PREV_NODE=/prev-node)
   docker run --rm --network host \
     --dns 8.8.8.8 --dns 1.1.1.1 \
     -v "$WORK/fetch-debs.sh:/fetch-debs.sh:ro" \
     -v "$WORK/ubuntu-mirror.sh:/ubuntu-mirror.sh:ro" \
+    -v "$WORK/apt-deb-reuse.sh:/apt-deb-reuse.sh:ro" \
     -v "$WORK/out:/out" \
+    "${REUSE_ARGS[@]+"${REUSE_ARGS[@]}"}" \
+    -e FETCH_PRUNE_APT_CACHE="$PRUNE_APT_CACHE" \
     -e DEBIAN_FRONTEND=noninteractive \
     "$IMG" bash /fetch-debs.sh "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES"
 fi
@@ -490,7 +614,30 @@ fi
 # 容器以 root 写 /out, 改回当前用户以免 cleanup/复用失败
 if command -v sudo >/dev/null; then
   sudo chown -R "$(id -u):$(id -g)" "$WORK/out" 2>/dev/null || true
+  [[ -n "$APT_CACHE" ]] && { sudo chown -R "$(id -u):$(id -g)" "$APT_CACHE" 2>/dev/null || true; }
 fi
+if [[ -f "$WORK/out/.apt-reuse-stats" ]]; then
+  # shellcheck disable=SC1091
+  . "$WORK/out/.apt-reuse-stats"
+  ok "apt deb: 复用 ${reused:-0}, 新下载 ${downloaded:-0} (共 ${total:-0})"
+  rm -f "$WORK/out/.apt-reuse-stats"
+fi
+
+# 旧捆绑里的大文件先挪到一边, 版本/校验和不变时直接复用 (见下方各段)
+PREV="$WORK/prev"
+mkdir -p "$PREV"
+for _d in unity-cli godot gitea jenkins-plugins; do
+  [[ -d "$OUT/$_d" ]] && mv "$OUT/$_d" "$PREV/$_d"
+done
+# 复用文件: prev/<sub>/<name> 存在且校验和一致则拷到 dest, 返回 0
+reuse_prev() { # sub name dest algo(sha256|sha512) hex
+  local src="$PREV/$1/$2" sum
+  [[ -f "$src" && -n "$5" ]] || return 1
+  sum="$("${4}sum" "$src" | cut -d' ' -f1)"
+  [[ "$sum" == "$5" ]] || return 1
+  cp -p "$src" "$3"
+  ok "复用旧捆绑 $1/$2 (${4} 一致)"
+}
 
 # 同步到 OUT (保留可复用)
 rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/jenkins-plugins" "$OUT/jenkins-version.txt" "$OUT/package-list.txt" "$OUT/java-package.txt"
@@ -502,10 +649,17 @@ JVER="$(cat "$OUT/jenkins-version.txt")"
 log "解析 Jenkins 插件 (Jenkins $JVER): $JENKINS_PLUGINS"
 JP_DIR="$OUT/jenkins-plugins"
 mkdir -p "$JP_DIR"
+# 旧插件先放回: 解析器对 sha256 与 update center 一致的文件不重下
+[[ -d "$PREV/jenkins-plugins" ]] && find "$PREV/jenkins-plugins" -maxdepth 1 -name '*.jpi' -exec cp -p {} "$JP_DIR/" \;
 # shellcheck disable=SC2086
 python3 "$RESOLVER" --jenkins-version "$JVER" --out "$JP_DIR" $JENKINS_PLUGINS \
   || die "Jenkins 插件解析/下载失败"
 printf '%s' "$JVER" > "$JP_DIR/jenkins-version"
+# 去掉不在 lock 里的旧插件
+for _jpi in "$JP_DIR"/*.jpi; do
+  [[ -f "$_jpi" ]] || continue
+  grep -q "^$(basename "$_jpi" .jpi):" "$JP_DIR/plugins.lock" || rm -f "$_jpi"
+done
 # shellcheck disable=SC2086
 printf '%s\n' $JENKINS_PLUGINS | sort -u > "$JP_DIR/requested.txt"
 ok "Jenkins 插件: $(wc -l < "$JP_DIR/plugins.lock") 个 ($(du -sh "$JP_DIR" | cut -f1))"
@@ -572,7 +726,8 @@ UPY
 if [[ -n "$PIN_UNITY_CLI" && "$UNITY_VERSION" != "$PIN_UNITY_CLI" ]]; then
   die "Unity CLI 版本不匹配: 请求 $PIN_UNITY_CLI 得到 $UNITY_VERSION"
 fi
-curl -fsSL "${UNITY_CDN}${UNITY_VERSION}/${UNITY_FILENAME}" -o "$UNITY_DIR/$UNITY_FILENAME" \
+reuse_prev unity-cli "$UNITY_FILENAME" "$UNITY_DIR/$UNITY_FILENAME" sha256 "$UNITY_SHA256" \
+  || curl -fsSL "${UNITY_CDN}${UNITY_VERSION}/${UNITY_FILENAME}" -o "$UNITY_DIR/$UNITY_FILENAME" \
   || die "下载 Unity CLI 失败: ${UNITY_CDN}${UNITY_VERSION}/${UNITY_FILENAME}"
 echo "$UNITY_SHA256  $UNITY_DIR/$UNITY_FILENAME" | sha256sum -c - \
   || die "Unity CLI sha256 校验失败"
@@ -596,7 +751,9 @@ GODOT_DIR="$OUT/godot"
 mkdir -p "$GODOT_DIR"
 GODOT_URL="https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/${GODOT_ZIP}"
 GODOT_FALLBACK="https://downloads.godotengine.org/?version=${GODOT_VERSION}&flavor=stable&slug=linux.x86_64.zip&platform=linux.64"
-if ! curl -fL --retry 3 --retry-delay 2 -o "$GODOT_DIR/$GODOT_ZIP" "$GODOT_URL"; then
+if reuse_prev godot "$GODOT_ZIP" "$GODOT_DIR/$GODOT_ZIP" sha512 "$GODOT_SHA512"; then
+  :
+elif ! curl -fL --retry 3 --retry-delay 2 -o "$GODOT_DIR/$GODOT_ZIP" "$GODOT_URL"; then
   warn "GitHub 下载失败，尝试 downloads.godotengine.org"
   curl -fL --retry 3 --retry-delay 2 -o "$GODOT_DIR/$GODOT_ZIP" "$GODOT_FALLBACK" \
     || die "下载 Godot 失败: $GODOT_ZIP"
@@ -621,10 +778,11 @@ log "下载 Gitea $GITEA_VERSION (linux-amd64)"
 GITEA_FILE="gitea-${GITEA_VERSION}-linux-amd64"
 GITEA_DIR="$OUT/gitea"
 mkdir -p "$GITEA_DIR"
-curl -fL --retry 3 --retry-delay 2 -o "$GITEA_DIR/$GITEA_FILE" "$GITEA_DL/$GITEA_VERSION/$GITEA_FILE" \
-  || die "下载 Gitea 失败: $GITEA_DL/$GITEA_VERSION/$GITEA_FILE"
 GITEA_SHA256="$(curl -fsSL "$GITEA_DL/$GITEA_VERSION/$GITEA_FILE.sha256" | awk '{print $1}')"
 [[ "$GITEA_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "无法获取 Gitea 官方 sha256"
+reuse_prev gitea "$GITEA_FILE" "$GITEA_DIR/$GITEA_FILE" sha256 "$GITEA_SHA256" \
+  || curl -fL --retry 3 --retry-delay 2 -o "$GITEA_DIR/$GITEA_FILE" "$GITEA_DL/$GITEA_VERSION/$GITEA_FILE" \
+  || die "下载 Gitea 失败: $GITEA_DL/$GITEA_VERSION/$GITEA_FILE"
 echo "$GITEA_SHA256  $GITEA_DIR/$GITEA_FILE" | sha256sum -c - || die "Gitea sha256 校验失败"
 chmod 0755 "$GITEA_DIR/$GITEA_FILE"
 printf '%s\n' "$GITEA_VERSION" > "$GITEA_DIR/version"

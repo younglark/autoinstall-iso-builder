@@ -116,6 +116,7 @@ case "$cmd" in
       [[ "$(id -u)" -eq 0 ]] || die "build --fetch-offline 需要容器以 root 运行 (容器内 apt-get); 不要加 docker --user, 用 AIB_UID/AIB_GID 修正属主"
       note_owner_target "$(opt_val --out "$@" || true)"
       note_owner_target "$(opt_val --offline-bundle "$@" || echo "$OFFLINE_CACHE_ROOT")"
+      note_owner_target "${AIB_APT_CACHE:-$(dirname -- "$OFFLINE_CACHE_ROOT")/apt-archives}"
       run_root_then_chown bash "$AIB_HOME/build-iso.sh" "$@"
     else
       run_unprivileged bash "$AIB_HOME/build-iso.sh" "$@"
@@ -128,6 +129,12 @@ case "$cmd" in
     [[ "$(id -u)" -eq 0 ]] || die "fetch-offline 需要容器以 root 运行 (容器内 apt-get); 不要加 docker --user, 用 AIB_UID/AIB_GID 修正属主"
     note_owner_target "$(opt_val --out "$@" || true)"
     note_owner_target "$(opt_val --cache-root "$@" || echo "$OFFLINE_CACHE_ROOT")"
+    # deb 缓存 (fetch-offline-bundle 默认 <cache-root>/../apt-archives)
+    if _ac="$(opt_val --apt-cache "$@")"; then
+      note_owner_target "$_ac"
+    else
+      note_owner_target "${AIB_APT_CACHE:-$(dirname -- "$(opt_val --cache-root "$@" || echo "$OFFLINE_CACHE_ROOT")")/apt-archives}"
+    fi
     run_root_then_chown bash "$AIB_HOME/tools/fetch-offline-bundle.sh" "$@"
     ;;
   validate-offline|validate)

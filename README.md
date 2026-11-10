@@ -38,6 +38,7 @@
 | `25-nvidia-container-toolkit.sh` | NVIDIA Container Toolkit | 官方仓库；`nvidia-ctk` 合并 Docker runtime（保留 daemon.json 日志轮转）；**不装 GPU 驱动** |
 | `30-jenkins.sh` | Jenkins LTS | 优先 JDK 21（不够退 17），jenkins 用户加入 docker 组；**零配置**：跳过安装向导、装机时建好管理员、预装 Pipeline / Git / Gitea / Docker Pipeline / Docker Cloud / Rebuild / AnsiColor / Parameterized Trigger 等插件（含全部依赖），监听 **0.0.0.0:8080** |
 | `35-microsoft-edge.sh` | Microsoft Edge 稳定版 | **仅 Desktop + amd64 默认安装**（Server / 非 amd64 自动跳过，`--skip 35` 也可跳过）。官方 apt 源 `packages.microsoft.com/repos/edge`；设为默认浏览器（`update-alternatives` + 系统/用户 `mimeapps.list`）；GNOME 收藏夹用 Edge 替换 Firefox（Firefox **保留**）；策略关掉首次运行提示，**不**关闭自动更新 |
+| `36-x11vnc-xorg.sh` | 关 Wayland / x11vnc（**可选，默认不装**） | 仅 Desktop。`--disable-wayland` 让 GDM 登录界面、锁屏、会话都走 Xorg；`--x11vnc` 预装 x11vnc，**开机即可连**（登录界面、锁屏、登录后的会话），隐含关 Wayland。详见下文「远程桌面」 |
 | `40-nodejs.sh` | Node.js 24 | NodeSource 优先，官方 tarball 兜底 |
 | `45-gitea.sh` | Gitea（最新稳定版，可 `--pin-gitea`） | 官方 linux-amd64 二进制（sha256 校验）→ `/usr/local/bin/gitea`；系统用户 `git`；SQLite；**装机阶段写好配置并创建管理员**，开机 `gitea.service` 自启。监听 **0.0.0.0:3000**（不与 Jenkins 8080 冲突），开放注册，LFS 开，`OFFLINE_MODE`。SSH 克隆走系统 OpenSSH：`git@host:user/repo.git` |
 | `50-grok.sh` | xAI Grok Build | `@xai-official/grok`，**官方包**，不是社区的 `@vibe-kit/grok-cli` |
@@ -55,6 +56,54 @@
 - 若存在 GNOME schemas，用 Edge 替换收藏夹里的 Firefox（`90_autoinstall-microsoft-edge.gschema.override`）。
 - 写入 `/etc/opt/edge/policies/managed/10-autoinstall.json`：`HideFirstRunExperience=true`、`DefaultBrowserSettingEnabled=false`，避免首次运行弹窗；**不**关闭自动更新。
 - 全离线时从捆绑安装，装完由 `restore-online-apt.sh` 写回 Microsoft apt 源，联网后可更新。
+
+### 远程桌面：关闭 Wayland / x11vnc（仅 Desktop，可选）
+
+两个开关默认都**关**，只对 Desktop 生效（Server 会告警并忽略），由 `software/36-x11vnc-xorg.sh` 落地（所以不能和 `--no-provision` 同用）。
+
+| 参数 | 效果 |
+|---|---|
+| `--disable-wayland` | 往 `/etc/gdm3/custom.conf` 的 `[daemon]` 写 `WaylandEnable=false`（幂等，其它键保留）。GDM 登录界面、锁屏和用户会话全部走 Xorg |
+| `--x11vnc` | 预装 x11vnc（离线从捆绑装），**隐含** `--disable-wayland`（构建时告警）。开机即可连，不用先登录 |
+| `--vnc-password P` | VNC 密码。默认 = `--password` 明文（都没给就是默认密码 `ubuntu1990`，构建时告警）；只给了 `--password-hash` 时装机生成随机密码写入 `/root/x11vnc-password`（root 0600） |
+
+```bash
+./build-iso.sh --iso ubuntu-24.04.5.1-desktop-amd64.iso --out out/desk-vnc.iso \
+  --password 'Ch@ngeMe' --x11vnc --vnc-password 'Vnc#2026'
+```
+
+**开机就能连是怎么做到的**
+
+- systemd 服务 `x11vnc.service`（`After=display-manager.service`，`Restart=always`，开机自启）运行 `/usr/local/sbin/aib-x11vnc-follow`。
+- 关掉 Wayland 以后，GDM 登录界面是一个 Xorg（`:0`，vt1），登录后用户会话是另一个 Xorg（`:1`，vt2），GNOME 锁屏就在用户会话的 X 里。所以 x11vnc 不能钉死在 `:0`：启动器每 2 秒看一次**当前活动 VT**（`/sys/class/tty/tty0/active`）上的 Xorg，从它的命令行取 `-auth`（`/run/user/<uid>/gdm/Xauthority`），用 `xauth list` 拿到显示号；变了就重启 x11vnc（`-display :N -auth … -forever -shared -noxdamage -repeat -rfbauth /etc/x11vnc.pass -rfbport 5900`）。
+- 效果：开机停在登录界面能连上并远程输密码登录；登录后自动跟到会话（客户端断开重连一下即可）；锁屏时连上看到的就是锁屏，远程输密码解锁；注销后回到登录界面也能连。
+- 为了「随时能连」：logind drop-in `/etc/systemd/logind.conf.d/90-autoinstall-x11vnc.conf` 设 `HandleLidSwitch=ignore`（合盖不挂起）；GDM 登录界面（`/etc/dconf/db/gdm.d/`）和用户默认值（gschema override）都关掉空闲自动挂起。**锁屏和熄屏保持不变**（VNC 一连上屏幕就会亮）。
+- 密码：构建时明文只放进 ISO 里 `/provision/x11vnc.secret`（0600），装机时用 `x11vnc -storepasswd` 写成 `/etc/x11vnc.pass`（root 0600）后删除，不进 `provision.env` 和日志。VNC 协议**只校验前 8 个字符**。
+- 防火墙：只在 ufw **已启用**时放行 `5900/tcp`（装机时和服务启动时各检查一次），不会主动打开 ufw。
+
+**怎么连**
+
+- macOS：Finder「前往 → 连接服务器」输入 `vnc://<机器IP>:5900`（自带屏幕共享，偏慢）；推荐 [TigerVNC](https://tigervnc.org/) 或 RealVNC Viewer，地址 `<机器IP>:5900`。
+- Windows：TigerVNC / RealVNC Viewer / TightVNC，地址 `<机器IP>:5900`（或 `<机器IP>::5900`），输入 VNC 密码。
+- 卡的话把客户端画质调低、分辨率调小；拖窗口、看视频不会很流畅（x11vnc 没有视频编码）。
+
+**安全提醒**
+
+- VNC 流量**不加密**，只在可信局域网用；不要把 5900 映射到公网。外网请走 VPN，或 SSH 隧道：`ssh -L 5900:localhost:5900 <用户>@<机器IP>`，再连 `localhost:5900`。
+- 默认密码是公开的，装完立即改：`sudo x11vnc -storepasswd /etc/x11vnc.pass && sudo systemctl restart x11vnc`。
+- 排查：`systemctl status x11vnc`、`journalctl -u x11vnc`、`/var/log/x11vnc.log`。
+
+**以后想换回 Wayland**
+
+```bash
+sudo systemctl disable --now x11vnc            # x11vnc 只能接 Xorg, 先停掉
+sudo sed -i 's/^WaylandEnable=false/WaylandEnable=true/' /etc/gdm3/custom.conf   # 或直接删掉这一行
+sudo systemctl restart gdm3                     # 会注销当前图形会话
+```
+
+合盖/空闲不挂起的设置不会自动撤销；需要的话删掉 `/etc/systemd/logind.conf.d/90-autoinstall-x11vnc.conf`、`/etc/dconf/db/gdm.d/90-autoinstall-no-suspend`（再 `sudo dconf update`）和 `/usr/share/glib-2.0/schemas/90_autoinstall-x11vnc-no-suspend.gschema.override`（再 `sudo glib-compile-schemas /usr/share/glib-2.0/schemas`）。
+
+**限制**：关 Wayland 后多屏分别缩放、触控板手势会差一点；NVIDIA 显卡在 Xorg 下通常更稳。x11vnc 接的是本地屏幕（同一个会话），没有声音转发。
 
 ### 两个版本约束，别忽略
 
@@ -424,6 +473,9 @@ cat /var/log/autoinstall/20-docker.log
 | `--edition` | `auto`（默认）/ `server` / `desktop`。`auto` 读 ISO 的 `casper/install-sources.yaml`（`variant: desktop/server`），退回 `.disk/info`；显式指定优先 |
 | `--desktop-source` | 仅 desktop：`minimal`（默认，`ubuntu-desktop-minimal`）/ `standard`（`ubuntu-desktop`）/ 任意 source id；会对照 ISO 的 install-sources.yaml 校验 |
 | `--realname` | `identity.realname`（登录界面显示名）；desktop 默认等于 `--username` |
+| `--disable-wayland` | 仅 desktop，默认关：GDM 关闭 Wayland（登录界面/锁屏/会话全走 Xorg） |
+| `--x11vnc` | 仅 desktop，默认关：预装 x11vnc，开机即可从登录界面、锁屏、会话 VNC 连接（5900，局域网，不加密）；隐含 `--disable-wayland`，并关掉合盖/空闲挂起 |
+| `--vnc-password P` | x11vnc 密码（≥6 位，VNC 只用前 8 位），默认 = `--password` 明文；只有哈希时装机随机生成 → `/root/x11vnc-password` |
 | `--menu-regex` | 要注入的菜单标题正则。默认 server `Try or Install`；desktop `^(Try or Install Ubuntu\|Ubuntu \(safe graphics\))$` |
 
 
@@ -463,7 +515,7 @@ cat /var/log/autoinstall/20-docker.log
 bash test/local-check.sh
 ```
 
-覆盖 Python 语法、grub 转义/幂等/旧参数修复、user-data YAML、默认 interactive storage / `--auto-disk`、公钥、pool-before-provision 顺序与 skip 前缀、`qemu-smoke` 对交互选盘 ISO 的拒绝（迷你 ISO + `--guard-only`，无需真开机），以及 Desktop 24.04（基于真实 24.04.5.1 Desktop ISO 抽出的 grub.cfg / loopback.cfg / install-sources.yaml 夹具）的版本识别、菜单注入与渲染语义。`.github/workflows/ci.yml` 在 PR/push 上运行 ShellCheck、这些校验、包装脚本 dry-run，以及用 `test/make-fake-iso.sh` 拼的假 ISO（只有 grub.cfg / install-sources.yaml / .disk/info，几百 KB）端到端跑一遍 `build-iso.sh`（Server + Desktop）。同一个 workflow 的 `container-smoke` job（PR 与 main）经 `scripts/aib.sh` 自动本地构建镜像，在容器里再跑一遍假 ISO 端到端；包装脚本 dry-run 同时测 bash 与 PowerShell（ubuntu runner 自带 pwsh）。镜像不推送到任何 registry。BIOS/UEFI/QEMU 与 Secure Boot 验证见下文，不在轻量 CI 下载真实 ISO。
+覆盖 Python 语法、grub 转义/幂等/旧参数修复、user-data YAML、默认 interactive storage / `--auto-disk`、公钥、pool-before-provision 顺序与 skip 前缀、`qemu-smoke` 对交互选盘 ISO 的拒绝（迷你 ISO + `--guard-only`，无需真开机），以及 Desktop 24.04（基于真实 24.04.5.1 Desktop ISO 抽出的 grub.cfg / loopback.cfg / install-sources.yaml 夹具）的版本识别、菜单注入与渲染语义。`.github/workflows/ci.yml` 在 PR/push 上运行 ShellCheck、这些校验、包装脚本 dry-run，以及用 `test/make-fake-iso.sh` 拼的假 ISO（只有 grub.cfg / install-sources.yaml / .disk/info，几百 KB）端到端跑一遍 `build-iso.sh`（Server + Desktop）。同一个 workflow 的 `container-smoke` job（PR 与 main）经 `scripts/aib.sh` 自动本地构建镜像，在容器里再跑一遍假 ISO 端到端；包装脚本 dry-run 同时测 bash 与 PowerShell（ubuntu runner 自带 pwsh）。需要 docker + 外网的 `test/container-x11vnc-reuse.sh`（可加 `--mirror URL`）手动跑：用抓包脚本同一段容器逻辑抓 x11vnc 两次，第二次必须「复用全部、新下载 0」；再在无网络容器里只用这份离线池装 x11vnc、跑 `36-x11vnc-xorg.sh`，并用两个伪装成 Xorg 的 Xvfb 验证从登录界面 `:0` 切到会话 `:1`。镜像不推送到任何 registry。BIOS/UEFI/QEMU 与 Secure Boot 验证见下文，不在轻量 CI 下载真实 ISO。
 
 ### 全离线模式（`--offline` + `--offline-bundle`）
 
@@ -496,7 +548,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 | 阶段 | 行为 |
 |---|---|
-| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource + Microsoft Edge），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
+| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource + Microsoft Edge + x11vnc），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
 | ISO | 写入 `/offline/{apt,apt-sources,npm,node,unity-cli,godot,gitea,jenkins-plugins,manifest.json}` |
 | 装机 late-commands | 拷到 `/opt/offline`，临时只启用 `deb [trusted=yes] file:/opt/offline/apt ./`，再跑 `software/`（`OFFLINE=1`） |
 | `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装；Jenkins 插件从 `jenkins-plugins/` 拷贝 |
@@ -505,6 +557,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 体积与缓存：
 
 - 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；`manifest.json` 含 `fingerprint`（schema 3：release/arch/pins/seeds，含 `apt-sources`、Jenkins 插件列表与解析器指纹）。指纹一致才复用，否则或旧格式需 `--force` 重建。构建时 `validate-offline-bundle.sh` 会核对 apt 种子包、`apt-sources/` keyring+list，以及 `unity-cli/`、`godot/`、`gitea/`、`jenkins-plugins/`（lock 里每个插件都在且 sha256 与 lock 一致、请求列表与 `--jenkins-plugins` 一致）等目录；失败则提示 `--force` / `--force-fetch`。
+- **避免重复下载**（`--force` 也一样）：抓包前先按「空缓存」解析出本次需要的全部 deb（文件名 + 大小 + Packages 索引里的哈希），从本地 deb 缓存 `cache/apt-archives/<release>-<arch>/` 和旧捆绑的 `apt/` 里把**文件名、大小、哈希都一致**的直接放进 apt 的 archives 目录（apt 跳过下载前还会按索引里的 SHA256/SHA512 再校验一次，不一致就重下），apt 只下载缺的；新下的 deb 回写缓存。日志会打印「复用 N，新下载 M」。Unity CLI / Gitea / Godot / Jenkins 插件 / Node tarball 在版本不变且校验和一致时也直接用旧捆绑里的文件。缓存只增不删，`--prune-apt-cache` 清掉本次没用到的；`--apt-cache DIR` 换位置，`--no-apt-cache` 不用缓存。指纹只看捆绑内容和参数，跟缓存无关；产出和不用缓存时一样（同一批 deb）。
 - `--fetch-offline` 用 **ISO 识别到的 release**（非仅文件名）选 jammy/noble；加 `--force-fetch` 等价于给 fetch 传 `--force`。
 - npm/`node` 打包使用 `--owner=0 --group=0`；安装时 `tar --no-same-owner`，Node 解到 `/opt/node-…` 再 symlink，避免 `/usr/local` 属主变成 uid 1000。
 - 全离线装完写回第三方 apt 源：`apt-sources/` 在 fetch 时按在线脚本同款材料抓取；`restore-online-apt.sh` **全量写回**捆绑内种子（不按 `--skip` 裁剪）。旧捆绑缺 `apt-sources/` 时需 `--force` 重建。
