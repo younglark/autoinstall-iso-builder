@@ -42,6 +42,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # 构建 ISO: xorriso python3(+yaml) openssl; 抓捆绑: curl gnupg dpkg-dev xz-utils;
 # 冒烟/校验: shellcheck 不装 (CI 单独跑), file/jq 方便排查
+# Ubuntu 基础镜像 /bin/sh 是 dash。下面要 source 一份 bash helper，必须先把
+# SHELL 改成 bash，否则会忽略 shebang，在 ${BASH_SOURCE[0]} 处 Bad substitution。
+SHELL ["/bin/bash", "-c"]
 # 先只拷 helper, 以免改仓库其它文件时让 apt 层缓存失效
 COPY tools/ubuntu-mirror.sh /tmp/aib-ubuntu-mirror.sh
 RUN . /tmp/aib-ubuntu-mirror.sh \
