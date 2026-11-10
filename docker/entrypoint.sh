@@ -5,6 +5,8 @@
 #   fetch-offline     -> tools/fetch-offline-bundle.sh   (apt-runner=direct, 无需 docker-in-docker)
 #   validate-offline  -> tools/validate-offline-bundle.sh
 #   check-iso ISO     -> test/qemu-smoke.sh ISO --guard-only (只读检查 user-data)
+#   win               -> tools/build-win-ventoy.sh   (Windows 11 autounattend + Ventoy 交付物, 不改 ISO)
+#   win-merge-ventoy  -> tools/merge-ventoy-json.py  (把 auto_install 片段合并进 U 盘 ventoy.json)
 #   local-check       -> test/local-check.sh
 #   shell             -> bash
 #   help | version
@@ -33,6 +35,8 @@ autoinstall-iso-builder 容器 (version: ${AIB_VERSION:-dev}, $(. /etc/os-releas
   fetch-offline [fetch 参数]            抓全离线捆绑 (需 linux/amd64, 发行版与镜像变体一致)
   validate-offline --bundle DIR [...]   校验离线捆绑
   check-iso ISO                         只读检查产出 ISO 的 user-data (qemu-smoke --guard-only)
+  win [参数]                            Windows 11 无人值守 Ventoy 交付物 (aib win --help)
+  win-merge-ventoy --snippet F --target F  合并 auto_install 片段进 ventoy.json
   local-check                           仓库自带的组件级校验
   shell                                 进入 bash
   help | version
@@ -143,6 +147,12 @@ case "$cmd" in
   check-iso)
     [[ $# -ge 1 ]] || die "用法: aib check-iso <产出的 ISO>"
     run_unprivileged bash "$AIB_HOME/test/qemu-smoke.sh" "$1" --guard-only
+    ;;
+  win|windows)
+    run_unprivileged bash "$AIB_HOME/tools/build-win-ventoy.sh" "$@"
+    ;;
+  win-merge-ventoy)
+    run_unprivileged python3 "$AIB_HOME/tools/merge-ventoy-json.py" "$@"
     ;;
   local-check)
     run_unprivileged bash "$AIB_HOME/test/local-check.sh" "$@"

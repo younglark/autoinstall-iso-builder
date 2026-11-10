@@ -41,6 +41,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     OFFLINE_CACHE_ROOT=/work/cache/offline-bundles
 
 # 构建 ISO: xorriso python3(+yaml) openssl; 抓捆绑: curl gnupg dpkg-dev xz-utils;
+# Windows: wimtools (wimlib-imagex 列 install.wim 版本) p7zip-full (读 Windows ISO 的 UDF) libxml2-utils (xmllint);
 # 冒烟/校验: shellcheck 不装 (CI 单独跑), file/jq 方便排查
 # Ubuntu 基础镜像 /bin/sh 是 dash。下面要 source 一份 bash helper，必须先把
 # SHELL 改成 bash，否则会忽略 shebang，在 ${BASH_SOURCE[0]} 处 Bad substitution。
@@ -52,6 +53,7 @@ RUN . /tmp/aib-ubuntu-mirror.sh \
  && apt-get install -y --no-install-recommends \
       bash ca-certificates curl gnupg xorriso python3 python3-yaml openssl \
       dpkg-dev apt-utils xz-utils unzip jq file tar gzip coreutils findutils util-linux \
+      wimtools p7zip-full libxml2-utils \
  && rm -rf /var/lib/apt/lists/*
 
 # Node.js (官方 tarball, 校验 SHASUMS256): 抓离线捆绑时 npm 打包全局 CLI 用

@@ -88,6 +88,22 @@ fi
 out="$(AIB_DOCKER_ARGS="--network=host -e HTTPS_PROXY=http://p:3128" bash "$AIB" --dry-run --docker-arg --dns=1.1.1.1 local-check)"
 expect "AIB_DOCKER_ARGS 透传" "$out" "--network=host -e HTTPS_PROXY=http://p:3128 --dns=1.1.1.1 autoinstall-iso-builder:local local-check"
 
+out="$(AIB_WIN_PASSWORD='w1n s3cret' bash "$AIB" --dry-run win --iso "../isos dir/w.iso" --out out/win \
+  --password-file "$work/isos dir/pw.txt" --password 'p@ss2 x' --hostname WIN-DEV)"
+expect "win 子命令" "$out" "autoinstall-iso-builder:local win"
+expect "win --iso 改写" "$out" "--iso /mnt/aib1/w.iso"
+expect "win --password-file 改写" "$out" "--password-file /mnt/aib1/pw.txt"
+expect "win --out" "$out" "--out /work/out/win"
+expect "AIB_WIN_PASSWORD 只传变量名" "$out" "-e AIB_WIN_PASSWORD"
+reject "AIB_WIN_PASSWORD 值不泄露" "$out" "s3cret"
+expect "win --password 打码" "$out" "--password '***'"
+reject "win --password 不泄露" "$out" "p@ss2"
+reject "win 不强制平台" "$out" "--platform"
+out="$(bash "$AIB" --dry-run win-merge-ventoy --snippet out/win/ventoy/ventoy.auto_install.json --target "$work/usb/ventoy/ventoy.json")"
+expect "win-merge --snippet" "$out" "--snippet /work/out/win/ventoy/ventoy.auto_install.json"
+expect "win-merge --target cwd 外挂载" "$out" "--target /mnt/aib1/ventoy.json"
+reject "未设密码不传 AIB_WIN_PASSWORD" "$out" "AIB_WIN_PASSWORD"
+
 if bash "$AIB" --dry-run --bogus build >/dev/null 2>&1; then fail "未知包装选项应报错"; else pass "未知包装选项报错"; fi
 
 if [[ "$FAIL" -ne 0 ]]; then echo "wrapper dry-run: FAILED" >&2; exit 1; fi

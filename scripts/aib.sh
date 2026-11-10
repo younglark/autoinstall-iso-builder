@@ -19,7 +19,7 @@
 #   --dry-run        只打印将执行的 docker 命令, 不运行 (不需要 docker)
 #   -h, --help
 #
-# 子命令: build | fetch-offline | validate-offline | check-iso | local-check | shell | help | version
+# 子命令: build | fetch-offline | validate-offline | check-iso | win | win-merge-ventoy | local-check | shell | help | version
 #
 # 路径处理: 当前目录挂到容器 /work; --iso/--out/--offline-bundle 等路径参数若在当前目录外,
 #   自动把其父目录挂到 /mnt/aibN 并改写参数。Linux 上产出文件属主为当前用户。
@@ -45,9 +45,9 @@ info() { printf '[aib] %s\n' "$*" >&2; }
 usage() { sed -n '3,/^# ====*$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
 # 带路径值的选项 (build / fetch-offline / validate-offline 共用)
-PATH_OPTS=" --iso --out --offline-bundle --ssh-authorized-keys --debs --iso-sha256sums --cache-root --bundle --apt-cache "
+PATH_OPTS=" --iso --out --offline-bundle --ssh-authorized-keys --debs --iso-sha256sums --cache-root --bundle --apt-cache --password-file --snippet --target "
 # 其中是「输出」的 (父目录不存在时自动创建)
-OUT_OPTS=" --out --offline-bundle --cache-root --apt-cache "
+OUT_OPTS=" --out --offline-bundle --cache-root --apt-cache --target "
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -210,6 +210,8 @@ fi
 for v in PIN_NODE_MAJOR PIN_GROK PIN_OPENCODE PIN_OPENMAUSBOT PIN_UNITY_CLI PIN_GITEA UBUNTU_MIRROR UNITY_CLI_CDN_BASE; do
   [[ -n "${!v:-}" ]] && DOCKER+=(-e "$v=${!v}")
 done
+# Windows 账户密码: 只传变量名, docker 从环境取值, 不出现在命令行 / --dry-run 输出里
+[[ -n "${AIB_WIN_PASSWORD:-}" ]] && DOCKER+=(-e AIB_WIN_PASSWORD)
 DOCKER+=("${EXTRA_DOCKER_ARGS[@]+"${EXTRA_DOCKER_ARGS[@]}"}")
 DOCKER+=("$IMAGE_REF" "$SUBCMD")
 DOCKER+=("${NEW_ARGS[@]+"${NEW_ARGS[@]}"}")

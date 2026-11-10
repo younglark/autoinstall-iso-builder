@@ -75,6 +75,21 @@ try {
     Reject 'Windows 不传 AIB_UID' $out 'AIB_UID='
   }
 
+  $env:AIB_WIN_PASSWORD = 'w1n s3cret'
+  try {
+    $out = Run-Aib --dry-run win --iso $isoArg --out (Join-Path 'out' 'win') --password 'p@ss2 x' --hostname WIN-DEV
+  } finally { Remove-Item Env:AIB_WIN_PASSWORD -ErrorAction SilentlyContinue }
+  Expect 'win 子命令' $out 'autoinstall-iso-builder:local win'
+  Expect 'win --iso 改写' $out '--iso /mnt/aib1/u.iso'
+  Expect 'win --out' $out '--out /work/out/win'
+  Expect 'AIB_WIN_PASSWORD 只传变量名' $out '-e AIB_WIN_PASSWORD'
+  Reject 'AIB_WIN_PASSWORD 值不泄露' $out 's3cret'
+  Expect 'win --password 打码' $out "--password '***'"
+  Reject 'win --password 不泄露' $out 'p@ss2'
+  $out = Run-Aib --dry-run win-merge-ventoy --snippet (Join-Path 'out' 'snip.json') --target (Join-Path $isosFull 'ventoy.json')
+  Expect 'win-merge --target 改写' $out '--target /mnt/aib1/ventoy.json'
+  Reject '未设密码不传 AIB_WIN_PASSWORD' $out 'AIB_WIN_PASSWORD'
+
   $out = Run-Aib --dry-run --docker-arg --network=host local-check
   Expect '--docker-arg 透传' $out '--network=host autoinstall-iso-builder:local local-check'
 

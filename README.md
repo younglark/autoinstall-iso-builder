@@ -2,7 +2,7 @@
 
 一条命令产出一块自动装机 U 盘：默认停在**硬盘选择**页由你确认（避免误抹盘），确认后自动装完并带全套预装软件。
 
-适用：Ubuntu Server **22.04 / 24.04**，以及 Ubuntu **Desktop 24.04**（`--edition desktop`，默认按 ISO 自动识别，见「[Ubuntu Desktop 24.04](#ubuntu-desktop-2404)」）。
+适用：Ubuntu Server **22.04 / 24.04**，以及 Ubuntu **Desktop 24.04**（`--edition desktop`，默认按 ISO 自动识别，见「[Ubuntu Desktop 24.04](#ubuntu-desktop-2404)」）。另有实验性的 **Windows 11 无人值守 Ventoy 交付物**（不改官方 ISO），见「[Windows 11 无人值守](#windows-11-无人值守ventoy实验性-mvp)」。
 
 构建机：**Linux / WSL2 原生运行**；**macOS / Windows / Linux 都可以用 Docker 容器**（包装脚本首次运行时用仓库里的 `Dockerfile` 在本机构建镜像，不依赖任何镜像仓库），见「[在 macOS / Windows / Linux 上用容器构建](#在-macos--windows--linux-上用容器构建)」。产出的 ISO 只面向 x86_64 (amd64) 目标机。
 
@@ -234,7 +234,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 | `--docker-arg A` / `AIB_DOCKER_ARGS` | 追加 docker run 参数（如 `--network=host`、代理环境变量） |
 | `--dry-run` | 只打印要执行的 docker 命令（注意：写在子命令**之后**的 `--dry-run` 是 build-iso.sh 自己的干跑） |
 
-**路径与属主**：当前目录挂到容器 `/work`；`--iso` / `--out` / `--offline-bundle` / `--ssh-authorized-keys` / `--debs` / `--iso-sha256sums` / `--cache-root` / `--bundle` 若指向当前目录之外，包装脚本自动把其**父目录**挂到 `/mnt/aibN` 并改写参数（Windows 的 `C:\...` 盘符路径同理）。路径里不能有逗号（docker `--mount` 限制）。Linux / WSL2 上产出文件属于当前用户（容器内用 `AIB_UID/AIB_GID` 降权或事后 chown），不会留下 root 文件。
+**路径与属主**：当前目录挂到容器 `/work`；`--iso` / `--out` / `--offline-bundle` / `--ssh-authorized-keys` / `--debs` / `--iso-sha256sums` / `--cache-root` / `--bundle` / `--apt-cache` / `--password-file` / `--snippet` / `--target` 若指向当前目录之外，包装脚本自动把其**父目录**挂到 `/mnt/aibN` 并改写参数（Windows 的 `C:\...` 盘符路径同理）。路径里不能有逗号（docker `--mount` 限制）。Linux / WSL2 上产出文件属于当前用户（容器内用 `AIB_UID/AIB_GID` 降权或事后 chown），不会留下 root 文件。
 
 **本地镜像 tag**：
 
@@ -628,6 +628,107 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 - **镜像点版本升级**：直接拿新 ISO 重跑脚本，`xorriso -boot_image any replay` 会自动适配新的引导布局。
 
 ---
+
+## Windows 11 无人值守（Ventoy，实验性 MVP）
+
+> 状态：**静态校验已过，尚未在虚拟机 / 真机上完成一次完整装机验证**（见文末「待验证」）。先在 QEMU / 一台可抹盘的机器上试，再上 WIN-DEV。
+
+思路与 Ubuntu 侧一致：**官方 ISO 一个字节都不改**，只生成答案文件和 payload，交给 Ventoy 的 [Auto Installation Plugin](https://www.ventoy.net/en/plugin_autoinstall.html) 挂上去。不重打 ISO，所以不影响 Secure Boot 签名链，换新版 ISO 直接替换文件即可。
+
+### 产出
+
+```bash
+# ISO 从微软官网下载 (https://www.microsoft.com/zh-cn/software-download/windows11, 选「简体中文」),
+# --iso-sha256 填下载页「验证下载」表里的值
+AIB_WIN_PASSWORD='你的密码' ./scripts/aib.sh win \
+  --iso ~/Downloads/Win11_26H2_Chinese_Simplified_x64.iso --iso-sha256 <下载页给的 SHA256> \
+  --out out/win-ventoy --hostname WIN-DEV --username ubuntu
+# 不在容器里: tools/build-win-ventoy.sh 参数相同 (需 python3; 列版本需 7z + wimlib-imagex)
+```
+
+| 产物 | 说明 |
+|---|---|
+| `ventoy/script/aib-win-safe.xml` | **默认**。分区页 `WillShowUI=Always`、不写 `Disk`、不写 `InstallTo` → 停在「你想将 Windows 安装在哪里」由你选盘（对应 Ubuntu 侧默认停在选盘） |
+| `ventoy/script/aib-win-autodisk.xml` | **危险**。`WillWipeDisk=true` 抹 `$$VT_WINDOWS_DISK_1ST_NONVTOY$$`（Ventoy 启动时展开成第一块非 Ventoy 盘），建 ESP(300MB FAT32) + MSR(16MB) + Windows(NTFS, 占满) |
+| `ventoy/ventoy.auto_install.json` | `auto_install` 片段：`image` = U 盘里 ISO 路径（默认 `/ISO/<ISO 文件名>`，可 `--ventoy-image` 改），两个模板，`autosel` 默认 1（safe），`timeout` 10 秒 |
+| `aib-win/` | payload：`aib-win.marker`、`run-all.ps1`、`scripts/*.ps1` |
+| `manifest.txt` | ISO SHA256（校验过才写）、ISO 里的版本列表、参数；**不含密码** |
+
+写 U 盘（`<U盘>` = Ventoy 数据分区挂载点，与 Ubuntu ISO 共存）：
+
+```bash
+mkdir -p <U盘>/ISO <U盘>/ventoy/script
+cp ~/Downloads/Win11_26H2_Chinese_Simplified_x64.iso <U盘>/ISO/     # 原版, 不改
+cp out/win-ventoy/ventoy/script/aib-win-*.xml <U盘>/ventoy/script/
+cp -r out/win-ventoy/aib-win <U盘>/
+python3 tools/merge-ventoy-json.py --snippet out/win-ventoy/ventoy/ventoy.auto_install.json \
+  --target <U盘>/ventoy/ventoy.json          # 只替换同 image 的条目, Ubuntu 条目和其它键保留, 原文件备份为 .bak
+```
+
+`merge-ventoy-json.py` 加 `--dry-run` 只打印合并结果；容器里是 `./scripts/aib.sh win-merge-ventoy --snippet ... --target ...`。
+
+### 答案文件里有什么（元素名均出自 Microsoft Learn Unattended Setup Reference）
+
+| 阶段 | 设置 |
+|---|---|
+| windowsPE | `International-Core-WinPE`：`SetupUILanguage/UILanguage`、`InputLocale`（zh-CN 微软拼音 `0804:{81D4E9C9-…}{FA550B04-…}`）、`SystemLocale` / `UILanguage` / `UserLocale` = `zh-CN`；`Setup`：`DiskConfiguration`（见上）、`ImageInstall/OSImage/InstallFrom/MetaData` `/IMAGE/NAME` = `Windows 11 Pro`、`UserData/AcceptEula=true` |
+| specialize | `Shell-Setup`：`ComputerName`（≤15 字节）、`TimeZone=China Standard Time`；`Deployment/RunSynchronous`：复制 payload（见下） |
+| oobeSystem | `International-Core` 同上；`Shell-Setup/OOBE`：`HideOnlineAccountScreens=true`、`HideWirelessSetupInOOBE=true`、`ProtectYourPC=3`；`UserAccounts/LocalAccounts`：一个本地管理员（`Administrators`）；`AutoLogon`（`LogonCount=1`）；`FirstLogonCommands`：**只有一条** `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\aib\run-all.ps1` |
+
+**刻意没有**：`ProductKey`（版本靠 `/IMAGE/NAME` 选，激活走你机器自己的授权）、`PreventDeviceEncryption`（微软 OEM 文档：非 OEM 场景禁用自动设备加密违反 Windows 11 许可要求；本地账户下自动加密本来就不会「上锁」）、任何 TPM / Secure Boot / 微软账户绕过（`LabConfig`、`BypassNRO`、`ms-cxh` 等）、`SkipMachineOOBE`（Learn 明确不让用）、`HideEULAPage`（Learn：仅 OEM 出货前测试）。
+
+- **用 Pro**：微软官方要求页写明 Home 首次设置必须联网 + 微软账户；Pro 用答案文件建本地账户是官方部署机制，但微软没有为个人用户专门承诺，先实测。
+- **版本名**：`--edition` 必须等于 `install.wim` 里的 `/IMAGE/NAME`。给了 `--iso` 时构建器用 `7z`（Windows ISO 的大文件只在 UDF 里，xorriso 读不到）解出 `sources/install.wim|esd` 到临时目录，`wimlib-imagex info` 列版本并核对，结束即删（约 5–7 GB 临时空间；`--skip-edition-check` 跳过）。
+- **密码**：读取顺序为环境变量 `AIB_WIN_PASSWORD`、`--password-file`、`--password`（会进 shell 历史）；都没给时用仓库公开默认 `ubuntu1990`（告警）。不会打到日志；包装脚本只把变量名 `-e AIB_WIN_PASSWORD` 传给 docker。XML 里默认 `PlainText=false`，即 Windows SIM 同款 `base64(UTF-16LE(密码+"Password"))`——**这只是混淆不是加密**，U 盘上的 XML 等于明文，别外借 U 盘。装完 `run-all` 会删掉 `C:\Windows\Panther` 里缓存的答案文件。**装完立即改密码**。
+
+### payload 怎么到目标机上（不确定点，需实测）
+
+Ventoy 下 U 盘盘符不固定，所以在 **specialize** 阶段（SYSTEM 身份，系统盘已是 `C:`）用 `RunSynchronous` 执行：
+
+```
+cmd.exe /c "for %i in (D E … Z) do @if exist %i:\aib-win\aib-win.marker xcopy %i:\aib-win C:\aib\ /e /i /h /y /q >> C:\Windows\Temp\aib-payload-copy.log 2>&1"
+```
+
+（Learn：`Path` 最长 259 字符，测试里卡了这个上限。）**这是本仓库的设计，不是微软文档给出的标准做法**。要实测的点：
+
+- Ventoy 数据分区（exFAT）在 specialize 阶段是否已挂上盘符；
+- 空光驱 / 读卡器盘符上的 `if exist` 会不会弹「驱动器中没有磁盘」；
+- 找不到 marker 时不会报错，只是 `C:\aib` 不存在，FirstLogonCommands 静默失败。日志在 `C:\Windows\Temp\aib-payload-copy.log`。
+
+如果实测不行，备选方案是在 windowsPE 阶段用 `Microsoft-Windows-Setup/RunSynchronous` 复制到目标盘，或把小脚本内联进 XML。
+
+### 首次登录做什么（`C:\aib\run-all.ps1`）
+
+按文件名顺序执行 `C:\aib\scripts\*.ps1`。每个脚本单独起子进程，日志写到 `C:\aib\logs\<name>.log`，汇总写到 `C:\aib\logs\summary.txt`。**单个失败不影响后续**；成功的写 `C:\aib\state\<name>.done`，重跑时跳过（`99-*` 每次都跑）。`.ps1` 一律 **UTF-8 BOM**，否则中文系统上的 Windows PowerShell 5.1 会按 GBK 读。
+
+| 脚本 | 做什么 |
+|---|---|
+| `00-logging.ps1` | 记录版本 / 机型 / 语言 / 时区 / Secure Boot / TPM / 磁盘 / 网卡 / **缺驱动的设备** / payload 复制日志 |
+| `10-openssh-server.ps1` | 按 Learn 步骤 `Add-WindowsCapability OpenSSH.Server~~~~0.0.1.0`，sshd 设为自动并启动，确认防火墙规则 `OpenSSH-Server-In-TCP`。OpenSSH Server 是按需功能，**离线时会失败**（只记日志） |
+| `99-cleanup.ps1` | 删 `C:\Windows\Panther` 等处缓存的 `unattend.xml` / `autounattend.xml`；关 AutoLogon（`AutoAdminLogon=0`、`AutoLogonCount=0`、删 `DefaultPassword`）。Learn 写明 `LogonCount` 有「实际多一次」的已知问题，这里显式清零 |
+
+增删脚本：在 `windows/payload/scripts/` 里放 `NN-名字.ps1`（UTF-8 BOM，退出码 0 表示成功）。
+
+### 校验
+
+`bash test/win-check.sh`（已接进 `test/local-check.sh` 和 CI）检查以下内容：
+
+- 模板和两个变体的 XML 是否 well-formed（有 `xmllint` 就用它）；
+- 必需元素和取值是否齐全，禁用项（ProductKey / PreventDeviceEncryption / 各类绕过）是否不存在；
+- safe 版无 `Disk` / `WillWipeDisk` / `InstallTo` / Ventoy 变量；
+- autodisk 版每行最多一个 Ventoy 变量，UTF-8 无 BOM；
+- 密码编码与 Learn 示例一致，stdout / stderr / manifest 不含密码；
+- 用假 ISO 加假 `install.wim` 端到端：SHA256 校验、版本核对、ISO 未被改动；
+- `merge-ventoy-json.py` 不覆盖 Ubuntu 条目且幂等；
+- payload 的 BOM，以及有 `pwsh` 时的 PowerShell 语法解析。
+
+### 待验证 / 已知风险
+
+- **还没有完整装机验证**：26H2 简体中文 Pro 在 QEMU（OVMF + Secure Boot + swtpm）和 WIN-DEV（B650M）上都要各走一遍，包括 Ventoy 变量展开、safe 版是否确实停在安装位置页、本地账户 + 不出微软账户页、AutoLogon 一次、payload 复制、OpenSSH。
+- **Secure Boot 证书过渡**：Ventoy 1.1.13+ 首次启动要为 UEFI CA 2023 重新 enroll key；部分主板要开「Allow Microsoft 3rd Party UEFI CA」；新版微软介质改用 2023 签名的 bootmgr 后，老固件需先升级 BIOS。
+- **FirstLogonCommands 顺序**：Learn 两个页面说法不一，一处说「同时启动」，一处说「仍按顺序」。所以只放一条入口命令，串行逻辑在 `run-all.ps1` 里。
+- autodisk 没有建单独的 Recovery 分区（Windows 分区占满整盘，WinRE 在 C 盘内）。要符合微软推荐布局需改成固定大小加 Recovery 分区，后续再做。
+- 驱动（芯片组 / 2.5GbE / Wi‑Fi / 显卡）、离线软件包、winget：后续切片。`00-logging.ps1` 会列出缺驱动的设备。
 
 ## 附录：UEFI 启动没读到配置怎么办
 
