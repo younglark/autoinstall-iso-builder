@@ -19,10 +19,10 @@ ARG NODE_MAJOR=24
 ARG TARGETARCH
 ARG AIB_VERSION=dev
 ARG VCS_REF=unknown
-# 默认清华源 http (含 -security; apt 走 GPG, 避免干净基础镜像缺 CA 无法校 https)。空值 (--build-arg APT_MIRROR=) 保留镜像自带官方源。
-# arm64 等 ports 架构用 APT_PORTS_MIRROR。
-ARG APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu
-ARG APT_PORTS_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports
+# 默认清华源 https (含 -security)。缺 CA 时先走 http 装 ca-certificates 再切回 https。
+# 空值 (--build-arg APT_MIRROR=) 保留镜像自带官方源。arm64 等 ports 架构用 APT_PORTS_MIRROR。
+ARG APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+ARG APT_PORTS_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports
 
 LABEL org.opencontainers.image.title="autoinstall-iso-builder" \
       org.opencontainers.image.description="Bake Ubuntu autoinstall + preinstalled software into Ubuntu Server/Desktop ISOs (runs on macOS/Windows/Linux via Docker)" \
@@ -42,24 +42,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # 构建 ISO: xorriso python3(+yaml) openssl; 抓捆绑: curl gnupg dpkg-dev xz-utils;
 # 冒烟/校验: shellcheck 不装 (CI 单独跑), file/jq 方便排查
-RUN for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do \
-      [ -f "$f" ] || continue; \
-      if [ -n "$APT_MIRROR" ]; then \
-        sed -i \
-          -e "s#http://archive.ubuntu.com/ubuntu#${APT_MIRROR}#g" \
-          -e "s#https://archive.ubuntu.com/ubuntu#${APT_MIRROR}#g" \
-          -e "s#http://security.ubuntu.com/ubuntu#${APT_MIRROR}#g" \
-          -e "s#https://security.ubuntu.com/ubuntu#${APT_MIRROR}#g" \
-          "$f"; \
-      fi; \
-      if [ -n "$APT_PORTS_MIRROR" ]; then \
-        sed -i \
-          -e "s#http://ports.ubuntu.com/ubuntu-ports#${APT_PORTS_MIRROR}#g" \
-          -e "s#https://ports.ubuntu.com/ubuntu-ports#${APT_PORTS_MIRROR}#g" \
-          "$f"; \
-      fi; \
-    done \
- && apt-get update \
+# 先只拷 helper, 以免改仓库其它文件时让 apt 层缓存失效
+COPY tools/ubuntu-mirror.sh /tmp/aib-ubuntu-mirror.sh
+RUN . /tmp/aib-ubuntu-mirror.sh \
+ && aib_apply_builder_mirrors "$APT_MIRROR" "$APT_PORTS_MIRROR" \
  && apt-get install -y --no-install-recommends \
       bash ca-certificates curl gnupg xorriso python3 python3-yaml openssl \
       dpkg-dev apt-utils xz-utils unzip jq file tar gzip coreutils findutils util-linux \

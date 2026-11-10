@@ -29,7 +29,7 @@ PASS_PLAIN=""
 LOCALE_="en_US.UTF-8"
 KEYBOARD_="us"
 TIMEZONE_="Asia/Shanghai"
-MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu"
 PACKAGES=""
 SSH_ALLOW_PW="true"
 SSH_AUTHORIZED_KEYS=""
@@ -92,8 +92,9 @@ usage() {
   --hostname NAME       默认 ubuntu-node
   --username NAME       默认 ubuntu
   --packages "a,b,c"    预装软件包, 逗号分隔
-  --mirror URL          默认清华 http://mirrors.tuna.tsinghua.edu.cn/ubuntu
-                        (含 -security)。装完系统 apt 也用这个源。内网或官方源请覆盖
+  --mirror URL          默认清华 https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+                        (含 -security)。装完系统 apt 也用这个源。缺 CA 时先走 http
+                        装 ca-certificates 再切回 https。内网或官方源请覆盖
   --locale / --keyboard / --timezone
   --ssh-allow-pw BOOL   默认 true; false 时必须同时提供 --ssh-authorized-keys, 否则构建失败
   --ssh-authorized-keys FILE
@@ -220,6 +221,12 @@ while [[ $# -gt 0 ]]; do
     *) die "未知参数: $1 (用 --help 查看)" ;;
   esac
 done
+
+# 清华 http 升为 https (其它源不动)。装完系统 / 抓包都用规范化后的 URL。
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/tools/ubuntu-mirror.sh"
+MIRROR="$(aib_normalize_mirror "$MIRROR")"
+
 
 [[ -n "$SRC_ISO" ]] || { usage; die "缺少 --iso"; }
 [[ -n "$OUT_ISO" ]] || { usage; die "缺少 --out"; }
@@ -570,6 +577,9 @@ if [[ "$PROVISION" -eq 1 ]]; then
   # 只带 .sh 和 env, 不带任何本地残留
   cp "$SCRIPT_DIR/software"/*.sh "$WORK/provision/"
   chmod 0755 "$WORK/provision"/*.sh
+  # https 源引导 (00-base / restore-online-apt 会用到)
+  cp "$SCRIPT_DIR/tools/ubuntu-mirror.sh" "$WORK/provision/"
+  chmod 0755 "$WORK/provision/ubuntu-mirror.sh"
   # Jenkins 插件解析器 (30-jenkins.sh 在线路径用; 与 fetch-offline-bundle 同一份)
   cp "$SCRIPT_DIR/tools/resolve-jenkins-plugins.py" "$WORK/provision/"
   # 逐行 %q 写入, 保证 source 安全 (旧写法 EXTRA_APT_PACKAGES=vim, htop 会把 htop 当命令执行)
@@ -577,6 +587,8 @@ if [[ "$PROVISION" -eq 1 ]]; then
     echo "# 由 build-iso.sh 生成 (printf %q; 请勿手改未加引号的值)"
     printf 'TARGET_USER=%q
 ' "$USERNAME_"
+    printf 'UBUNTU_MIRROR=%q
+' "$MIRROR"
     printf 'STRICT=%q
 ' "$STRICT"
     printf 'PROVISION_SKIP=%q
@@ -695,9 +707,12 @@ MAP_ARGS=(
 [[ "$PROVISION" -eq 1 ]]    && MAP_ARGS+=(-map "$WORK/provision"       /provision)
 # offline-bundle map (+ apt enable/restore helpers; avoid nested sh -c find \( \))
 if [[ "$FULL_OFFLINE" -eq 1 ]]; then
+  printf '%s\n' "$MIRROR" > "$WORK/ubuntu-mirror.url"
   MAP_ARGS+=(-map "$OFFLINE_BUNDLE" /offline)
   MAP_ARGS+=(-map "$SCRIPT_DIR/autoinstall/enable-offline-apt.sh" /offline/enable-offline-apt.sh)
   MAP_ARGS+=(-map "$SCRIPT_DIR/autoinstall/restore-online-apt.sh" /offline/restore-online-apt.sh)
+  MAP_ARGS+=(-map "$SCRIPT_DIR/tools/ubuntu-mirror.sh" /offline/ubuntu-mirror.sh)
+  MAP_ARGS+=(-map "$WORK/ubuntu-mirror.url" /offline/ubuntu-mirror.url)
 fi
 
 log "打包 (复制模式, 引导记录 replay)"

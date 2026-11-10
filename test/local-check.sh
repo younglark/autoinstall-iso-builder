@@ -81,8 +81,8 @@ else
 fi
 
 echo "== default apt mirror is Tsinghua (overridable) =="
-DEFAULT_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
-DEFAULT_PORTS="http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports"
+DEFAULT_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+DEFAULT_PORTS="https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports"
 if python3 -c "
 import yaml
 d=yaml.safe_load(open('$tmp/user-data'))
@@ -113,6 +113,26 @@ assert 'tuna.tsinghua' not in str(d['autoinstall']['apt'])
   pass "render --mirror override"
 else
   fail "render --mirror override"
+fi
+if python3 tools/render-user-data.py \
+  --template autoinstall/user-data.tmpl \
+  --out "$tmp/user-data-tuna-http" \
+  --password-hash "$HASH" \
+  --mirror http://mirrors.tuna.tsinghua.edu.cn/ubuntu \
+  --ssh-allow-pw true; then
+  :
+else
+  fail "render tuna http upgrades to https"
+fi
+if python3 -c "
+import yaml
+d=yaml.safe_load(open('$tmp/user-data-tuna-http'))
+uris=[x.get('uri') for x in d['autoinstall']['apt']['primary']]
+assert uris==['$DEFAULT_MIRROR'], uris
+"; then
+  pass "render tuna http upgrades to https"
+else
+  fail "render tuna http upgrades to https"
 fi
 # 全离线时 primary 为空, 不把镜像写进安装器探测路径
 if python3 tools/render-user-data.py \
@@ -165,6 +185,55 @@ else
 fi
 if [[ "$mirror_ok" -eq 1 ]]; then
   pass "default mirror strings consistent + ports/override rules"
+fi
+# shellcheck disable=SC1091
+. "$ROOT/tools/ubuntu-mirror.sh"
+helper_ok=1
+[[ "$(aib_default_ubuntu_mirror amd64)" == "$DEFAULT_MIRROR" ]] || { fail "helper default amd64"; helper_ok=0; }
+[[ "$(aib_default_ubuntu_mirror arm64)" == "$DEFAULT_PORTS" ]] || { fail "helper default arm64"; helper_ok=0; }
+[[ "$(aib_normalize_mirror "http://mirrors.tuna.tsinghua.edu.cn/ubuntu")" == "$DEFAULT_MIRROR" ]] || { fail "helper normalize tuna http"; helper_ok=0; }
+[[ "$(aib_normalize_mirror "$DEFAULT_MIRROR")" == "$DEFAULT_MIRROR" ]] || { fail "helper normalize tuna https"; helper_ok=0; }
+[[ "$(aib_normalize_mirror "http://archive.ubuntu.com/ubuntu")" == "http://archive.ubuntu.com/ubuntu" ]] || { fail "helper leaves official http"; helper_ok=0; }
+[[ "$(aib_normalize_mirror "")" == "" ]] || { fail "helper leaves empty"; helper_ok=0; }
+aib_is_tuna_mirror "$DEFAULT_MIRROR" || { fail "helper is_tuna https"; helper_ok=0; }
+aib_is_tuna_mirror "http://example.invalid/ubuntu" && { fail "helper is_tuna false positive"; helper_ok=0; }
+# 在临时 APT_ETC 里验证 http->https 改写, 不动本机源
+ht="$(mktemp -d)"
+mkdir -p "$ht/sources.list.d"
+echo "deb http://mirrors.tuna.tsinghua.edu.cn/ubuntu noble main" > "$ht/sources.list"
+echo "deb https://download.docker.com/linux/ubuntu noble stable" > "$ht/sources.list.d/docker.list"
+APT_ETC="$ht" aib_rewrite_tuna_scheme https
+if grep -q '^deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu noble main$' "$ht/sources.list" \
+   && grep -q 'download.docker.com' "$ht/sources.list.d/docker.list" \
+   && ! grep -q 'http://mirrors.tuna.tsinghua.edu.cn' "$ht/sources.list"; then
+  :
+else
+  fail "helper rewrite tuna http->https (leave third-party)"
+  helper_ok=0
+fi
+echo "deb http://archive.ubuntu.com/ubuntu noble main" > "$ht/sources.list"
+APT_ETC="$ht" aib_replace_ubuntu_uris "$DEFAULT_MIRROR"
+if grep -qF "deb $DEFAULT_MIRROR noble main" "$ht/sources.list"; then
+  :
+else
+  fail "helper replace official uri with tuna https"
+  helper_ok=0
+fi
+rm -rf "$ht"
+if [[ "$helper_ok" -eq 1 ]]; then
+  pass "ubuntu-mirror.sh normalize / rewrite helper"
+fi
+# 离线捆绑校验把 ca-certificates 当作必装包, 以便 restore 后的 https 源可用
+if grep -q 'ca-certificates' tools/fetch-offline-bundle.sh \
+   && grep -q 'NEED_PKGS=(.*ca-certificates' tools/validate-offline-bundle.sh; then
+  pass "ca-certificates seeded and required in offline bundle"
+else
+  fail "ca-certificates missing from offline seeds/validate"
+fi
+if grep -q 'ubuntu-mirror.sh' build-iso.sh && grep -q 'ubuntu-mirror.url' build-iso.sh; then
+  pass "build-iso packs helper + final https mirror url"
+else
+  fail "build-iso does not pack ubuntu-mirror helper/url"
 fi
 
 echo "== ssh keys late-command absent when no keys =="
@@ -230,10 +299,13 @@ Architectures: amd64
 Signed-By: /usr/share/keyrings/nodesource.gpg
 NS
 cp -a autoinstall/restore-online-apt.sh "$rroot/offline/restore-online-apt.sh"
+cp -a tools/ubuntu-mirror.sh "$rroot/offline/ubuntu-mirror.sh"
+printf '%s\n' "https://mirrors.tuna.tsinghua.edu.cn/ubuntu" > "$rroot/offline/ubuntu-mirror.url"
 if APT_ETC="$rroot/etc/apt" SHARE_KEYRINGS="$rroot/usr/share/keyrings" \
     bash "$rroot/offline/restore-online-apt.sh" >"$tmp/restore.out" 2>&1; then
   ok=1
   [[ -f "$rroot/etc/apt/sources.list" ]] || ok=0
+  grep -q 'https://mirrors.tuna.tsinghua.edu.cn/ubuntu' "$rroot/etc/apt/sources.list" || ok=0
   [[ ! -f "$rroot/etc/apt/sources.list.d/00-offline-bundle.list" ]] || ok=0
   [[ ! -f "$rroot/etc/apt/apt.conf.d/99-offline-bundle" ]] || ok=0
   for f in docker.asc githubcli-archive-keyring.gpg nvidia-container-toolkit.asc jenkins-keyring.asc; do
@@ -1122,7 +1194,7 @@ fi
 
 echo "== shellcheck (if available) =="
 if command -v shellcheck >/dev/null; then
-  if shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh tools/validate-offline-bundle.sh \
+  if shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh tools/ubuntu-mirror.sh tools/validate-offline-bundle.sh \
       autoinstall/enable-offline-apt.sh autoinstall/restore-online-apt.sh test/local-check.sh \
     && shellcheck -e SC2054,SC2001 -x test/qemu-smoke.sh; then
     pass "shellcheck"
