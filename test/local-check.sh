@@ -282,6 +282,7 @@ echo 'GHKEY' > "$rroot/offline/apt-sources/keyrings/githubcli-archive-keyring.gp
 echo 'NVKEY' > "$rroot/offline/apt-sources/keyrings/nvidia-container-toolkit.asc"
 echo 'JKEY' > "$rroot/offline/apt-sources/keyrings/jenkins-keyring.asc"
 echo 'NKEY' > "$rroot/offline/apt-sources/keyrings/nodesource.gpg"
+echo 'MSKEY' > "$rroot/offline/apt-sources/keyrings/microsoft-edge.gpg"
 echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable' \
   > "$rroot/offline/apt-sources/sources.list.d/docker.list"
 echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' \
@@ -298,6 +299,14 @@ Components: main
 Architectures: amd64
 Signed-By: /usr/share/keyrings/nodesource.gpg
 NS
+cat > "$rroot/offline/apt-sources/sources.list.d/microsoft-edge.sources" <<'MS'
+Types: deb
+URIs: https://packages.microsoft.com/repos/edge-stable
+Suites: stable
+Components: main
+Architectures: amd64
+Signed-By: /usr/share/keyrings/microsoft-edge.gpg
+MS
 cp -a autoinstall/restore-online-apt.sh "$rroot/offline/restore-online-apt.sh"
 cp -a tools/ubuntu-mirror.sh "$rroot/offline/ubuntu-mirror.sh"
 printf '%s\n' "https://mirrors.tuna.tsinghua.edu.cn/ubuntu" > "$rroot/offline/ubuntu-mirror.url"
@@ -312,11 +321,13 @@ if APT_ETC="$rroot/etc/apt" SHARE_KEYRINGS="$rroot/usr/share/keyrings" \
     [[ -f "$rroot/etc/apt/keyrings/$f" ]] || ok=0
   done
   [[ -f "$rroot/usr/share/keyrings/nodesource.gpg" ]] || ok=0
-  for f in docker.list github-cli.list nvidia-container-toolkit.list jenkins.list nodesource.sources; do
+  [[ -f "$rroot/usr/share/keyrings/microsoft-edge.gpg" ]] || ok=0
+  for f in docker.list github-cli.list nvidia-container-toolkit.list jenkins.list nodesource.sources microsoft-edge.sources; do
     [[ -f "$rroot/etc/apt/sources.list.d/$f" ]] || ok=0
   done
   grep -q 'download.docker.com' "$rroot/etc/apt/sources.list.d/docker.list" || ok=0
   grep -q 'deb.nodesource.com' "$rroot/etc/apt/sources.list.d/nodesource.sources" || ok=0
+  grep -q 'packages.microsoft.com/repos/edge-stable' "$rroot/etc/apt/sources.list.d/microsoft-edge.sources" || ok=0
   if [[ "$ok" -eq 1 ]]; then
     pass "restore-online-apt third-party sources"
   else
@@ -581,6 +592,42 @@ if [[ -x software/25-nvidia-container-toolkit.sh ]] \
   pass "nvidia toolkit script + offline seed + manifest"
 else
   fail "nvidia toolkit script + offline seed + manifest"
+fi
+
+echo "== microsoft-edge script + offline seed =="
+if [[ -x software/35-microsoft-edge.sh ]] \
+  && grep -q 'packages.microsoft.com/repos/edge' software/35-microsoft-edge.sh \
+  && grep -q 'packages.microsoft.com/keys/microsoft.asc' software/35-microsoft-edge.sh \
+  && grep -q 'offline_apt_install' software/35-microsoft-edge.sh \
+  && grep -q 'update-alternatives --install /usr/bin/x-www-browser' software/35-microsoft-edge.sh \
+  && grep -q 'update-alternatives --install /usr/bin/gnome-www-browser' software/35-microsoft-edge.sh \
+  && grep -q '/etc/xdg/mimeapps.list' software/35-microsoft-edge.sh \
+  && grep -q 'HideFirstRunExperience' software/35-microsoft-edge.sh \
+  && grep -q 'DefaultBrowserSettingEnabled' software/35-microsoft-edge.sh \
+  && ! grep -qE 'ComponentUpdatesEnabled|AutoUpdateCheckPeriodMinutes' software/35-microsoft-edge.sh \
+  && grep -q 'EDITION' software/35-microsoft-edge.sh \
+  && grep -q 'amd64' software/35-microsoft-edge.sh \
+  && grep -q 'microsoft-edge-stable' tools/fetch-offline-bundle.sh \
+  && grep -q 'packages.microsoft.com/repos/edge' tools/fetch-offline-bundle.sh \
+  && grep -q 'microsoft-edge-stable' tools/validate-offline-bundle.sh \
+  && grep -q 'EDITION=%q' build-iso.sh \
+  && grep -q 'microsoft-edge-stable' software/99-cleanup.sh; then
+  pass "microsoft-edge script + offline seed + manifest + policies"
+else
+  fail "microsoft-edge script + offline seed + manifest + policies"
+fi
+# Server / 非 desktop 必须直接成功退出, 不装包
+if EDITION=server bash software/35-microsoft-edge.sh >"$tmp/edge-skip.log" 2>&1 \
+   && grep -q 'skip:' "$tmp/edge-skip.log"; then
+  pass "microsoft-edge skips on server edition"
+else
+  fail "microsoft-edge skips on server edition: $(cat "$tmp/edge-skip.log" 2>/dev/null)"
+fi
+# provision.env 写入 EDITION
+if grep -q 'EDITION=%q' build-iso.sh && grep -q 'export EDITION=' software/run-all.sh; then
+  pass "EDITION exported via provision.env / run-all"
+else
+  fail "EDITION exported via provision.env / run-all"
 fi
 
 echo "== unity-cli script + offline seed =="
@@ -848,11 +895,11 @@ fi
 echo "== validate-offline-bundle jenkins-plugins =="
 vb="$(mktemp -d)"
 mkdir -p "$vb/apt" "$vb/apt-sources/keyrings" "$vb/apt-sources/sources.list.d" "$vb/jenkins-plugins"
-for p in git ripgrep openssh-server ca-certificates curl jenkins fontconfig libharfbuzz0b python3-bcrypt; do
+for p in git ripgrep openssh-server ca-certificates curl jenkins fontconfig libharfbuzz0b python3-bcrypt microsoft-edge-stable; do
   printf 'Package: %s\nVersion: 1\n\n' "$p" >> "$vb/apt/Packages"
 done
-for f in docker.asc githubcli-archive-keyring.gpg nvidia-container-toolkit.asc jenkins-keyring.asc nodesource.gpg; do : > "$vb/apt-sources/keyrings/$f"; done
-for f in docker.list github-cli.list nvidia-container-toolkit.list jenkins.list nodesource.sources; do : > "$vb/apt-sources/sources.list.d/$f"; done
+for f in docker.asc githubcli-archive-keyring.gpg nvidia-container-toolkit.asc jenkins-keyring.asc nodesource.gpg microsoft-edge.gpg; do : > "$vb/apt-sources/keyrings/$f"; done
+for f in docker.list github-cli.list nvidia-container-toolkit.list jenkins.list nodesource.sources microsoft-edge.sources; do : > "$vb/apt-sources/sources.list.d/$f"; done
 echo '{"schema":3,"release":"noble","fingerprint":"x","pins":{}}' > "$vb/manifest.json"
 : > "$vb/jenkins-plugins/plugins.lock"
 for p in git scm-api timestamper; do
@@ -1091,7 +1138,12 @@ echo "== apt-sources seed wiring =="
 if grep -q 'apt-sources' tools/fetch-offline-bundle.sh \
   && grep -q 'nodesource.gpg' tools/fetch-offline-bundle.sh \
   && grep -q 'nodesource.sources' tools/fetch-offline-bundle.sh \
+  && grep -q 'microsoft-edge.gpg' tools/fetch-offline-bundle.sh \
+  && grep -q 'microsoft-edge.sources' tools/fetch-offline-bundle.sh \
+  && grep -q 'packages.microsoft.com/repos/edge' tools/fetch-offline-bundle.sh \
   && grep -q 'apt-sources' tools/validate-offline-bundle.sh \
+  && grep -q 'microsoft-edge.gpg' tools/validate-offline-bundle.sh \
+  && grep -q 'microsoft-edge.sources' tools/validate-offline-bundle.sh \
   && grep -q 'third-party apt sources' autoinstall/restore-online-apt.sh \
   && grep -q 'SHARE_KEYRINGS' autoinstall/restore-online-apt.sh \
   && grep -q '"schema": 3' tools/fetch-offline-bundle.sh; then

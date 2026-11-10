@@ -37,6 +37,7 @@
 | `20-docker.sh` | Docker CE | 官方仓库（非 `docker.io`），含 compose v2 / buildx，**配了日志轮转** |
 | `25-nvidia-container-toolkit.sh` | NVIDIA Container Toolkit | 官方仓库；`nvidia-ctk` 合并 Docker runtime（保留 daemon.json 日志轮转）；**不装 GPU 驱动** |
 | `30-jenkins.sh` | Jenkins LTS | 优先 JDK 21（不够退 17），jenkins 用户加入 docker 组；**零配置**：跳过安装向导、装机时建好管理员、预装 Pipeline / Git / Gitea / Docker Pipeline / Docker Cloud / Rebuild / AnsiColor / Parameterized Trigger 等插件（含全部依赖），监听 **0.0.0.0:8080** |
+| `35-microsoft-edge.sh` | Microsoft Edge 稳定版 | **仅 Desktop + amd64 默认安装**（Server / 非 amd64 自动跳过，`--skip 35` 也可跳过）。官方 apt 源 `packages.microsoft.com/repos/edge`；设为默认浏览器（`update-alternatives` + 系统/用户 `mimeapps.list`）；GNOME 收藏夹用 Edge 替换 Firefox（Firefox **保留**）；策略关掉首次运行提示，**不**关闭自动更新 |
 | `40-nodejs.sh` | Node.js 24 | NodeSource 优先，官方 tarball 兜底 |
 | `45-gitea.sh` | Gitea（最新稳定版，可 `--pin-gitea`） | 官方 linux-amd64 二进制（sha256 校验）→ `/usr/local/bin/gitea`；系统用户 `git`；SQLite；**装机阶段写好配置并创建管理员**，开机 `gitea.service` 自启。监听 **0.0.0.0:3000**（不与 Jenkins 8080 冲突），开放注册，LFS 开，`OFFLINE_MODE`。SSH 克隆走系统 OpenSSH：`git@host:user/repo.git` |
 | `50-grok.sh` | xAI Grok Build | `@xai-official/grok`，**官方包**，不是社区的 `@vibe-kit/grok-cli` |
@@ -45,6 +46,15 @@
 | `80-unity-cli.sh` | Unity CLI | 官方 CDN 二进制装到 `/usr/local/bin/unity`；**不含 Editor / 登录 / 许可证** |
 | `85-godot.sh` | Godot Engine 4.7.2 | 官方 Linux x86_64 标准编辑器 zip → `/opt/godot/4.7.2/` + `/usr/local/bin/godot`；**不含 export templates** |
 | `99-cleanup.sh` | 收尾 | 恢复 `resolv.conf`、删 `policy-rc.d`、清 apt 缓存、写清单 |
+
+### Microsoft Edge（仅 Desktop）
+
+默认只在 Desktop 预装（`--skip 35` / `--skip 35-microsoft-edge` 可跳过；Server 与非 amd64 自动跳过）。装的是官方 `microsoft-edge-stable`，**不卸载 Firefox**。装机时会：
+
+- 把 Edge 设为 `x-www-browser` / `gnome-www-browser`，并写入 `/etc/xdg/mimeapps.list`、`/usr/share/applications/{mimeapps,defaults}.list`、`/etc/skel/.config/mimeapps.list` 以及装机用户的 `~/.config/mimeapps.list`（`text/html`、`http`/`https`/`about`/`unknown`）。无图形会话时 `xdg-settings` 可能写不上，mimeapps 仍生效。
+- 若存在 GNOME schemas，用 Edge 替换收藏夹里的 Firefox（`90_autoinstall-microsoft-edge.gschema.override`）。
+- 写入 `/etc/opt/edge/policies/managed/10-autoinstall.json`：`HideFirstRunExperience=true`、`DefaultBrowserSettingEnabled=false`，避免首次运行弹窗；**不**关闭自动更新。
+- 全离线时从捆绑安装，装完由 `restore-online-apt.sh` 写回 Microsoft apt 源，联网后可更新。
 
 ### 两个版本约束，别忽略
 
@@ -305,7 +315,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso --uefi
 | 选盘 | 默认停在选盘页 | 同左：图形安装器停在「安装类型/磁盘」页，确认后继续 |
 | 配置投递 | `/nocloud` + 内核参数 | 同左；另在 ISO 根放一份 `/autoinstall.yaml` 兜底（Subiquity 优先级：内核参数 > live 根 > cloud-config > 介质根，正常不会用到） |
 
-`software/*.sh` 在 Desktop 目标上不需要改：Desktop minimal 不带 curl/git/openssh-server，`00-base`/`10-openssh` 会补装；已装的包（ca-certificates、gnupg、jq 等）照旧跳过。GitHub CLI / Docker / NVIDIA Container Toolkit / Jenkins / Node / Gitea / Grok / OpenCode / OpenMausBot / Unity CLI / Godot 与 Server 相同（Toolkit **不含** GPU 驱动；Unity CLI **不含** Editor；Godot **不含** export templates）。
+`software/*.sh` 在 Desktop 目标上大体不用改：Desktop minimal 不带 curl/git/openssh-server，`00-base`/`10-openssh` 会补装；已装的包（ca-certificates、gnupg、jq 等）照旧跳过。GitHub CLI / Docker / NVIDIA Container Toolkit / Jenkins / Node / Gitea / Grok / OpenCode / OpenMausBot / Unity CLI / Godot 与 Server 相同（Toolkit **不含** GPU 驱动；Unity CLI **不含** Editor；Godot **不含** export templates）。**例外**：`35-microsoft-edge.sh` 只在 Desktop + amd64 安装，并把 Edge 设为默认浏览器（Firefox 保留）；Server 自动跳过。
 
 ### 离线：Desktop 能不能全离线？
 
@@ -374,7 +384,7 @@ cat /var/log/autoinstall/20-docker.log
 
 **装完系统的源是合理的**：在线安装时 Subiquity 按 `apt.primary` 写出 sources，之后一直用 `--mirror`（默认清华）。全离线安装过程不访问镜像，装完由 `restore-online-apt.sh` 恢复安装器写下的同一份 Ubuntu 源，并写回 Docker / Jenkins 等第三方源。境外使用或需要官方源时，构建时加上 `--mirror http://archive.ubuntu.com/ubuntu` 即可。当前 ISO 构建以 amd64 为主；自行给非 amd64 抓离线包时，未指定 `--ubuntu-mirror` 会自动改用 `ubuntu-ports`。
 
-第三方源（Docker CE、Jenkins、NodeSource、GitHub CLI、NVIDIA toolkit）以及 npm / Jenkins 插件 / Gitea 二进制，不走 Ubuntu 镜像，也不受 `--mirror` 影响。
+第三方源（Docker CE、Jenkins、NodeSource、GitHub CLI、NVIDIA toolkit、Microsoft Edge）以及 npm / Jenkins 插件 / Gitea 二进制，不走 Ubuntu 镜像，也不受 `--mirror` 影响。
 
 ## 参数一览
 
@@ -486,11 +496,11 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 | 阶段 | 行为 |
 |---|---|
-| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
+| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource + Microsoft Edge），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
 | ISO | 写入 `/offline/{apt,apt-sources,npm,node,unity-cli,godot,gitea,jenkins-plugins,manifest.json}` |
 | 装机 late-commands | 拷到 `/opt/offline`，临时只启用 `deb [trusted=yes] file:/opt/offline/apt ./`，再跑 `software/`（`OFFLINE=1`） |
 | `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装；Jenkins 插件从 `jenkins-plugins/` 拷贝 |
-| `restore-online-apt.sh` | 卸掉离线 pin、恢复安装器写入的 Ubuntu 源（即 `--mirror`，默认清华 https，含 `-security`）后，把捆绑内 **全部** `apt-sources/` 种子写回（Docker CE / GitHub CLI / NVIDIA toolkit / Jenkins / NodeSource；与在线脚本同一批 URL/密钥）。装机时可能仍无网，此处不做 `apt update`；联网后即可收安全更新。纯在线构建不会调用本脚本 |
+| `restore-online-apt.sh` | 卸掉离线 pin、恢复安装器写入的 Ubuntu 源（即 `--mirror`，默认清华 https，含 `-security`）后，把捆绑内 **全部** `apt-sources/` 种子写回（Docker CE / GitHub CLI / NVIDIA toolkit / Jenkins / NodeSource / Microsoft Edge；与在线脚本同一批 URL/密钥）。装机时可能仍无网，此处不做 `apt update`；联网后即可收安全更新。纯在线构建不会调用本脚本 |
 
 体积与缓存：
 
@@ -510,7 +520,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 **无捆绑**时的旧 `--offline` 只影响 autoinstall apt fallback；第三方脚本仍会联网。当前这套软件栈里：
 
-- GitHub CLI / Docker / NVIDIA Container Toolkit / Jenkins / NodeSource 走各自第三方仓库 → 需要下载 `.deb` 后配 `--debs`
+- GitHub CLI / Docker / NVIDIA Container Toolkit / Jenkins / NodeSource / Microsoft Edge 走各自第三方仓库 → 需要下载 `.deb` 后配 `--debs`
 - Grok / OpenCode / OpenMausBot 是 **npm 全局包** → 需要预建 npm 缓存（`npm cache add`）或打成 tarball 后离线 `npm install -g ./xxx.tgz`
 - Unity CLI 是 CDN 二进制（`public-cdn.cloud.unity3d.com`）→ 全离线捆绑的 `unity-cli/`；无捆绑时脚本会联网下载
 - Godot 是官方 zip（GitHub releases / downloads.godotengine.org，固定 **4.7.2**）→ 全离线捆绑的 `godot/`；无捆绑时脚本会联网下载；**不含** export templates
@@ -593,6 +603,6 @@ xorriso -indev ubuntu.iso -outdev out.iso \
 
 - 口令是哈希，不是明文；哈希本身也别提交到公开仓库。若用 `--password` 构建，Gitea / Jenkins 管理员明文会短暂出现在 ISO 的 `/provision/gitea-admin.secret` / `jenkins-admin.secret`（0600），装机后从目标机删除；拿到 ISO 的人在安装前仍可能读到，请勿把此类 ISO 公开分发。
 - 没有任何 API key / 私钥进镜像。SSH **公钥**可通过 `--ssh-authorized-keys` 注入，属于公开信息；私钥绝不注入。
-- 目标机磁盘 ≥ 25 GB，且装机时能访问 cli.github.com / docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）、`github.com/godotengine/godot` 或 `downloads.godotengine.org`（Godot 4.7.2），以及 `dl.gitea.com`（Gitea 二进制与 sha256）与 `updates.jenkins.io` 及其下载镜像（Jenkins 插件）。全离线捆绑可免除这些外网依赖。
+- 目标机磁盘 ≥ 25 GB，且装机时能访问 cli.github.com / docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / packages.microsoft.com（Desktop 上的 Microsoft Edge） / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）、`github.com/godotengine/godot` 或 `downloads.godotengine.org`（Godot 4.7.2），以及 `dl.gitea.com`（Gitea 二进制与 sha256）与 `updates.jenkins.io` 及其下载镜像（Jenkins 插件）。全离线捆绑可免除这些外网依赖。
 
 这条线一旦破，后面所有「镜像管理」都失去意义。

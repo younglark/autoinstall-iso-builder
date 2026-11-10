@@ -183,6 +183,7 @@ payload = {
   "seeds": [
     "git", "ripgrep", "openssh-server", "gh",
     "docker-ce", "nvidia-container-toolkit", "jenkins", "nodejs",
+    "microsoft-edge-stable",
     "unity-cli", "godot", "gitea", "apt-sources",
     "fontconfig", "libharfbuzz0b", "python3-bcrypt", "jenkins-plugins",
   ],
@@ -296,6 +297,13 @@ echo "deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.
 curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o /tmp/ns.sh
 bash /tmp/ns.sh
 
+# Microsoft Edge (官方源仅 amd64)
+if [ "$ARCH" = "amd64" ]; then
+  curl -fsSL https://packages.microsoft.com/keys/microsoft.asc     -o /etc/apt/keyrings/microsoft.asc
+  chmod a+r /etc/apt/keyrings/microsoft.asc
+  echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.asc] https://packages.microsoft.com/repos/edge stable main"     > /etc/apt/sources.list.d/microsoft-edge.list
+fi
+
 apt-get update
 
 # 导出第三方 apt 源种子: 装机 restore-online-apt.sh 写回 keyring + list/sources
@@ -306,6 +314,12 @@ cp -a /etc/apt/keyrings/docker.asc \
   /etc/apt/keyrings/githubcli-archive-keyring.gpg \
   /etc/apt/keyrings/jenkins-keyring.asc \
   "$OUTDIR/apt-sources/keyrings/"
+# Edge: 种子用官方 postinst 格式 (deb822 + /usr/share/keyrings/microsoft-edge.gpg),
+# 不要写回 legacy microsoft-edge.list, 否则会与包写入的 .sources 重复。
+if [ -f /etc/apt/keyrings/microsoft.asc ]; then
+  gpg --dearmor < /etc/apt/keyrings/microsoft.asc     > "$OUTDIR/apt-sources/keyrings/microsoft-edge.gpg"
+  chmod 644 "$OUTDIR/apt-sources/keyrings/microsoft-edge.gpg"
+fi
 # NodeSource 官方 setup 落在 /usr/share/keyrings + deb822 .sources
 cp -a /usr/share/keyrings/nodesource.gpg "$OUTDIR/apt-sources/keyrings/"
 cp -a /etc/apt/sources.list.d/docker.list \
@@ -314,11 +328,25 @@ cp -a /etc/apt/sources.list.d/docker.list \
   /etc/apt/sources.list.d/jenkins.list \
   /etc/apt/sources.list.d/nodesource.sources \
   "$OUTDIR/apt-sources/sources.list.d/"
+if [ "$ARCH" = "amd64" ]; then
+  cat > "$OUTDIR/apt-sources/sources.list.d/microsoft-edge.sources" <<'ESR'
+### THIS FILE IS AUTOMATICALLY CONFIGURED ###
+# Changes to this file will not be preserved.
+# This file will not be recreated if removed.
+X-Repolib-Name: Microsoft Edge
+Types: deb
+URIs: https://packages.microsoft.com/repos/edge-stable
+Suites: stable
+Components: main
+Architectures: amd64
+Signed-By: /usr/share/keyrings/microsoft-edge.gpg
+ESR
+fi
 cat > "$OUTDIR/apt-sources/README.txt" <<'ASR'
 Third-party apt keyrings + sources captured at fetch time.
 restore-online-apt.sh copies every seed here onto the installed system after
 leaving offline mode (Docker CE, GitHub CLI, NVIDIA container toolkit,
-Jenkins, NodeSource). Online installs never use this directory.
+Jenkins, NodeSource, Microsoft Edge). Online installs never use this directory.
 ASR
 ls -la "$OUTDIR/apt-sources/keyrings" "$OUTDIR/apt-sources/sources.list.d"
 
@@ -339,6 +367,10 @@ SEEDS=(
   "$JAVA_PKG" jenkins fontconfig libharfbuzz0b python3-bcrypt
   nodejs
 )
+# Microsoft Edge 仅 amd64; 非 amd64 跳过以免 apt 解析失败
+if [ "$ARCH" = "amd64" ]; then
+  SEEDS+=(microsoft-edge-stable)
+fi
 IFS=',' read -r -a EXTRA <<< "$EXTRA_PACKAGES"
 for p in "${EXTRA[@]}"; do
   p="$(echo "$p" | xargs)"
