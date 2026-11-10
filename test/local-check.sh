@@ -223,6 +223,48 @@ rm -rf "$ht"
 if [[ "$helper_ok" -eq 1 ]]; then
   pass "ubuntu-mirror.sh normalize / rewrite helper"
 fi
+# 直接执行时 CLI 仍可用 (POSIX $0 文件名判断, 不再用 BASH_SOURCE)
+if [[ "$("$ROOT/tools/ubuntu-mirror.sh" normalize "http://mirrors.tuna.tsinghua.edu.cn/ubuntu")" == "$DEFAULT_MIRROR" ]] \
+   && [[ "$("$ROOT/tools/ubuntu-mirror.sh" default arm64)" == "$DEFAULT_PORTS" ]]; then
+  pass "ubuntu-mirror.sh CLI when executed"
+else
+  fail "ubuntu-mirror.sh CLI when executed"
+fi
+# Dockerfile 默认 /bin/sh 是 dash。#21 的 container-smoke 在 source helper 时
+# 因 ${BASH_SOURCE[0]} 出现 Bad substitution 失败。构建器必须先 SHELL bash；
+# 同时用 dash/sh source 复现原问题：必须成功定义函数且不能报 Bad substitution。
+if awk '
+  $0 ~ /SHELL \["\/bin\/bash", "-c"\]/ { bash_shell = NR }
+  $0 ~ /\. \/tmp\/aib-ubuntu-mirror\.sh/ { src = NR }
+  END { exit !(bash_shell && src && bash_shell < src) }
+' Dockerfile; then
+  pass "Dockerfile sets SHELL bash before sourcing ubuntu-mirror.sh"
+else
+  fail "Dockerfile must set SHELL [\"/bin/bash\", \"-c\"] before sourcing ubuntu-mirror.sh"
+fi
+posix_sh=""
+if command -v dash >/dev/null 2>&1; then
+  posix_sh="dash"
+elif command -v sh >/dev/null 2>&1; then
+  posix_sh="sh"
+fi
+if [[ -n "$posix_sh" ]]; then
+  dash_out="$(mktemp)"
+  set +e
+  # $1 由内层 dash/sh -c 展开，不要让外层 bash 先展开
+  # shellcheck disable=SC2016
+  "$posix_sh" -c '. "$1" && command -v aib_apply_builder_mirrors >/dev/null && command -v aib_normalize_mirror >/dev/null' _ "$ROOT/tools/ubuntu-mirror.sh" >"$dash_out" 2>&1
+  dash_rc=$?
+  set -e
+  if [[ "$dash_rc" -eq 0 ]] && ! grep -qi 'Bad substitution' "$dash_out"; then
+    pass "$posix_sh can source ubuntu-mirror.sh without Bad substitution"
+  else
+    fail "$posix_sh source of ubuntu-mirror.sh failed (rc=$dash_rc): $(tr '\n' ' ' < "$dash_out")"
+  fi
+  rm -f "$dash_out"
+else
+  fail "neither dash nor sh available to reproduce Dockerfile source"
+fi
 # 离线捆绑校验把 ca-certificates 当作必装包, 以便 restore 后的 https 源可用
 if grep -q 'ca-certificates' tools/fetch-offline-bundle.sh \
    && grep -q 'NEED_PKGS=(.*ca-certificates' tools/validate-offline-bundle.sh; then

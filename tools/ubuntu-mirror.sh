@@ -231,23 +231,30 @@ aib_apply_builder_mirrors() {
   fi
 }
 
-# 被直接执行时提供 bootstrap 子命令 (方便容器里验证)。
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  set -euo pipefail
-  cmd="${1:-}"
-  case "$cmd" in
-    bootstrap)
-      aib_bootstrap_apt_mirror "${2:?release}" "${3:?mirror}"
-      ;;
-    normalize)
-      aib_normalize_mirror "${2-}"
-      ;;
-    default)
-      aib_default_ubuntu_mirror "${2:-amd64}"
-      ;;
-    *)
-      echo "用法: $0 bootstrap <release> <mirror> | normalize <url> | default [arch]" >&2
-      exit 2
-      ;;
-  esac
-fi
+# 仅在被直接执行时跑 CLI；被 source 时不要跑（否则会抢调用方参数或直接 exit）。
+# 用 $0 的文件名判断，避免 ${BASH_SOURCE[0]} / [[ ]]：dash/sh source 时那些会立刻
+# Bad substitution（#21 container-smoke 就是这样挂的）。Dockerfile 里是
+# `. /tmp/aib-ubuntu-mirror.sh`，$0 一般是 bash / sh / -c，不会匹配下面的名字。
+# 直接执行 tools/ubuntu-mirror.sh，或拷成 aib-ubuntu-mirror.sh 再执行时，$0 才是脚本名。
+# 函数体里的 [[ 仍是 bash 语法；构建器已用 SHELL bash，其它调用方也是 bash。
+case "${0##*/}" in
+  ubuntu-mirror.sh|aib-ubuntu-mirror.sh)
+    set -euo pipefail
+    cmd="${1:-}"
+    case "$cmd" in
+      bootstrap)
+        aib_bootstrap_apt_mirror "${2:?release}" "${3:?mirror}"
+        ;;
+      normalize)
+        aib_normalize_mirror "${2-}"
+        ;;
+      default)
+        aib_default_ubuntu_mirror "${2:-amd64}"
+        ;;
+      *)
+        echo "用法: $0 bootstrap <release> <mirror> | normalize <url> | default [arch]" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+esac
