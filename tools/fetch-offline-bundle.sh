@@ -44,7 +44,9 @@ RESOLVER_SHA="$(sha256sum "$RESOLVER" 2>/dev/null | cut -c1-16)"
 SKIP_NPM=0
 FORCE=0
 APT_RUNNER="${AIB_APT_RUNNER:-docker}"
-UBUNTU_MIRROR="${UBUNTU_MIRROR:-http://archive.ubuntu.com/ubuntu}"
+# 默认清华源 http (含 -security; apt 走 GPG, http 避免干净容器缺 CA 无法校验证书)。UBUNTU_MIRROR / --ubuntu-mirror 覆盖。
+# 非 amd64/i386 在参数解析后改用 ubuntu-ports (见下方)。
+UBUNTU_MIRROR="${UBUNTU_MIRROR:-}"
 
 usage() {
   cat <<'USAGE'
@@ -66,7 +68,9 @@ usage() {
   --jenkins-plugins "a b"
                         预装 Jenkins 插件 (按捆绑里同一 Jenkins 版本的 update center 解析全部必需依赖)
                         默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger
-  --ubuntu-mirror URL   容器内 Ubuntu 源
+  --ubuntu-mirror URL   抓包时的 Ubuntu 源; 默认清华
+                        http://mirrors.tuna.tsinghua.edu.cn/ubuntu
+                        (非 amd64/i386 默认 .../ubuntu-ports)。含 -security 口袋
   --skip-npm            不打包 npm 全局树 (调试用)
   --apt-runner R        docker (默认) | direct (仅限容器内, 见脚本头注释)
   --force               忽略已有 manifest/fingerprint, 强制重建 (参数变更或缺件时需 --force)
@@ -107,6 +111,14 @@ case "$RELEASE" in
   24.04) RELEASE=noble ;;
   *) die "--release 必须是 jammy|noble (或 22.04|24.04)" ;;
 esac
+
+# --ubuntu-mirror / 环境变量 UBUNTU_MIRROR 优先; 未指定时按架构选清华源
+if [[ -z "$UBUNTU_MIRROR" ]]; then
+  case "$ARCH" in
+    amd64|i386) UBUNTU_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu" ;;
+    *)          UBUNTU_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports" ;;
+  esac
+fi
 
 [[ "$PIN_GITEA" == "latest" || "$PIN_GITEA" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] \
   || die "非法 --pin-gitea: $PIN_GITEA"
@@ -223,7 +235,7 @@ OUTDIR="${FETCH_OUTDIR:-/out}"
 
 echo "== container: $(. /etc/os-release && echo "$PRETTY_NAME") arch=$ARCH =="
 
-# 使用指定 Ubuntu 镜像, 避免容器默认源慢/不可达
+# 使用指定 Ubuntu 镜像 (默认清华, 含 -security 口袋; 与 -updates 走同一 URL)
 cat > /etc/apt/sources.list <<SL
 deb ${MIRROR} ${RELEASE} main restricted universe multiverse
 deb ${MIRROR} ${RELEASE}-updates main restricted universe multiverse

@@ -80,6 +80,93 @@ else
   fail "yaml/order check"
 fi
 
+echo "== default apt mirror is Tsinghua (overridable) =="
+DEFAULT_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+DEFAULT_PORTS="http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports"
+if python3 -c "
+import yaml
+d=yaml.safe_load(open('$tmp/user-data'))
+uris=[x.get('uri') for x in d['autoinstall']['apt']['primary']]
+assert uris==['$DEFAULT_MIRROR'], uris
+"; then
+  pass "render default --mirror is Tsinghua"
+else
+  fail "render default --mirror is Tsinghua"
+fi
+if python3 tools/render-user-data.py \
+  --template autoinstall/user-data.tmpl \
+  --out "$tmp/user-data-mirror" \
+  --password-hash "$HASH" \
+  --mirror http://example.invalid/ubuntu \
+  --ssh-allow-pw true; then
+  :
+else
+  fail "render --mirror override"
+fi
+if python3 -c "
+import yaml
+d=yaml.safe_load(open('$tmp/user-data-mirror'))
+uris=[x.get('uri') for x in d['autoinstall']['apt']['primary']]
+assert uris==['http://example.invalid/ubuntu'], uris
+assert 'tuna.tsinghua' not in str(d['autoinstall']['apt'])
+"; then
+  pass "render --mirror override"
+else
+  fail "render --mirror override"
+fi
+# 全离线时 primary 为空, 不把镜像写进安装器探测路径
+if python3 tools/render-user-data.py \
+  --template autoinstall/user-data.tmpl \
+  --out "$tmp/user-data-off" \
+  --password-hash "$HASH" \
+  --full-offline --offline \
+  --ssh-allow-pw true; then
+  :
+else
+  fail "render full-offline primary"
+fi
+if python3 -c "
+import yaml
+d=yaml.safe_load(open('$tmp/user-data-off'))
+assert d['autoinstall']['apt']['primary']==[]
+assert d['autoinstall']['apt']['fallback']=='offline-install'
+"; then
+  pass "full-offline apt.primary empty"
+else
+  fail "full-offline apt.primary empty"
+fi
+mirror_ok=1
+for f in build-iso.sh tools/fetch-offline-bundle.sh tools/render-user-data.py Dockerfile; do
+  if grep -qF "$DEFAULT_MIRROR" "$f"; then
+    :
+  else
+    fail "default mirror missing in $f"
+    mirror_ok=0
+  fi
+done
+if grep -qF "$DEFAULT_PORTS" tools/fetch-offline-bundle.sh && grep -qF "$DEFAULT_PORTS" Dockerfile; then
+  :
+else
+  fail "ubuntu-ports default missing"
+  mirror_ok=0
+fi
+if grep -q 'mirrors.tuna.tsinghua.edu.cn' software/00-base.sh; then
+  :
+else
+  fail "00-base.sh DNS check should probe Tsinghua"
+  mirror_ok=0
+fi
+# 非 amd64 默认改用 ubuntu-ports (与 fetch-offline-bundle.sh 的 case 字面量对齐)
+if grep -qF '*)          UBUNTU_MIRROR="'"$DEFAULT_PORTS"'"' tools/fetch-offline-bundle.sh; then
+  :
+else
+  fail "fetch-offline-bundle.sh missing arch fallback to ubuntu-ports"
+  mirror_ok=0
+fi
+if [[ "$mirror_ok" -eq 1 ]]; then
+  pass "default mirror strings consistent + ports/override rules"
+fi
+
 echo "== ssh keys late-command absent when no keys =="
 if python3 tools/render-user-data.py \
   --template autoinstall/user-data.tmpl \

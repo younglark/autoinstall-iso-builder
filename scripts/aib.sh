@@ -14,7 +14,8 @@
 #   --docker-arg A   追加一个 docker run 参数, 可重复 (如 --docker-arg --network=host);
 #                    也可用环境变量 AIB_DOCKER_ARGS="--network=host -e HTTPS_PROXY=..." (按空白切分)
 #   (环境变量 AIB_BUILD_ARGS="--network=host ..." 追加到自动 docker build, 如代理/DNS 受限环境;
-#    APT_MIRROR=URL 作为 --build-arg 传给 docker build 换 apt 源)
+#    APT_MIRROR=URL 作为 --build-arg 传给 docker build 换 apt 源;
+#    Dockerfile 默认已是清华源, 空值 APT_MIRROR= 可回到官方源)
 #   --dry-run        只打印将执行的 docker 命令, 不运行 (不需要 docker)
 #   -h, --help
 #
@@ -266,7 +267,7 @@ if [[ "$AUTO_BUILD" -eq 1 ]]; then
     info "重新构建本地镜像 $IMAGE_REF"
     "${BUILD_CMD[@]}" >&2
   elif ! docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
-    info "本地镜像 $IMAGE_REF 不存在, 首次构建 (约 3-10 分钟, 取决于网络; 国内可设 APT_MIRROR=http://mirrors.aliyun.com/ubuntu)"
+    info "本地镜像 $IMAGE_REF 不存在, 首次构建 (约 3-10 分钟, 取决于网络; Dockerfile 默认清华 apt 源, 换源可设 APT_MIRROR=...)"
     "${BUILD_CMD[@]}" >&2
   elif [[ -n "$REVISION" ]]; then
     have_rev="$(docker image inspect -f '{{ index .Config.Labels "aib.revision" }}' "$IMAGE_REF" 2>/dev/null || true)"

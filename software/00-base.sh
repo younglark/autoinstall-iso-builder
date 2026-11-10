@@ -67,7 +67,9 @@ if offline_enabled 2>/dev/null && offline_apt_ready 2>/dev/null; then
     fi
   fi
 else
-  if ! getent hosts archive.ubuntu.com >/dev/null 2>&1; then
+  # 默认源是清华; 同时探测官方源, 避免只有一边能解析时误判 DNS 坏了
+  if ! getent hosts mirrors.tuna.tsinghua.edu.cn >/dev/null 2>&1 \
+     && ! getent hosts archive.ubuntu.com >/dev/null 2>&1; then
     echo "resolv.conf 不可用, 临时写入公共 DNS"
     rm -f /etc/resolv.conf
     {

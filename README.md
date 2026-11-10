@@ -135,7 +135,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 **镜像在本机构建，不从任何 registry 拉取**：
 - 第一次运行任意子命令时，包装脚本发现本地没有 `autoinstall-iso-builder:local`，就用仓库根目录的 `Dockerfile` 自动 `docker build`。**首次约 3–10 分钟**（主要是 apt 下载与 Node tarball，取决于网络；Apple Silicon 给 22.04/amd64 构建时更慢），之后每次运行秒级启动。
 - `git pull` 更新仓库后加 `--rebuild` 重新构建（Docker 层缓存仍生效，通常只重做最后几层）；镜像带 `aib.revision` 标签，脚本发现镜像比仓库旧时会提示。
-- 国内网络：`APT_MIRROR=http://mirrors.aliyun.com/ubuntu ./scripts/aib.sh ...`（PowerShell：`$env:APT_MIRROR='http://mirrors.aliyun.com/ubuntu'`）只影响镜像构建时的 apt 源；DNS/代理受限时可用 `AIB_BUILD_ARGS="--network=host"` 给自动 `docker build` 追加参数。
+- 构建器镜像的 apt 源**默认已是清华**（`http://mirrors.tuna.tsinghua.edu.cn/ubuntu`；arm64 用 `ubuntu-ports`）。要换源：`APT_MIRROR=http://archive.ubuntu.com/ubuntu ./scripts/aib.sh --rebuild ...`（PowerShell：`$env:APT_MIRROR='...'`）；空值 `APT_MIRROR=` 保留 Docker 基础镜像自带的官方源。此项只影响构建器镜像，不影响装完机器的源。DNS/代理受限时可用 `AIB_BUILD_ARGS="--network=host"` 给自动 `docker build` 追加参数。
 
 ```bash
 # macOS / Linux：子命令后面的参数与 build-iso.sh 完全一致
@@ -210,7 +210,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 ```bash
 docker build -t autoinstall-iso-builder:local .                                   # 24.04 基底
 docker build -t autoinstall-iso-builder:local-jammy --build-arg UBUNTU_VERSION=22.04 .
-docker build --build-arg APT_MIRROR=http://mirrors.aliyun.com/ubuntu -t autoinstall-iso-builder:local .   # 换 apt 源
+docker build --build-arg APT_MIRROR=http://archive.ubuntu.com/ubuntu -t autoinstall-iso-builder:local .   # 换回官方源
 ./scripts/aib.sh --rebuild version    # 或让包装脚本重建
 ./scripts/aib.sh --image registry.example.com/aib:1 build ...      # 使用自建镜像
 ```
@@ -252,8 +252,7 @@ chmod +x build-iso.sh test/qemu-smoke.sh tools/*.py software/*.sh
                --out out/ubuntu-24.04.1-ci-node.iso \
                --hostname ci-node01 --username ops \
                --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
-               --packages "vim,tmux,net-tools" \
-               --mirror http://mirrors.aliyun.com/ubuntu
+               --packages "vim,tmux,net-tools"
 
 # 3. 无人值守冒烟（QEMU/CI）需加 --auto-disk，否则会停在选盘页
 ./build-iso.sh --iso ubuntu-24.04.1-live-server-amd64.iso                --out out/ubuntu-24.04.1-ci-node-autodisk.iso                --hostname ci-node01 --username ops                --password-hash "$(openssl passwd -6 'Ch@ngeMe')"                --auto-disk
@@ -353,6 +352,30 @@ cat /var/log/autoinstall/20-docker.log
 
 ---
 
+## 默认 apt 源（清华镜像）
+
+抓离线包、构建 ISO，以及装完机器上的 Ubuntu apt（含 `-security` 口袋），**默认都走清华大学开源镜像**：
+
+- amd64 / i386：`http://mirrors.tuna.tsinghua.edu.cn/ubuntu`
+- 其他架构（`fetch-offline-bundle.sh --arch` 非 amd64/i386 时）：`http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports`
+
+默认用 **http** 而不是 https。干净的 `ubuntu:24.04` 容器、以及安装器 chroot 在装好 `ca-certificates` 之前，https 会因 TLS 证书无法校验而失败。apt 包本身由 GPG 签名校验，走 http 是安全的。需要 https 时再显式传 `--ubuntu-mirror` / `--mirror`。
+
+清华同步了 `noble-security` / `jammy-security`，因此不再单独指向 `security.ubuntu.com`。官方源把 security 口袋放到独立主机，功能和内容与镜像站的 `$release-security` 相同。
+
+覆盖方式：
+
+| 场景 | 怎么换 |
+|---|---|
+| 装完机器的 apt 源 | `./build-iso.sh --mirror URL`（例如官方 `http://archive.ubuntu.com/ubuntu`，或内网源） |
+| 抓离线包时的 Ubuntu 源 | `./tools/fetch-offline-bundle.sh --ubuntu-mirror URL`，或环境变量 `UBUNTU_MIRROR` |
+| `build-iso.sh --fetch-offline` | 把上面的 `--mirror` 原样传给抓包，两处保持一致 |
+| 构建器 Docker 镜像的 apt | `APT_MIRROR=URL`（arm64 另有 `APT_PORTS_MIRROR`）；`APT_MIRROR=` 空值保留基础镜像自带官方源 |
+
+**装完系统的源是合理的**：在线安装时 Subiquity 按 `apt.primary` 写出 sources，之后一直用 `--mirror`（默认清华）。全离线安装过程不访问镜像，装完由 `restore-online-apt.sh` 恢复安装器写下的同一份 Ubuntu 源，并写回 Docker / Jenkins 等第三方源。境外使用或需要官方源时，构建时加上 `--mirror http://archive.ubuntu.com/ubuntu` 即可。当前 ISO 构建以 amd64 为主；自行给非 amd64 抓离线包时，未指定 `--ubuntu-mirror` 会自动改用 `ubuntu-ports`。
+
+第三方源（Docker CE、Jenkins、NodeSource、GitHub CLI、NVIDIA toolkit）以及 npm / Jenkins 插件 / Gitea 二进制，不走 Ubuntu 镜像，也不受 `--mirror` 影响。
+
 ## 参数一览
 
 | 参数 | 说明 |
@@ -363,7 +386,7 @@ cat /var/log/autoinstall/20-docker.log
 | `--username` | 默认 `ubuntu`（`git` 与 Gitea 系统用户冲突，会被拒绝） |
 | （都不传密码） | `--password` / `--password-hash` 都没给时，使用**默认密码 `ubuntu1990`**（构建时告警），Gitea / Jenkins 管理员同样是 `ubuntu` / `ubuntu1990`。这是公开的默认值，**装完请立即改**：`passwd`，并在 Gitea / Jenkins 网页里改管理员密码 |
 | `--packages` | 逗号分隔、**不要空格**（如 `vim,curl,htop`）；走 subiquity 的 apt（第三方包走 `software/`） |
-| `--mirror` | 内网源务必替换，否则每台机器都从公网拉 |
+| `--mirror` | 默认清华 `http://mirrors.tuna.tsinghua.edu.cn/ubuntu`（含 `-security`），写入 autoinstall `apt.primary`，**装完系统 apt 也用这个源**。内网源或官方源请显式覆盖，例如 `--mirror http://archive.ubuntu.com/ubuntu`。`build-iso.sh --fetch-offline` 会把同一 URL 传给抓包 |
 | `--no-provision` | 不执行 `software/`，只做裸装机 |
 | `--skip "30 70"` | 跳过脚本：编号前缀或完整名均可（`30` / `30-jenkins`） |
 | `--strict` | 任一软件装失败就中止安装（默认记日志继续） |
@@ -422,7 +445,7 @@ cat /var/log/autoinstall/20-docker.log
 - `--pin-grok` / `--pin-opencode` / `--pin-openmausbot` / `--pin-gitea` 给具体版本可避免 `latest` 漂移。默认仍为 `latest`。
 - `--pin-node 24` 只钉主版本；NodeSource、Docker、Jenkins 仍跟随其稳定仓库，尚未做完整 apt 版本锁。
 - Jenkins apt 源自 2026-01 起需 `jenkins.io-2026.key`（2023 密钥已过期）；本仓库脚本已切换。若要求严格复现，应使用内网快照源并固定 `.deb` 版本。当前默认行为不变，不承诺 bit-for-bit 可复现。
-- `apt.primary` 暂保留 legacy 格式以兼容 22.04 的旧版 Subiquity（且安装器刷新关闭）；24.04-only 项目可迁移到 `mirror-selection.primary`。
+- `apt.primary` 暂保留 legacy 格式以兼容 22.04 的旧版 Subiquity（且安装器刷新关闭）；24.04-only 项目可迁移到 `mirror-selection.primary`。默认 URI 是清华源，详见下方「默认 apt 源」。
 
 ### 快速校验与 CI
 
@@ -467,7 +490,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 | ISO | 写入 `/offline/{apt,apt-sources,npm,node,unity-cli,godot,gitea,jenkins-plugins,manifest.json}` |
 | 装机 late-commands | 拷到 `/opt/offline`，临时只启用 `deb [trusted=yes] file:/opt/offline/apt ./`，再跑 `software/`（`OFFLINE=1`） |
 | `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装；Jenkins 插件从 `jenkins-plugins/` 拷贝 |
-| `restore-online-apt.sh` | 卸掉离线 pin、恢复 Ubuntu 官方源后，把捆绑内 **全部** `apt-sources/` 种子写回（Docker CE / GitHub CLI / NVIDIA toolkit / Jenkins / NodeSource；与在线脚本同一批 URL/密钥）。装机时可能仍无网，此处不做 `apt update`；联网后即可收安全更新。纯在线构建不会调用本脚本 |
+| `restore-online-apt.sh` | 卸掉离线 pin、恢复安装器写入的 Ubuntu 源（即 `--mirror`，默认清华，含 `-security`）后，把捆绑内 **全部** `apt-sources/` 种子写回（Docker CE / GitHub CLI / NVIDIA toolkit / Jenkins / NodeSource；与在线脚本同一批 URL/密钥）。装机时可能仍无网，此处不做 `apt update`；联网后即可收安全更新。纯在线构建不会调用本脚本 |
 
 体积与缓存：
 

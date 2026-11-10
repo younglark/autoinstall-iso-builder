@@ -14,7 +14,7 @@
     --platform P    覆盖 docker --platform (默认: 需要 apt 解析的步骤强制 linux/amd64)
     --docker-arg A  追加一个 docker run 参数, 可重复 (如 --docker-arg --network=host);
                     也可用环境变量 AIB_DOCKER_ARGS (按空白切分)
-    (环境变量 AIB_BUILD_ARGS 追加到自动 docker build, 如 --network=host; APT_MIRROR 换 apt 源)
+    (环境变量 AIB_BUILD_ARGS 追加到自动 docker build, 如 --network=host; APT_MIRROR 换 apt 源, Dockerfile 默认已是清华源)
     --dry-run       只打印将执行的 docker 命令, 不运行 (不需要 docker)
     -h, --help
 
@@ -238,7 +238,7 @@ if ($Build) {
   if (-not $doBuild) {
     & docker image inspect $ImageRef *> $null
     if ($LASTEXITCODE -ne 0) {
-      Info "本地镜像 $ImageRef 不存在, 首次构建 (约 3-10 分钟, 取决于网络; 国内可设 `$env:APT_MIRROR='http://mirrors.aliyun.com/ubuntu')"
+      Info "本地镜像 $ImageRef 不存在, 首次构建 (约 3-10 分钟, 取决于网络; Dockerfile 默认清华 apt 源, 换源可设 `$env:APT_MIRROR)"
       $doBuild = $true
     } elseif ($Revision) {
       $haveRev = (& docker image inspect -f '{{ index .Config.Labels "aib.revision" }}' $ImageRef 2>$null)

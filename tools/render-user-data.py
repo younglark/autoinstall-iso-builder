@@ -81,6 +81,10 @@ def yaml_quoted_list_block(items, indent="    "):
     return "\n".join(lines)
 
 
+# 默认 apt 源: 清华大学开源镜像 http (含 -security; apt 走 GPG, 避免干净环境缺 CA)。与 build-iso.sh / fetch-offline-bundle.sh 保持一致。
+DEFAULT_UBUNTU_MIRROR = "http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+
+
 def build_apt_primary_block(mirror: str, full_offline: bool) -> str:
     """legacy primary 格式. 全离线时置空列表, 配合 fallback: offline-install 避免镜像探测卡住。"""
     if full_offline:
@@ -268,7 +272,7 @@ def main() -> int:
     ap.add_argument("--locale", default="en_US.UTF-8")
     ap.add_argument("--keyboard", default="us")
     ap.add_argument("--timezone", default="Asia/Shanghai")
-    ap.add_argument("--mirror", default="http://archive.ubuntu.com/ubuntu")
+    ap.add_argument("--mirror", default=DEFAULT_UBUNTU_MIRROR)
     ap.add_argument("--packages", default="", help="逗号分隔")
     ap.add_argument("--ssh-allow-pw", default="true")
     ap.add_argument("--ssh-authorized-keys", default="")
