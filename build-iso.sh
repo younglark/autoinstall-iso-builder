@@ -11,7 +11,7 @@
 # 因此: 不需要 root, 不需要 loop 挂载, BIOS/UEFI 双启动与 Secure Boot 全部保留。
 #
 # 依赖: xorriso (>=1.5), python3 (+PyYAML 可选), openssl (仅明文密码时需要)
-# 环境: Linux / WSL2。Windows 原生不支持。
+# 环境: Linux / WSL2 原生; macOS / Windows 用容器 (scripts/aib.sh / scripts/aib.ps1)。
 # =============================================================================
 set -Eeuo pipefail
 
@@ -337,7 +337,7 @@ if [[ "${FETCH_OFFLINE:-0}" -eq 1 ]]; then
     esac
     warn "未识别 ISO_RELEASE, 按文件名猜测: $REL_HINT"
   fi
-  OB_OUT="${OFFLINE_BUNDLE:-$SCRIPT_DIR/cache/offline-bundles/${REL_HINT}-amd64}"
+  OB_OUT="${OFFLINE_BUNDLE:-${OFFLINE_CACHE_ROOT:-$SCRIPT_DIR/cache/offline-bundles}/${REL_HINT}-amd64}"
   log "自动抓取离线捆绑 -> $OB_OUT (release=$REL_HINT force=${FORCE_FETCH:-0})"
   FETCH_ARGS=(--release "$REL_HINT" --out "$OB_OUT" --packages "$PACKAGES"
     --pin-node "$PIN_NODE_MAJOR" --pin-grok "$PIN_GROK"
