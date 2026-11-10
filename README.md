@@ -39,6 +39,7 @@
 | `30-jenkins.sh` | Jenkins LTS | 优先 JDK 21（不够退 17），jenkins 用户加入 docker 组；**零配置**：跳过安装向导、装机时建好管理员、预装 Pipeline / Git / Gitea / Docker Pipeline / Docker Cloud / Rebuild / AnsiColor / Parameterized Trigger 等插件（含全部依赖），监听 **0.0.0.0:8080** |
 | `35-microsoft-edge.sh` | Microsoft Edge 稳定版 | **仅 Desktop + amd64 默认安装**（Server / 非 amd64 自动跳过，`--skip 35` 也可跳过）。官方 apt 源 `packages.microsoft.com/repos/edge`；设为默认浏览器（`update-alternatives` + 系统/用户 `mimeapps.list`）；GNOME 收藏夹用 Edge 替换 Firefox（Firefox **保留**）；策略关掉首次运行提示，**不**关闭自动更新 |
 | `36-x11vnc-xorg.sh` | 关 Wayland / x11vnc（**可选，默认不装**） | 仅 Desktop。`--disable-wayland` 让 GDM 登录界面、锁屏、会话都走 Xorg；`--x11vnc` 预装 x11vnc，**开机即可连**（登录界面、锁屏、登录后的会话），隐含关 Wayland。详见下文「远程桌面」 |
+| `37-flclash.sh` | FlClash（ClashMeta 图形客户端） | **仅 Desktop 默认安装**（Server / 非 amd64·arm64 自动跳过；`--no-flclash` 或 `--skip 37` 也可跳过）。官方 GitHub Release 的 linux `.deb`（同级 `SHA256SUMS` 校验），**始终安装最新稳定版**。**只装应用**：不写订阅、不设系统代理、不启用 TUN、不装开机自启。详见下文 |
 | `40-nodejs.sh` | Node.js 24 | NodeSource 优先，官方 tarball 兜底 |
 | `45-gitea.sh` | Gitea（最新稳定版，可 `--pin-gitea`） | 官方 linux-amd64 二进制（sha256 校验）→ `/usr/local/bin/gitea`；系统用户 `git`；SQLite；**装机阶段写好配置并创建管理员**，开机 `gitea.service` 自启。监听 **0.0.0.0:3000**（不与 Jenkins 8080 冲突），开放注册，LFS 开，`OFFLINE_MODE`。SSH 克隆走系统 OpenSSH：`git@host:user/repo.git` |
 | `50-grok.sh` | xAI Grok Build | `@xai-official/grok`，**官方包**，不是社区的 `@vibe-kit/grok-cli` |
@@ -56,6 +57,20 @@
 - 若存在 GNOME schemas，用 Edge 替换收藏夹里的 Firefox（`90_autoinstall-microsoft-edge.gschema.override`）。
 - 写入 `/etc/opt/edge/policies/managed/10-autoinstall.json`：`HideFirstRunExperience=true`、`DefaultBrowserSettingEnabled=false`，避免首次运行弹窗；**不**关闭自动更新。
 - 全离线时从捆绑安装，装完由 `restore-online-apt.sh` 写回 Microsoft apt 源，联网后可更新。
+
+### FlClash（仅 Desktop）
+
+默认只在 Desktop 预装 [FlClash](https://github.com/chen08209/FlClash)（GPL-3.0，ClashMeta 图形客户端）。Server 与非 amd64/arm64 自动跳过。装的是官方 GitHub Release 的 `FlClash-<版>-linux-<架构>.deb`，用同一发布里的 `SHA256SUMS` 校验（没有 sums 时记录并校验下载文件的 sha256）。**始终跟随最新稳定版**（GitHub `releases/latest`，不含预发布）。
+
+**只装应用，不做任何代理配置**：不写入订阅/配置文件、不设系统代理、不启用 TUN、不安装或启用 `flclash-helper.service`（应用在用户需要时会自己写）。装完从应用菜单打开，由用户自行添加配置。
+
+跳过：`--no-flclash`，或 `--skip 37` / `--skip 37-flclash`。卸装：
+
+```bash
+sudo apt remove FlClash
+```
+
+若曾在应用内开启系统代理或 TUN，请先在应用里关掉再卸载。全离线时 deb 与 apt 依赖（`libayatana-appindicator3-1`、`libsecret-1-0` 及其闭包）都在捆绑里，装机不访问 GitHub。
 
 ### 远程桌面：关闭 Wayland / x11vnc（仅 Desktop，可选）
 
@@ -166,7 +181,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 
 ### 容量与依赖提醒
 
-- 目标盘预留 **≥ 25 GB**（Docker 镜像 + Jenkins workspace 很吃空间）；这套预装本身约占 1.2–1.5 GB（另加 Godot 解压约 140 MB、Gitea 二进制约 115 MB，数据目录随后增长）。
+- 目标盘预留 **≥ 25 GB**（Docker 镜像 + Jenkins workspace 很吃空间）；这套预装本身约占 1.2–1.5 GB（另加 Godot 解压约 140 MB、Gitea 二进制约 115 MB、FlClash deb 约 40 MB，数据目录随后增长）。
 - OpenMausBot 是 Electron 应用，npm 包会拉下较大体积的运行时；服务器上只用 `openmausbot serve`，不需要 X11。
 - 首次开机后要跑一次 `apt-get update`——`99-cleanup.sh` 为了缩体积清掉了 `/var/lib/apt/lists`。
 
@@ -174,7 +189,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 
 加：在 `software/` 放一个 `85-你的东西.sh`，按现有脚本的约定（`set -euo pipefail`、结尾自带校验命令、失败即非零退出）即可，无需改主脚本。
 
-减：`--skip "30 70"` 跳过 Jenkins 和 OpenMausBot；`--skip "30-jenkins 70-openmausbot"` 等价。整套不要就 `--no-provision`。
+减：`--skip "30 70"` 跳过 Jenkins 和 OpenMausBot；`--skip "30-jenkins 70-openmausbot"` 等价。Desktop 上不装 FlClash 用 `--no-flclash`（或 `--skip 37`）。整套不要就 `--no-provision`。
 
 ---
 
@@ -364,7 +379,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso --uefi
 | 选盘 | 默认停在选盘页 | 同左：图形安装器停在「安装类型/磁盘」页，确认后继续 |
 | 配置投递 | `/nocloud` + 内核参数 | 同左；另在 ISO 根放一份 `/autoinstall.yaml` 兜底（Subiquity 优先级：内核参数 > live 根 > cloud-config > 介质根，正常不会用到） |
 
-`software/*.sh` 在 Desktop 目标上大体不用改：Desktop minimal 不带 curl/git/openssh-server，`00-base`/`10-openssh` 会补装；已装的包（ca-certificates、gnupg、jq 等）照旧跳过。GitHub CLI / Docker / NVIDIA Container Toolkit / Jenkins / Node / Gitea / Grok / OpenCode / OpenMausBot / Unity CLI / Godot 与 Server 相同（Toolkit **不含** GPU 驱动；Unity CLI **不含** Editor；Godot **不含** export templates）。**例外**：`35-microsoft-edge.sh` 只在 Desktop + amd64 安装，并把 Edge 设为默认浏览器（Firefox 保留）；Server 自动跳过。
+`software/*.sh` 在 Desktop 目标上大体不用改：Desktop minimal 不带 curl/git/openssh-server，`00-base`/`10-openssh` 会补装；已装的包（ca-certificates、gnupg、jq 等）照旧跳过。GitHub CLI / Docker / NVIDIA Container Toolkit / Jenkins / Node / Gitea / Grok / OpenCode / OpenMausBot / Unity CLI / Godot 与 Server 相同（Toolkit **不含** GPU 驱动；Unity CLI **不含** Editor；Godot **不含** export templates）。**例外**：`35-microsoft-edge.sh` 只在 Desktop + amd64 安装，并把 Edge 设为默认浏览器（Firefox 保留）；`37-flclash.sh` 只在 Desktop + amd64/arm64 安装 FlClash（不配置代理）；Server 自动跳过。
 
 ### 离线：Desktop 能不能全离线？
 
@@ -433,7 +448,7 @@ cat /var/log/autoinstall/20-docker.log
 
 **装完系统的源是合理的**：在线安装时 Subiquity 按 `apt.primary` 写出 sources，之后一直用 `--mirror`（默认清华）。全离线安装过程不访问镜像，装完由 `restore-online-apt.sh` 恢复安装器写下的同一份 Ubuntu 源，并写回 Docker / Jenkins 等第三方源。境外使用或需要官方源时，构建时加上 `--mirror http://archive.ubuntu.com/ubuntu` 即可。当前 ISO 构建以 amd64 为主；自行给非 amd64 抓离线包时，未指定 `--ubuntu-mirror` 会自动改用 `ubuntu-ports`。
 
-第三方源（Docker CE、Jenkins、NodeSource、GitHub CLI、NVIDIA toolkit、Microsoft Edge）以及 npm / Jenkins 插件 / Gitea 二进制，不走 Ubuntu 镜像，也不受 `--mirror` 影响。
+第三方源（Docker CE、Jenkins、NodeSource、GitHub CLI、NVIDIA toolkit、Microsoft Edge）以及 npm / Jenkins 插件 / Gitea 二进制 / FlClash GitHub Release，不走 Ubuntu 镜像，也不受 `--mirror` 影响。
 
 ## 参数一览
 
@@ -464,6 +479,7 @@ cat /var/log/autoinstall/20-docker.log
 | `--pin-grok / --pin-opencode / --pin-openmausbot VER` | npm 包版本（默认 latest）；亦可用 `PIN_GROK` / `PIN_OPENCODE` / `PIN_OPENMAUSBOT` |
 | `--pin-unity-cli VER` | Unity CLI 版本（默认拉 stable，若无则 beta）；亦可用 `PIN_UNITY_CLI` |
 | `--pin-gitea VER` | Gitea 版本（默认 `latest`，从 `dl.gitea.com/gitea/version.json` 解析；亦可 `PIN_GITEA=28.3.0`） |
+| `--no-flclash` | 不预装 FlClash（等价 `--skip 37` / `--skip 37-flclash`）。Desktop 默认预装最新稳定版（官方 GitHub Release + `SHA256SUMS`） |
 | `--gitea-admin-user U` | Gitea 管理员用户名，默认 = `--username` |
 | `--gitea-admin-password P` | Gitea 管理员密码（至少 8 位），默认 = `--password` 明文；只给了 `--password-hash` 时装机写入 `/root/gitea-admin-password` |
 | `--gitea-admin-email E` | Gitea 管理员邮箱，默认 `<用户名>@localhost` |
@@ -504,7 +520,7 @@ cat /var/log/autoinstall/20-docker.log
 ### 完整性与版本复现
 
 - 推荐先验证官方 `SHA256SUMS.gpg`（用 Ubuntu CD Image signing key），再传 `--iso-sha256sums SHA256SUMS`；脚本只验证 SHA256，不替代 GPG 签名验证。
-- `--pin-grok` / `--pin-opencode` / `--pin-openmausbot` / `--pin-gitea` 给具体版本可避免 `latest` 漂移。默认仍为 `latest`。
+- `--pin-grok` / `--pin-opencode` / `--pin-openmausbot` / `--pin-gitea` 给具体版本可避免 `latest` 漂移。默认仍为 `latest`。FlClash 始终跟随最新稳定版，不能钉扎。
 - `--pin-node 24` 只钉主版本；NodeSource、Docker、Jenkins 仍跟随其稳定仓库，尚未做完整 apt 版本锁。
 - Jenkins apt 源自 2026-01 起需 `jenkins.io-2026.key`（2023 密钥已过期）；本仓库脚本已切换。若要求严格复现，应使用内网快照源并固定 `.deb` 版本。当前默认行为不变，不承诺 bit-for-bit 可复现。
 - `apt.primary` 暂保留 legacy 格式以兼容 22.04 的旧版 Subiquity（且安装器刷新关闭）；24.04-only 项目可迁移到 `mirror-selection.primary`。默认 URI 是清华源，详见下方「默认 apt 源」。
@@ -519,7 +535,7 @@ bash test/local-check.sh
 
 ### 全离线模式（`--offline` + `--offline-bundle`）
 
-目标：装机过程**零外网请求**，装完仍有 Docker / Jenkins / Node 24 / Grok / OpenCode / OpenMausBot / Unity CLI / Godot / Gitea。
+目标：装机过程**零外网请求**，装完仍有 Docker / Jenkins / Node 24 / Grok / OpenCode / OpenMausBot / Unity CLI / Godot / Gitea / FlClash（Desktop）。
 
 ```bash
 # 1) 构建期联网抓取捆绑（按发行版缓存，可复用）
@@ -548,16 +564,16 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 | 阶段 | 行为 |
 |---|---|
-| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource + Microsoft Edge + x11vnc），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
+| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource + Microsoft Edge + x11vnc + FlClash 的 apt 依赖），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）与 FlClash linux `.deb`（`flclash/`，约 40 MB，官方 GitHub `SHA256SUMS` 校验）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
 | ISO | 写入 `/offline/{apt,apt-sources,npm,node,unity-cli,godot,gitea,jenkins-plugins,manifest.json}` |
 | 装机 late-commands | 拷到 `/opt/offline`，临时只启用 `deb [trusted=yes] file:/opt/offline/apt ./`，再跑 `software/`（`OFFLINE=1`） |
-| `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装；Jenkins 插件从 `jenkins-plugins/` 拷贝 |
+| `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装；FlClash 从 `flclash/` 安装（依赖来自本地 apt 池）；Jenkins 插件从 `jenkins-plugins/` 拷贝 |
 | `restore-online-apt.sh` | 卸掉离线 pin、恢复安装器写入的 Ubuntu 源（即 `--mirror`，默认清华 https，含 `-security`）后，把捆绑内 **全部** `apt-sources/` 种子写回（Docker CE / GitHub CLI / NVIDIA toolkit / Jenkins / NodeSource / Microsoft Edge；与在线脚本同一批 URL/密钥）。装机时可能仍无网，此处不做 `apt update`；联网后即可收安全更新。纯在线构建不会调用本脚本 |
 
 体积与缓存：
 
 - 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；`manifest.json` 含 `fingerprint`（schema 3：release/arch/pins/seeds，含 `apt-sources`、Jenkins 插件列表与解析器指纹）。指纹一致才复用，否则或旧格式需 `--force` 重建。构建时 `validate-offline-bundle.sh` 会核对 apt 种子包、`apt-sources/` keyring+list，以及 `unity-cli/`、`godot/`、`gitea/`、`jenkins-plugins/`（lock 里每个插件都在且 sha256 与 lock 一致、请求列表与 `--jenkins-plugins` 一致）等目录；失败则提示 `--force` / `--force-fetch`。
-- **避免重复下载**（`--force` 也一样）：抓包前先按「空缓存」解析出本次需要的全部 deb（文件名 + 大小 + Packages 索引里的哈希），从本地 deb 缓存 `cache/apt-archives/<release>-<arch>/` 和旧捆绑的 `apt/` 里把**文件名、大小、哈希都一致**的直接放进 apt 的 archives 目录（apt 跳过下载前还会按索引里的 SHA256/SHA512 再校验一次，不一致就重下），apt 只下载缺的；新下的 deb 回写缓存。日志会打印「复用 N，新下载 M」。Unity CLI / Gitea / Godot / Jenkins 插件 / Node tarball 在版本不变且校验和一致时也直接用旧捆绑里的文件。缓存只增不删，`--prune-apt-cache` 清掉本次没用到的；`--apt-cache DIR` 换位置，`--no-apt-cache` 不用缓存。指纹只看捆绑内容和参数，跟缓存无关；产出和不用缓存时一样（同一批 deb）。
+- **避免重复下载**（`--force` 也一样）：抓包前先按「空缓存」解析出本次需要的全部 deb（文件名 + 大小 + Packages 索引里的哈希），从本地 deb 缓存 `cache/apt-archives/<release>-<arch>/` 和旧捆绑的 `apt/` 里把**文件名、大小、哈希都一致**的直接放进 apt 的 archives 目录（apt 跳过下载前还会按索引里的 SHA256/SHA512 再校验一次，不一致就重下），apt 只下载缺的；新下的 deb 回写缓存。日志会打印「复用 N，新下载 M」。Unity CLI / Gitea / Godot / FlClash / Jenkins 插件 / Node tarball 在版本不变且校验和一致时也直接用旧捆绑里的文件。缓存只增不删，`--prune-apt-cache` 清掉本次没用到的；`--apt-cache DIR` 换位置，`--no-apt-cache` 不用缓存。指纹只看捆绑内容和参数，跟缓存无关；产出和不用缓存时一样（同一批 deb）。
 - `--fetch-offline` 用 **ISO 识别到的 release**（非仅文件名）选 jammy/noble；加 `--force-fetch` 等价于给 fetch 传 `--force`。
 - npm/`node` 打包使用 `--owner=0 --group=0`；安装时 `tar --no-same-owner`，Node 解到 `/opt/node-…` 再 symlink，避免 `/usr/local` 属主变成 uid 1000。
 - 全离线装完写回第三方 apt 源：`apt-sources/` 在 fetch 时按在线脚本同款材料抓取；`restore-online-apt.sh` **全量写回**捆绑内种子（不按 `--skip` 裁剪）。旧捆绑缺 `apt-sources/` 时需 `--force` 重建。
@@ -578,6 +594,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 - Unity CLI 是 CDN 二进制（`public-cdn.cloud.unity3d.com`）→ 全离线捆绑的 `unity-cli/`；无捆绑时脚本会联网下载
 - Godot 是官方 zip（GitHub releases / downloads.godotengine.org，固定 **4.7.2**）→ 全离线捆绑的 `godot/`；无捆绑时脚本会联网下载；**不含** export templates
 - Gitea 是官方二进制（`dl.gitea.com`，默认 latest，可用 `--pin-gitea`）→ 全离线捆绑的 `gitea/`；无捆绑时脚本会联网下载并用官方 `.sha256` 校验
+- FlClash 是官方 GitHub Release 的 linux `.deb`（始终跟随最新稳定版）→ 全离线捆绑的 `flclash/` 以及 apt 池里的依赖；无捆绑时脚本会联网下载并用官方 `SHA256SUMS` 校验。仓库没有为 GitHub 资产配置国内代理，抓包/在线安装需要能访问 `github.com`
 
 真正要全离线，建议改为「内网镜像源 + 自建 npm registry（Verdaccio）」，比往 ISO 里塞依赖靠谱得多。
 
@@ -656,6 +673,6 @@ xorriso -indev ubuntu.iso -outdev out.iso \
 
 - 口令是哈希，不是明文；哈希本身也别提交到公开仓库。若用 `--password` 构建，Gitea / Jenkins 管理员明文会短暂出现在 ISO 的 `/provision/gitea-admin.secret` / `jenkins-admin.secret`（0600），装机后从目标机删除；拿到 ISO 的人在安装前仍可能读到，请勿把此类 ISO 公开分发。
 - 没有任何 API key / 私钥进镜像。SSH **公钥**可通过 `--ssh-authorized-keys` 注入，属于公开信息；私钥绝不注入。
-- 目标机磁盘 ≥ 25 GB，且装机时能访问 cli.github.com / docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / packages.microsoft.com（Desktop 上的 Microsoft Edge） / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）、`github.com/godotengine/godot` 或 `downloads.godotengine.org`（Godot 4.7.2），以及 `dl.gitea.com`（Gitea 二进制与 sha256）与 `updates.jenkins.io` 及其下载镜像（Jenkins 插件）。全离线捆绑可免除这些外网依赖。
+- 目标机磁盘 ≥ 25 GB，且装机时能访问 cli.github.com / docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / packages.microsoft.com（Desktop 上的 Microsoft Edge） / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）、`github.com/godotengine/godot` 或 `downloads.godotengine.org`（Godot 4.7.2），`github.com/chen08209/FlClash`（Desktop 上的 FlClash linux `.deb` 与 `SHA256SUMS`），以及 `dl.gitea.com`（Gitea 二进制与 sha256）与 `updates.jenkins.io` 及其下载镜像（Jenkins 插件）。全离线捆绑可免除这些外网依赖。
 
 这条线一旦破，后面所有「镜像管理」都失去意义。

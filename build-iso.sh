@@ -73,6 +73,7 @@ JENKINS_PLUGINS="${JENKINS_PLUGINS:-$DEFAULT_JENKINS_PLUGINS}"
 DISABLE_WAYLAND=0
 X11VNC=0
 VNC_PASSWORD=""
+NO_FLCLASH=0
 
 usage() {
   cat <<'USAGE'
@@ -125,6 +126,8 @@ usage() {
   --pin-openmausbot VER npm 版 openmausbot, 默认 latest (PIN_OPENMAUSBOT)
   --pin-unity-cli VER  Unity CLI 版本, 默认拉 latest/latest-beta (PIN_UNITY_CLI)
   --pin-gitea VER       Gitea 版本 (如 28.3.0), 默认 latest (PIN_GITEA)
+  --no-flclash          不预装 FlClash (等价于 --skip 37 / --skip 37-flclash);
+                        Desktop 默认预装最新稳定版 (官方 GitHub Release + SHA256SUMS)
   --gitea-admin-user U  Gitea 管理员用户名, 默认 = --username
   --gitea-admin-password P
                         Gitea 管理员密码 (>=8 位), 默认 = --password 明文;
@@ -218,6 +221,7 @@ while [[ $# -gt 0 ]]; do
     --pin-openmausbot) PIN_OPENMAUSBOT="$2"; shift 2 ;;
     --pin-unity-cli)  PIN_UNITY_CLI="$2"; shift 2 ;;
     --pin-gitea)      PIN_GITEA="$2"; shift 2 ;;
+    --no-flclash)     NO_FLCLASH=1; shift ;;
     --gitea-admin-user) GITEA_ADMIN_USER="$2"; shift 2 ;;
     --gitea-admin-password) GITEA_ADMIN_PASSWORD="$2"; shift 2 ;;
     --gitea-admin-email) GITEA_ADMIN_EMAIL="$2"; shift 2 ;;
@@ -277,6 +281,12 @@ _pin_ok "$PIN_OPENMAUSBOT" || die "非法 --pin-openmausbot: $PIN_OPENMAUSBOT"
 [[ -z "$PIN_UNITY_CLI" || "$PIN_UNITY_CLI" =~ ^[a-zA-Z0-9._+-]+$ ]] || die "非法 --pin-unity-cli: $PIN_UNITY_CLI"
 [[ "$PIN_GITEA" == "latest" || "$PIN_GITEA" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] \
   || die "非法 --pin-gitea: $PIN_GITEA (latest 或 X.Y.Z, 如 28.3.0)"
+if [[ "${NO_FLCLASH:-0}" -eq 1 ]]; then
+  case " $PROVISION_SKIP " in
+    *" 37 "*|*" 37-flclash "*) ;;
+    *) PROVISION_SKIP="${PROVISION_SKIP:+$PROVISION_SKIP }37-flclash" ;;
+  esac
+fi
 
 # Gitea 管理员 (45-gitea.sh)。默认取系统用户名与明文密码
 [[ -n "$GITEA_ADMIN_USER" ]] || GITEA_ADMIN_USER="$USERNAME_"
@@ -637,6 +647,8 @@ if [[ "$PROVISION" -eq 1 ]]; then
   chmod 0755 "$WORK/provision/ubuntu-mirror.sh"
   # Jenkins 插件解析器 (30-jenkins.sh 在线路径用; 与 fetch-offline-bundle 同一份)
   cp "$SCRIPT_DIR/tools/resolve-jenkins-plugins.py" "$WORK/provision/"
+  cp "$SCRIPT_DIR/tools/flclash-release.sh" "$WORK/provision/"
+  chmod 0755 "$WORK/provision/flclash-release.sh"
   # 逐行 %q 写入, 保证 source 安全 (旧写法 EXTRA_APT_PACKAGES=vim, htop 会把 htop 当命令执行)
   {
     echo "# 由 build-iso.sh 生成 (printf %q; 请勿手改未加引号的值)"
