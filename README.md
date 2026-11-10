@@ -36,7 +36,7 @@
 | `15-github-cli.sh` | GitHub CLI (`gh`) | 官方 apt 源（cli.github.com）；**不**执行 `gh auth` |
 | `20-docker.sh` | Docker CE | 官方仓库（非 `docker.io`），含 compose v2 / buildx，**配了日志轮转** |
 | `25-nvidia-container-toolkit.sh` | NVIDIA Container Toolkit | 官方仓库；`nvidia-ctk` 合并 Docker runtime（保留 daemon.json 日志轮转）；**不装 GPU 驱动** |
-| `30-jenkins.sh` | Jenkins LTS | 优先 JDK 21（不够退 17），jenkins 用户加入 docker 组；**零配置**：跳过安装向导、装机时建好管理员、预装 Pipeline / Git / Gitea / Docker Pipeline 等插件（含全部依赖），监听 **0.0.0.0:8080** |
+| `30-jenkins.sh` | Jenkins LTS | 优先 JDK 21（不够退 17），jenkins 用户加入 docker 组；**零配置**：跳过安装向导、装机时建好管理员、预装 Pipeline / Git / Gitea / Docker Pipeline / Docker Cloud / Rebuild / AnsiColor / Parameterized Trigger 等插件（含全部依赖），监听 **0.0.0.0:8080** |
 | `40-nodejs.sh` | Node.js 24 | NodeSource 优先，官方 tarball 兜底 |
 | `45-gitea.sh` | Gitea（最新稳定版，可 `--pin-gitea`） | 官方 linux-amd64 二进制（sha256 校验）→ `/usr/local/bin/gitea`；系统用户 `git`；SQLite；**装机阶段写好配置并创建管理员**，开机 `gitea.service` 自启。监听 **0.0.0.0:3000**（不与 Jenkins 8080 冲突），开放注册，LFS 开，`OFFLINE_MODE`。SSH 克隆走系统 OpenSSH：`git@host:user/repo.git` |
 | `50-grok.sh` | xAI Grok Build | `@xai-official/grok`，**官方包**，不是社区的 `@vibe-kit/grok-cli` |
@@ -57,7 +57,22 @@
 
 - **跳过安装向导**：systemd drop-in `/etc/systemd/system/jenkins.service.d/50-autoinstall.conf` 设置 `JAVA_OPTS=-Djava.awt.headless=true -Djenkins.install.runSetupWizard=false`，并写入 `jenkins.install.InstallUtil.lastExecVersion` / `jenkins.install.UpgradeWizard.state`（= 安装的 Jenkins 版本），不会出现 “Unlock Jenkins / initialAdminPassword”。
 - **管理员**：默认用户名 = `--username`（默认 `ubuntu`），密码 = `--password` 明文（都不传时为默认密码 `ubuntu1990`）；可用 `--jenkins-admin-user` / `--jenkins-admin-password` 覆盖。装机时把密码转成 **bcrypt** 哈希，写进 `/var/lib/jenkins/init.groovy.d/00-autoinstall-admin.groovy`（jenkins 0600，只含 `#jbcrypt:$2a$...`，**不含明文**）；首次启动时该脚本创建用户（Jenkins 自带用户库，**禁止自助注册**），授权为“登录用户可做任何事、匿名不可读”，成功后**自删**。只给了 `--password-hash` 时生成随机密码写入 **`/root/jenkins-admin-password`**（root、0600）。构建时的明文单独放在 ISO 的 `/provision/jenkins-admin.secret`（0600，不进 `provision.env` / 日志），装机用完即删。
-- **插件**（含全部传递依赖）：默认 `workflow-aggregator git gitea docker-workflow credentials-binding timestamper`，可用 `--jenkins-plugins "a b c"`（可写 `name:version`）替换。在线构建：装机时用固定版本 + sha256 校验的 [plugin-installation-manager-tool](https://github.com/jenkinsci/plugin-installation-manager-tool) 2.16.0 按本机 `jenkins.war` 解析下载到 `/var/lib/jenkins/plugins`；全离线构建：直接拷贝捆绑里的 `jenkins-plugins/`（fetch 时按捆绑里**同一个** Jenkins 版本解析，附 `plugins.lock` 版本清单与 `SHA256SUMS`）。
+- **插件**（含全部必需依赖）：默认 `workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger`，可用 `--jenkins-plugins "a b c"`（可写 `name:version`）替换。默认列表：
+
+  | 插件 ID | 用途 |
+  |---|---|
+  | `workflow-aggregator` | Pipeline（Jenkinsfile / 声明式与脚本式流水线） |
+  | `git` | Git SCM |
+  | `gitea` | Gitea 集成（组织扫描、Webhook、PR 构建） |
+  | `docker-workflow` | Pipeline 中的 `docker.image(...).inside` 等 |
+  | `docker-plugin` | Docker Cloud：按需起 Docker 容器作为构建节点 |
+  | `credentials-binding` | `withCredentials` 绑定凭据 |
+  | `timestamper` | 控制台日志时间戳 |
+  | `ansicolor` | 控制台 ANSI 颜色 |
+  | `rebuild` | 用相同参数重新构建 |
+  | `parameterized-trigger` | 带参数触发下游任务 |
+
+  解析用仓库自带的 `tools/resolve-jenkins-plugins.py`（纯 Python 3 标准库，不需要 Java）：取 `https://updates.jenkins.io/update-center.actual.json?version=<Jenkins 版本>`，递归解析非 optional 依赖，只选 `requiredCore` ≤ 目标版本的插件版本（固定版本或推荐版不兼容时查 `plugin-versions.json`），下载 `.hpi` 并用 update center 的 **sha256** 校验，写 `plugins.lock`（每行 `name:version:sha256`）。在线构建：装机时在 chroot 里按本机 Jenkins 版本跑它，下载到 `/var/lib/jenkins/plugins`；全离线构建：fetch 时按捆绑里**同一个** Jenkins 版本解析到 `jenkins-plugins/`，装机直接拷贝。lock 都会留在 `/var/lib/jenkins/plugins.lock`。
 - 补装 `fontconfig` / `libharfbuzz0b`（headless JRE 不带，缺了 Jenkins 启动时 AWT 字体初始化失败）和 `python3-bcrypt`（算哈希用）。
 
 开机后浏览器打开 `http://<本机IP>:8080/`，用上面的管理员登录即可（`JENKINS_URL` 未设置，Jenkins 首页会提示一次，可在“系统管理 → 系统配置”里填）。**装完请尽快改掉管理员密码**（右上角用户名 → Security）。
@@ -372,7 +387,7 @@ cat /var/log/autoinstall/20-docker.log
 | `--gitea-admin-email E` | Gitea 管理员邮箱，默认 `<用户名>@localhost` |
 | `--jenkins-admin-user U` | Jenkins 管理员用户名，默认 = `--username` |
 | `--jenkins-admin-password P` | Jenkins 管理员密码（≤72 字节），默认 = `--password` 明文；只给了 `--password-hash` 时装机写入 `/root/jenkins-admin-password` |
-| `--jenkins-plugins "a b c"` | 预装 Jenkins 插件（空格分隔，可 `name:version`，自动带依赖），默认 `workflow-aggregator git gitea docker-workflow credentials-binding timestamper`；全离线时需与捆绑一致（不一致会提示 `--force-fetch`） |
+| `--jenkins-plugins "a b c"` | 预装 Jenkins 插件（空格分隔，可 `name:version`，自动带依赖），默认 `workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger`；全离线时需与捆绑一致（不一致会提示 `--force-fetch`） |
 | `--edition` | `auto`（默认）/ `server` / `desktop`。`auto` 读 ISO 的 `casper/install-sources.yaml`（`variant: desktop/server`），退回 `.disk/info`；显式指定优先 |
 | `--desktop-source` | 仅 desktop：`minimal`（默认，`ubuntu-desktop-minimal`）/ `standard`（`ubuntu-desktop`）/ 任意 source id；会对照 ISO 的 install-sources.yaml 校验 |
 | `--realname` | `identity.realname`（登录界面显示名）；desktop 默认等于 `--username` |
@@ -448,7 +463,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 | 阶段 | 行为 |
 |---|---|
-| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）兜底；并用捆绑里的 `jenkins.war` + plugin-installation-manager-tool 解析 Jenkins 插件闭包到 `jenkins-plugins/`（默认 63 个、约 44 MB，含 `plugins.lock`） |
+| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
 | ISO | 写入 `/offline/{apt,apt-sources,npm,node,unity-cli,godot,gitea,jenkins-plugins,manifest.json}` |
 | 装机 late-commands | 拷到 `/opt/offline`，临时只启用 `deb [trusted=yes] file:/opt/offline/apt ./`，再跑 `software/`（`OFFLINE=1`） |
 | `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装；Jenkins 插件从 `jenkins-plugins/` 拷贝 |
@@ -456,7 +471,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 体积与缓存：
 
-- 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；`manifest.json` 含 `fingerprint`（schema 3：release/arch/pins/seeds，含 `apt-sources` 与 Jenkins 插件列表 / plugin-manager 版本）。指纹一致才复用，否则或旧格式需 `--force` 重建。构建时 `validate-offline-bundle.sh` 会核对 apt 种子包、`apt-sources/` keyring+list，以及 `unity-cli/`、`godot/`、`gitea/`、`jenkins-plugins/`（lock 里每个插件都在、请求列表与 `--jenkins-plugins` 一致、sha256 正确）等目录；失败则提示 `--force` / `--force-fetch`。
+- 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；`manifest.json` 含 `fingerprint`（schema 3：release/arch/pins/seeds，含 `apt-sources`、Jenkins 插件列表与解析器指纹）。指纹一致才复用，否则或旧格式需 `--force` 重建。构建时 `validate-offline-bundle.sh` 会核对 apt 种子包、`apt-sources/` keyring+list，以及 `unity-cli/`、`godot/`、`gitea/`、`jenkins-plugins/`（lock 里每个插件都在且 sha256 与 lock 一致、请求列表与 `--jenkins-plugins` 一致）等目录；失败则提示 `--force` / `--force-fetch`。
 - `--fetch-offline` 用 **ISO 识别到的 release**（非仅文件名）选 jammy/noble；加 `--force-fetch` 等价于给 fetch 传 `--force`。
 - npm/`node` 打包使用 `--owner=0 --group=0`；安装时 `tar --no-same-owner`，Node 解到 `/opt/node-…` 再 symlink，避免 `/usr/local` 属主变成 uid 1000。
 - 全离线装完写回第三方 apt 源：`apt-sources/` 在 fetch 时按在线脚本同款材料抓取；`restore-online-apt.sh` **全量写回**捆绑内种子（不按 `--skip` 裁剪）。旧捆绑缺 `apt-sources/` 时需 `--force` 重建。
@@ -555,6 +570,6 @@ xorriso -indev ubuntu.iso -outdev out.iso \
 
 - 口令是哈希，不是明文；哈希本身也别提交到公开仓库。若用 `--password` 构建，Gitea / Jenkins 管理员明文会短暂出现在 ISO 的 `/provision/gitea-admin.secret` / `jenkins-admin.secret`（0600），装机后从目标机删除；拿到 ISO 的人在安装前仍可能读到，请勿把此类 ISO 公开分发。
 - 没有任何 API key / 私钥进镜像。SSH **公钥**可通过 `--ssh-authorized-keys` 注入，属于公开信息；私钥绝不注入。
-- 目标机磁盘 ≥ 25 GB，且装机时能访问 cli.github.com / docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）、`github.com/godotengine/godot` 或 `downloads.godotengine.org`（Godot 4.7.2），以及 `dl.gitea.com`（Gitea 二进制与 sha256）、`github.com`（plugin-installation-manager-tool）与 `updates.jenkins.io` / `get.jenkins.io`（Jenkins 插件）。全离线捆绑可免除这些外网依赖。
+- 目标机磁盘 ≥ 25 GB，且装机时能访问 cli.github.com / docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）、`github.com/godotengine/godot` 或 `downloads.godotengine.org`（Godot 4.7.2），以及 `dl.gitea.com`（Gitea 二进制与 sha256）与 `updates.jenkins.io` 及其下载镜像（Jenkins 插件）。全离线捆绑可免除这些外网依赖。
 
 这条线一旦破，后面所有「镜像管理」都失去意义。

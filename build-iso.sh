@@ -67,7 +67,7 @@ GITEA_ADMIN_EMAIL=""
 # Jenkins 管理员 (同 Gitea 规则) 与预装插件
 JENKINS_ADMIN_USER=""
 JENKINS_ADMIN_PASSWORD=""
-DEFAULT_JENKINS_PLUGINS="workflow-aggregator git gitea docker-workflow credentials-binding timestamper"
+DEFAULT_JENKINS_PLUGINS="workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger"
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-$DEFAULT_JENKINS_PLUGINS}"
 
 usage() {
@@ -131,7 +131,7 @@ usage() {
                         只给了 --password-hash 时装机生成随机密码写入 /root/jenkins-admin-password
   --jenkins-plugins "a b c"
                         预装的 Jenkins 插件 (自动带全部依赖; 可写 name:version), 空格分隔
-                        默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper
+                        默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger
   --iso-sha256 HEX      校验源 ISO 的 SHA256, 不匹配则失败
   --iso-sha256sums FILE 用 SHA256SUMS 文件按 basename 校验源 ISO
   --menu-regex REGEX    要注入的菜单项标题正则。默认 server: "Try or Install";
@@ -568,6 +568,8 @@ if [[ "$PROVISION" -eq 1 ]]; then
   # 只带 .sh 和 env, 不带任何本地残留
   cp "$SCRIPT_DIR/software"/*.sh "$WORK/provision/"
   chmod 0755 "$WORK/provision"/*.sh
+  # Jenkins 插件解析器 (30-jenkins.sh 在线路径用; 与 fetch-offline-bundle 同一份)
+  cp "$SCRIPT_DIR/tools/resolve-jenkins-plugins.py" "$WORK/provision/"
   # 逐行 %q 写入, 保证 source 安全 (旧写法 EXTRA_APT_PACKAGES=vim, htop 会把 htop 当命令执行)
   {
     echo "# 由 build-iso.sh 生成 (printf %q; 请勿手改未加引号的值)"

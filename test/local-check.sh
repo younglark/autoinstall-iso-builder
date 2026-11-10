@@ -595,7 +595,11 @@ if [[ -x software/30-jenkins.sh ]] \
   && grep -q '/root/jenkins-admin-password' software/30-jenkins.sh \
   && grep -q 'libharfbuzz0b' software/30-jenkins.sh \
   && grep -q 'jenkins-plugins' software/30-jenkins.sh \
-  && grep -q 'JPM_SHA256' software/30-jenkins.sh \
+  && grep -q 'resolve-jenkins-plugins.py' software/30-jenkins.sh \
+  && grep -q 'resolve-jenkins-plugins.py' tools/fetch-offline-bundle.sh \
+  && grep -q 'resolve-jenkins-plugins.py' build-iso.sh \
+  && python3 -m py_compile tools/resolve-jenkins-plugins.py \
+  && ! grep -q 'plugin-installation-manager' software/30-jenkins.sh tools/fetch-offline-bundle.sh \
   && grep -q 'jenkins-plugins' tools/fetch-offline-bundle.sh \
   && grep -q 'plugins.lock' tools/fetch-offline-bundle.sh \
   && grep -q '"jenkins_plugins"' tools/fetch-offline-bundle.sh \
@@ -628,7 +632,7 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
        && xorriso -osirrox on -indev "$jt/d.iso" -extract /provision "$jt/d" >/dev/null 2>&1 \
        && grep -qx 'JENKINS_ADMIN_USER=ubuntu' "$jt/d/provision.env" \
        && ( set -a; # shellcheck disable=SC1091
-            . "$jt/d/provision.env"; [[ "$JENKINS_PLUGINS" == "workflow-aggregator git gitea docker-workflow credentials-binding timestamper" ]] ) \
+            . "$jt/d/provision.env"; [[ "$JENKINS_PLUGINS" == "workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger" ]] ) \
        && ( # shellcheck disable=SC1091
             . "$jt/d/jenkins-admin.secret"; [[ "$JENKINS_ADMIN_PASSWORD" == ubuntu1990 ]] ) \
        && ! grep -q 'ubuntu1990' "$jt/d.log" "$jt/d/provision.env"; then
@@ -691,11 +695,13 @@ done
 for f in docker.asc githubcli-archive-keyring.gpg nvidia-container-toolkit.asc jenkins-keyring.asc nodesource.gpg; do : > "$vb/apt-sources/keyrings/$f"; done
 for f in docker.list github-cli.list nvidia-container-toolkit.list jenkins.list nodesource.sources; do : > "$vb/apt-sources/sources.list.d/$f"; done
 echo '{"schema":3,"release":"noble","fingerprint":"x","pins":{}}' > "$vb/manifest.json"
-for p in git timestamper scm-api; do echo "$p" > "$vb/jenkins-plugins/$p.jpi"; done
-printf 'git:5.0\nscm-api:1.0\ntimestamper:1.30\n' > "$vb/jenkins-plugins/plugins.lock"
+: > "$vb/jenkins-plugins/plugins.lock"
+for p in git scm-api timestamper; do
+  echo "$p" > "$vb/jenkins-plugins/$p.jpi"
+  printf '%s:1.0:%s\n' "$p" "$(sha256sum "$vb/jenkins-plugins/$p.jpi" | cut -d' ' -f1)" >> "$vb/jenkins-plugins/plugins.lock"
+done
 printf 'git\ntimestamper\n' > "$vb/jenkins-plugins/requested.txt"
 printf '2.580.2' > "$vb/jenkins-plugins/jenkins-version"
-( cd "$vb/jenkins-plugins" && sha256sum ./*.jpi > SHA256SUMS )
 vskip="15 20 25 40 45 50 60 70 80 85"
 if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "timestamper git" >/dev/null 2>&1; then
   pass "validate accepts complete jenkins-plugins"
@@ -707,6 +713,13 @@ if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenk
 else
   fail "validate accepted plugin list mismatch"
 fi
+echo tampered >> "$vb/jenkins-plugins/git.jpi"
+if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "git timestamper" >/dev/null 2>&1; then
+  pass "validate rejects jpi sha256 mismatch"
+else
+  fail "validate accepted tampered jpi"
+fi
+echo git > "$vb/jenkins-plugins/git.jpi"
 rm "$vb/jenkins-plugins/scm-api.jpi"
 if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "git timestamper" >/dev/null 2>&1; then
   pass "validate rejects missing dependency jpi"
@@ -723,7 +736,8 @@ fi
 rm -rf "$vb"
 
 echo "== fetch-offline-bundle recursive depends =="
-if grep -q 'force-download' tools/fetch-offline-bundle.sh && grep -q 'apt-cache depends --recurse' tools/fetch-offline-bundle.sh; then
+if grep -q 'force-download' tools/fetch-offline-bundle.sh && grep -q 'apt-cache depends --recurse' tools/fetch-offline-bundle.sh \
+   && grep -q 'per-package download fallback' tools/fetch-offline-bundle.sh; then
   pass "fetch recursive depends download"
 else
   fail "fetch recursive depends download"

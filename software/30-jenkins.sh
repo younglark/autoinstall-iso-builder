@@ -6,8 +6,8 @@
 #   * 管理员: init.groovy.d 脚本 (只含 bcrypt 哈希 "#jbcrypt:$2a$...", 不含明文) 首次启动时创建,
 #     HudsonPrivateSecurityRealm(禁止自助注册) + FullControlOnceLoggedIn(匿名不可读); 成功后自删
 #   * 插件: 默认 Pipeline / git / gitea / docker-workflow / credentials-binding / timestamper
-#     (+ 全部传递依赖)。在线用 plugin-installation-manager-tool (固定版本 + sha256) 按本机 jenkins.war 解析;
-#     离线直接拷贝捆绑 jenkins-plugins/ (fetch 时按捆绑里同一 jenkins 版本解析)
+#     (+ 全部必需依赖)。在线用 resolve-jenkins-plugins.py (纯 Python 标准库) 按本机 Jenkins 版本的
+#     update center 解析并 sha256 校验; 离线直接拷贝捆绑 jenkins-plugins/ (fetch 时用同一脚本按同一版本解析)
 #   * 监听 0.0.0.0:8080 (默认), 不改 JENKINS_URL / 防火墙
 set -euo pipefail
 HERE="$(cd -- "$(dirname -- "$0")" && pwd)"
@@ -22,11 +22,9 @@ ADMIN_GROOVY="$INIT_DIR/00-autoinstall-admin.groovy"
 DROPIN_DIR="/etc/systemd/system/jenkins.service.d"
 SECRET_FILE="$HERE/jenkins-admin.secret"
 RANDOM_PW_FILE="/root/jenkins-admin-password"
-DEFAULT_PLUGINS="workflow-aggregator git gitea docker-workflow credentials-binding timestamper"
+DEFAULT_PLUGINS="workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger"
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-$DEFAULT_PLUGINS}"
-JPM_VERSION="${JPM_VERSION:-2.16.0}"
-JPM_SHA256="${JPM_SHA256:-b3e9704f8259ec3d0479703039e2ad5a0a15abb97808ad70d5a59ba2fdd73197}"
-JPM_URL="${JPM_URL:-https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/${JPM_VERSION}/jenkins-plugin-manager-${JPM_VERSION}.jar}"
+RESOLVER="$HERE/resolve-jenkins-plugins.py"
 
 # 插件名白名单 (name 或 name:version)
 for p in $JENKINS_PLUGINS; do
@@ -116,18 +114,15 @@ if offline_enabled 2>/dev/null; then
     n=$((n + 1))
   done
   [ "$n" -gt 0 ] || { echo "ERROR: jenkins-plugins/ 内没有插件"; exit 1; }
-  echo "offline: 已安装 $n 个 Jenkins 插件 (lock: $PDIR/plugins.lock)"
+  install -m 0644 -o jenkins -g jenkins "$PDIR/plugins.lock" "$JENKINS_HOME_DIR/plugins.lock"
+  echo "offline: 已安装 $n 个 Jenkins 插件 (lock: $JENKINS_HOME_DIR/plugins.lock)"
 else
-  tmp="$(mktemp -d)"
-  # shellcheck disable=SC2064
-  trap "rm -rf '$tmp'" EXIT
-  curl -fL --retry 3 --retry-delay 2 -o "$tmp/jpm.jar" "$JPM_URL"
-  echo "$JPM_SHA256  $tmp/jpm.jar" | sha256sum -c - >/dev/null \
-    || { echo "ERROR: plugin-installation-manager-tool sha256 不匹配"; exit 1; }
+  [ -f "$RESOLVER" ] || { echo "ERROR: 缺少 $RESOLVER"; exit 1; }
+  command -v python3 >/dev/null || apt-get install -y --no-install-recommends python3
   # shellcheck disable=SC2086
-  java -jar "$tmp/jpm.jar" --war "$WAR" --plugin-download-directory "$PLUGIN_DIR" \
-    --plugins $JENKINS_PLUGINS
-  chown -R jenkins:jenkins "$PLUGIN_DIR"
+  python3 "$RESOLVER" --jenkins-version "$JENKINS_VERSION" --out "$PLUGIN_DIR" \
+    --lock "$JENKINS_HOME_DIR/plugins.lock" $JENKINS_PLUGINS
+  chown -R jenkins:jenkins "$PLUGIN_DIR" "$JENKINS_HOME_DIR/plugins.lock"
   echo "已下载 $(find "$PLUGIN_DIR" -maxdepth 1 -name '*.jpi' | wc -l) 个 Jenkins 插件 (含依赖)"
 fi
 

@@ -15,7 +15,7 @@ PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 PIN_GODOT="${PIN_GODOT:-4.7.2}"
 PIN_GITEA="${PIN_GITEA:-latest}"
-JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper}"
+JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger}"
 
 die()  { printf '[fail] %s\n' "$*" >&2; exit 1; }
 ok()   { printf '[ok] %s\n' "$*"; }
@@ -111,17 +111,19 @@ if ! should_skip 30-jenkins; then
       [[ "$_want" == "$_have" ]] || jp_errs+=("jenkins-plugins 请求列表 ($_have) != --jenkins-plugins ($_want)")
     fi
     if [[ -s "$JP/plugins.lock" ]]; then
-      while IFS=: read -r _n _v; do
+      # lock 每行 name:version:sha256 (resolve-jenkins-plugins.py, sha256 来自 update center)
+      while IFS=: read -r _n _v _s; do
         [[ -n "$_n" ]] || continue
-        [[ -f "$JP/$_n.jpi" || -f "$JP/$_n.hpi" ]] || missing_dirs+=("jenkins-plugins/$_n.jpi")
-        [[ -n "$_v" ]] || jp_errs+=("jenkins-plugins/plugins.lock: $_n 无版本")
+        [[ -n "$_v" && "$_s" =~ ^[0-9a-f]{64}$ ]] || { jp_errs+=("jenkins-plugins/plugins.lock: $_n 缺版本或 sha256 (旧捆绑?)"); continue; }
+        if [[ ! -f "$JP/$_n.jpi" ]]; then
+          missing_dirs+=("jenkins-plugins/$_n.jpi")
+        elif [[ "$(sha256sum "$JP/$_n.jpi" | cut -d' ' -f1)" != "$_s" ]]; then
+          jp_errs+=("jenkins-plugins/$_n.jpi sha256 与 plugins.lock 不符")
+        fi
       done < "$JP/plugins.lock"
       for _p in $JENKINS_PLUGINS; do
         grep -q "^${_p%%:*}:" "$JP/plugins.lock" || jp_errs+=("jenkins-plugins 缺请求的插件: ${_p%%:*}")
       done
-    fi
-    if [[ -f "$JP/SHA256SUMS" ]]; then
-      ( cd "$JP" && sha256sum -c --quiet SHA256SUMS >/dev/null 2>&1 ) || jp_errs+=("jenkins-plugins SHA256SUMS 校验失败")
     fi
   fi
 fi
