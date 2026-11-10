@@ -68,6 +68,7 @@ should_skip 20-docker || NEED_PKGS+=(docker-ce docker-ce-cli containerd.io)
 should_skip 25-nvidia-container-toolkit || NEED_PKGS+=(nvidia-container-toolkit)
 should_skip 30-jenkins || NEED_PKGS+=(jenkins fontconfig libharfbuzz0b python3-bcrypt)
 should_skip 40-nodejs || NEED_PKGS+=(nodejs)
+should_skip 35-microsoft-edge || NEED_PKGS+=(microsoft-edge-stable)
 
 PACKAGES_FILE="$BUNDLE/apt/Packages"
 if [[ ! -f "$PACKAGES_FILE" && -f "$BUNDLE/apt/Packages.gz" ]]; then
@@ -147,11 +148,11 @@ if [[ ! -d "$BUNDLE/apt-sources/keyrings" || ! -d "$BUNDLE/apt-sources/sources.l
   missing_dirs+=("apt-sources/{keyrings,sources.list.d}/")
 else
   for f in docker.asc githubcli-archive-keyring.gpg nvidia-container-toolkit.asc \
-           jenkins-keyring.asc nodesource.gpg; do
+           jenkins-keyring.asc nodesource.gpg microsoft-edge.gpg; do
     [[ -f "$BUNDLE/apt-sources/keyrings/$f" ]] || missing_srcs+=("apt-sources/keyrings/$f")
   done
   for f in docker.list github-cli.list nvidia-container-toolkit.list \
-           jenkins.list nodesource.sources; do
+           jenkins.list nodesource.sources microsoft-edge.sources; do
     [[ -f "$BUNDLE/apt-sources/sources.list.d/$f" ]] || missing_srcs+=("apt-sources/sources.list.d/$f")
   done
 fi

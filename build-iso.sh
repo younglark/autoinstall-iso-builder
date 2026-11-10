@@ -587,6 +587,8 @@ if [[ "$PROVISION" -eq 1 ]]; then
     echo "# 由 build-iso.sh 生成 (printf %q; 请勿手改未加引号的值)"
     printf 'TARGET_USER=%q
 ' "$USERNAME_"
+    printf 'EDITION=%q
+' "$EDITION"
     printf 'UBUNTU_MIRROR=%q
 ' "$MIRROR"
     printf 'STRICT=%q

@@ -65,7 +65,7 @@ mkdir -p /var/log/autoinstall
   echo "# provisioned at $(date -u +%FT%TZ)"
   echo "# host: $(cat /etc/hostname 2>/dev/null)"
   echo
-  for c in git gh rg docker "docker compose" nvidia-ctk java node npm grok opencode openmausbot unity godot gitea jenkins sshd; do
+  for c in git gh rg docker "docker compose" nvidia-ctk java node npm grok opencode openmausbot unity godot gitea jenkins microsoft-edge-stable sshd; do
     printf '%-18s ' "$c"
     _manifest_ver "$c" || echo "(not found)"
   done

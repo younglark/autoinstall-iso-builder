@@ -38,6 +38,7 @@ export JENKINS_PLUGINS="${JENKINS_PLUGINS:-}"
 export OFFLINE="${OFFLINE:-0}"
 export OFFLINE_ROOT="${OFFLINE_ROOT:-/opt/offline}"
 export EXTRA_APT_PACKAGES="${EXTRA_APT_PACKAGES:-}"
+export EDITION="${EDITION:-server}"
 export UBUNTU_MIRROR="${UBUNTU_MIRROR:-}"
 STRICT="${STRICT:-0}"
 PROVISION_SKIP="${PROVISION_SKIP:-}"
@@ -58,7 +59,7 @@ should_skip() {
 }
 
 echo "=============================================================="
-echo " provisioning target user=$TARGET_USER strict=$STRICT offline=$OFFLINE"
+echo " provisioning target user=$TARGET_USER edition=${EDITION:-server} strict=$STRICT offline=$OFFLINE"
 echo " pins: node>=$PIN_NODE_MAJOR grok=$PIN_GROK opencode=$PIN_OPENCODE openmausbot=$PIN_OPENMAUSBOT unity-cli=${PIN_UNITY_CLI:-latest} godot=$PIN_GODOT gitea=$PIN_GITEA"
 [ -n "$PROVISION_SKIP" ] && echo " skipping: $PROVISION_SKIP"
 [ -n "$EXTRA_APT_PACKAGES" ] && echo " extra apt: $EXTRA_APT_PACKAGES"

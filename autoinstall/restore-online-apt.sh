@@ -4,8 +4,8 @@
 # (apt-sources/) so a later networked `apt update` can pull security updates.
 #
 # Approach: restore every seed present under apt-sources/ (captured at fetch
-# time for Docker / GitHub CLI / NVIDIA toolkit / Jenkins / NodeSource).
-# Online installs never call this script.
+# time for Docker / GitHub CLI / NVIDIA toolkit / Jenkins / NodeSource /
+# Microsoft Edge). Online installs never call this script.
 set -euo pipefail
 
 OFFLINE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,8 +41,8 @@ if [ -d "$APT_SRC/keyrings" ]; then
   for f in "$APT_SRC/keyrings"/*; do
     [ -f "$f" ] || continue
     base="$(basename "$f")"
-    # NodeSource setup 把 keyring 放在 /usr/share/keyrings, Signed-By 也指向那里
-    if [ "$base" = "nodesource.gpg" ]; then
+    # NodeSource / Microsoft Edge 的 Signed-By 指向 /usr/share/keyrings
+    if [ "$base" = "nodesource.gpg" ] || [ "$base" = "microsoft-edge.gpg" ]; then
       install -m 0644 "$f" "$SHARE_KEYRINGS/$base"
     else
       install -m 0644 "$f" "$APT_ETC/keyrings/$base"
