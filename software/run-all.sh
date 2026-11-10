@@ -37,6 +37,8 @@ export JENKINS_ADMIN_USER="${JENKINS_ADMIN_USER:-}"
 export JENKINS_PLUGINS="${JENKINS_PLUGINS:-}"
 export OFFLINE="${OFFLINE:-0}"
 export OFFLINE_ROOT="${OFFLINE_ROOT:-/opt/offline}"
+export DISABLE_WAYLAND="${DISABLE_WAYLAND:-0}"
+export X11VNC="${X11VNC:-0}"
 export EXTRA_APT_PACKAGES="${EXTRA_APT_PACKAGES:-}"
 export EDITION="${EDITION:-server}"
 export UBUNTU_MIRROR="${UBUNTU_MIRROR:-}"
@@ -62,6 +64,7 @@ echo "=============================================================="
 echo " provisioning target user=$TARGET_USER edition=${EDITION:-server} strict=$STRICT offline=$OFFLINE"
 echo " pins: node>=$PIN_NODE_MAJOR grok=$PIN_GROK opencode=$PIN_OPENCODE openmausbot=$PIN_OPENMAUSBOT unity-cli=${PIN_UNITY_CLI:-latest} godot=$PIN_GODOT gitea=$PIN_GITEA"
 [ -n "$PROVISION_SKIP" ] && echo " skipping: $PROVISION_SKIP"
+[ "$X11VNC" = "1" ] || [ "$DISABLE_WAYLAND" = "1" ] && echo " remote desktop: disable-wayland=$DISABLE_WAYLAND x11vnc=$X11VNC"
 [ -n "$EXTRA_APT_PACKAGES" ] && echo " extra apt: $EXTRA_APT_PACKAGES"
 echo "=============================================================="
 
@@ -96,7 +99,7 @@ for s in "$HERE"/[0-9][0-9]-*.sh; do
 done
 
 # Gitea 管理员明文密码文件: 45-gitea 用后会删; 被 --skip 或失败时这里兜底删除
-rm -f "$HERE/gitea-admin.secret" "$HERE/jenkins-admin.secret"
+rm -f "$HERE/gitea-admin.secret" "$HERE/jenkins-admin.secret" "$HERE/x11vnc.secret"
 
 echo "--------------------------------------------------------------"
 echo "完成:$DONE"

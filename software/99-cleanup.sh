@@ -13,7 +13,7 @@ fi
 rm -f /usr/sbin/policy-rc.d
 
 # --- 清理 ---
-rm -f /opt/provision/gitea-admin.secret /opt/provision/jenkins-admin.secret
+rm -f /opt/provision/gitea-admin.secret /opt/provision/jenkins-admin.secret /opt/provision/x11vnc.secret
 rm -f /tmp/nodesource_setup.sh /tmp/node.tar.xz
 apt-get clean
 rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*

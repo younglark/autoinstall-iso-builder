@@ -75,8 +75,8 @@ $cmp = if ($OnWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [
 $Cwd = (Get-Location).ProviderPath.TrimEnd('\', '/')
 if ($Cwd -eq '') { $Cwd = [string]$sep }
 
-$PathOpts = @('--iso', '--out', '--offline-bundle', '--ssh-authorized-keys', '--debs', '--iso-sha256sums', '--cache-root', '--bundle')
-$OutOpts = @('--out', '--offline-bundle', '--cache-root')
+$PathOpts = @('--iso', '--out', '--offline-bundle', '--ssh-authorized-keys', '--debs', '--iso-sha256sums', '--cache-root', '--bundle', '--apt-cache')
+$OutOpts = @('--out', '--offline-bundle', '--cache-root', '--apt-cache')
 $MountSrcs = New-Object System.Collections.Generic.List[string]
 $MountDsts = New-Object System.Collections.Generic.List[string]
 
@@ -209,7 +209,7 @@ function Format-Cmd($list) {
   $out.Add('docker')
   $prev = ''
   foreach ($x in $list) {
-    $s = if (($prev -ceq '--password') -or ($prev -ceq '--gitea-admin-password') -or ($prev -ceq '--jenkins-admin-password')) { '***' } else { $x }
+    $s = if (($prev -ceq '--password') -or ($prev -ceq '--gitea-admin-password') -or ($prev -ceq '--jenkins-admin-password') -or ($prev -ceq '--vnc-password')) { '***' } else { $x }
     if ($s -match '^[A-Za-z0-9_./:=,@+%\\-]+$') { $out.Add($s) } else { $out.Add("'" + ($s -replace "'", "''") + "'") }
     $prev = $x
   }

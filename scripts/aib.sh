@@ -45,9 +45,9 @@ info() { printf '[aib] %s\n' "$*" >&2; }
 usage() { sed -n '3,/^# ====*$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
 # 带路径值的选项 (build / fetch-offline / validate-offline 共用)
-PATH_OPTS=" --iso --out --offline-bundle --ssh-authorized-keys --debs --iso-sha256sums --cache-root --bundle "
+PATH_OPTS=" --iso --out --offline-bundle --ssh-authorized-keys --debs --iso-sha256sums --cache-root --bundle --apt-cache "
 # 其中是「输出」的 (父目录不存在时自动创建)
-OUT_OPTS=" --out --offline-bundle --cache-root "
+OUT_OPTS=" --out --offline-bundle --cache-root --apt-cache "
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -217,7 +217,7 @@ DOCKER+=("${NEW_ARGS[@]+"${NEW_ARGS[@]}"}")
 print_cmd() {
   local line="" a prev=""
   for a in "$@"; do
-    if [[ "$prev" == "--password" || "$prev" == "--gitea-admin-password" || "$prev" == "--jenkins-admin-password" ]]; then a="***"; fi
+    if [[ "$prev" == "--password" || "$prev" == "--gitea-admin-password" || "$prev" == "--jenkins-admin-password" || "$prev" == "--vnc-password" ]]; then a="***"; fi
     if [[ "$a" =~ ^[A-Za-z0-9_./:=,@+%-]+$ ]]; then
       line="${line}${a} "
     else

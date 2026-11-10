@@ -672,6 +672,164 @@ else
   fail "EDITION exported via provision.env / run-all"
 fi
 
+echo "== disable-wayland / x11vnc script (36-x11vnc-xorg) =="
+xr="$(mktemp -d)"
+mkdir -p "$xr/etc/gdm3"
+printf '# GDM configuration storage\n\n[daemon]\n# Uncomment the line below to force the login screen to use Xorg\n#WaylandEnable=false\nAutomaticLoginEnable=False\n\n[security]\n\n[debug]\n#Enable=true\n' > "$xr/etc/gdm3/custom.conf"
+if [[ -x software/36-x11vnc-xorg.sh ]] \
+   && EDITION=server X11VNC=1 AIB_TARGET_ROOT="$xr" AIB_SKIP_PKG=1 bash software/36-x11vnc-xorg.sh >"$tmp/x-srv.log" 2>&1 \
+   && grep -q 'skip:' "$tmp/x-srv.log" && grep -q '^#WaylandEnable' "$xr/etc/gdm3/custom.conf" \
+   && EDITION=desktop AIB_TARGET_ROOT="$xr" AIB_SKIP_PKG=1 bash software/36-x11vnc-xorg.sh >"$tmp/x-off.log" 2>&1 \
+   && grep -q 'skip:' "$tmp/x-off.log" && [[ ! -e "$xr/etc/systemd" ]]; then
+  pass "36-x11vnc-xorg: server / options off → no-op"
+else
+  fail "36-x11vnc-xorg skip paths: $(cat "$tmp/x-srv.log" "$tmp/x-off.log" 2>/dev/null | tail -3)"
+fi
+# 只关 Wayland: 两次运行幂等, 其它键保留, 不装 x11vnc
+for _ in 1 2; do EDITION=desktop DISABLE_WAYLAND=1 AIB_TARGET_ROOT="$xr" AIB_SKIP_PKG=1 bash software/36-x11vnc-xorg.sh >/dev/null 2>&1; done
+if [[ "$(grep -c 'WaylandEnable' "$xr/etc/gdm3/custom.conf")" -eq 1 ]] \
+   && python3 - "$xr/etc/gdm3/custom.conf" <<'PY'
+import configparser, sys
+c = configparser.ConfigParser(strict=True); c.optionxform = str
+c.read(sys.argv[1])
+assert c["daemon"]["WaylandEnable"] == "false"
+assert c["daemon"]["AutomaticLoginEnable"] == "False"
+assert c.has_section("security") and c.has_section("debug")
+PY
+then
+  if [[ ! -e "$xr/etc/systemd/system/x11vnc.service" ]]; then
+    pass "gdm custom.conf: WaylandEnable=false idempotent, other keys kept, no x11vnc"
+  else
+    fail "disable-wayland alone installed x11vnc"
+  fi
+else
+  fail "gdm custom.conf writer: $(cat "$xr/etc/gdm3/custom.conf")"
+fi
+# 无 custom.conf 时新建 [daemon]
+xr2="$(mktemp -d)"
+if EDITION=desktop DISABLE_WAYLAND=1 AIB_TARGET_ROOT="$xr2" AIB_SKIP_PKG=1 bash software/36-x11vnc-xorg.sh >/dev/null 2>&1 \
+   && grep -qx '\[daemon\]' "$xr2/etc/gdm3/custom.conf" && grep -qx 'WaylandEnable=false' "$xr2/etc/gdm3/custom.conf"; then
+  pass "gdm custom.conf created when missing"
+else
+  fail "gdm custom.conf create"
+fi
+# x11vnc: 隐含关 Wayland, secret 读后删除, 服务/logind/dconf 落盘
+mkdir -p "$xr2/prov"
+cp software/36-x11vnc-xorg.sh software/lib-offline.sh "$xr2/prov/"
+( umask 077; printf 'VNC_PASSWORD=%q\n' 'S3cret#vnc' > "$xr2/prov/x11vnc.secret" )
+if EDITION=desktop X11VNC=1 AIB_TARGET_ROOT="$xr2" AIB_SKIP_PKG=1 bash "$xr2/prov/36-x11vnc-xorg.sh" >"$tmp/x-on.log" 2>&1; then
+  u="$xr2/etc/systemd/system/x11vnc.service"
+  f="$xr2/usr/local/sbin/aib-x11vnc-follow"
+  # shellcheck disable=SC2016  # 字面量 $PASSFILE
+  if [[ ! -e "$xr2/prov/x11vnc.secret" ]] && ! grep -q 'S3cret' "$tmp/x-on.log" \
+     && [[ ! -e "$xr2/root/x11vnc-password" ]] \
+     && [[ "$(stat -c %a "$xr2/etc/x11vnc.pass")" == 600 ]] \
+     && grep -qx 'WaylandEnable=false' "$xr2/etc/gdm3/custom.conf" \
+     && grep -q '^After=display-manager.service' "$u" && grep -q '^WantedBy=graphical.target' "$u" \
+     && grep -q '^ExecStart=/usr/local/sbin/aib-x11vnc-follow' "$u" && grep -q '^Restart=always' "$u" \
+     && [[ -x "$f" ]] && grep -q -- '-rfbauth "$PASSFILE"' "$f" && grep -q -- '-forever -shared -noxdamage' "$f" \
+     && grep -q '/sys/class/tty/tty0/active' "$f" && grep -q 'xauth -f' "$f" \
+     && grep -qx 'HandleLidSwitch=ignore' "$xr2/etc/systemd/logind.conf.d/90-autoinstall-x11vnc.conf" \
+     && grep -q "sleep-inactive-ac-type='nothing'" "$xr2/etc/dconf/db/gdm.d/90-autoinstall-no-suspend" \
+     && grep -qx 'system-db:gdm' "$xr2/etc/dconf/profile/gdm" \
+     && grep -q "sleep-inactive-battery-type='nothing'" "$xr2/usr/share/glib-2.0/schemas/90_autoinstall-x11vnc-no-suspend.gschema.override" \
+     && ! grep -rq 'lock-enabled\|idle-delay' "$xr2/etc/dconf" "$xr2/usr/share/glib-2.0/schemas"; then
+    pass "x11vnc: unit + follower + pass file 600 + logind/dconf no-suspend, lock untouched, secret removed"
+  else
+    fail "x11vnc files: $(tail -5 "$tmp/x-on.log")"
+  fi
+  if command -v shellcheck >/dev/null; then
+    if shellcheck "$f"; then pass "aib-x11vnc-follow shellcheck"; else fail "aib-x11vnc-follow shellcheck"; fi
+  fi
+else
+  fail "36-x11vnc-xorg x11vnc run: $(tail -5 "$tmp/x-on.log")"
+fi
+# 无明文 (只有哈希): 随机密码 → /root/x11vnc-password
+xr3="$(mktemp -d)"
+if EDITION=desktop X11VNC=1 AIB_TARGET_ROOT="$xr3" AIB_SKIP_PKG=1 bash software/36-x11vnc-xorg.sh >"$tmp/x-rand.log" 2>&1 \
+   && [[ "$(stat -c %a "$xr3/root/x11vnc-password")" == 600 ]] && [[ "$(wc -c < "$xr3/root/x11vnc-password")" -eq 9 ]]; then
+  pass "x11vnc random password when no plaintext"
+else
+  fail "x11vnc random password"
+fi
+if grep -q 'x11vnc' tools/fetch-offline-bundle.sh && grep -q '"x11vnc", "xauth"' tools/fetch-offline-bundle.sh \
+   && grep -q 'x11vnc.secret' software/run-all.sh && grep -q 'x11vnc.secret' software/99-cleanup.sh \
+   && grep -q 'offline_apt_install x11vnc xauth' software/36-x11vnc-xorg.sh; then
+  pass "x11vnc offline seed + fingerprint + secret cleanup"
+else
+  fail "x11vnc offline seed / cleanup"
+fi
+rm -rf "$xr" "$xr2" "$xr3"
+
+echo "== build-iso --disable-wayland / --x11vnc (fake ISO) =="
+if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
+  xb="$(mktemp -d)"
+  bash test/make-fake-iso.sh desktop "$xb/d.iso" >/dev/null 2>&1
+  bash test/make-fake-iso.sh server "$xb/s.iso" >/dev/null 2>&1
+  _xenv() { xorriso -osirrox on -indev "$1" -extract /provision "$2" >/dev/null 2>&1; }
+  # 默认关闭
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o0.iso" --password 'Pl@in99x' >"$xb/o0.log" 2>&1 && _xenv "$xb/o0.iso" "$xb/p0" \
+     && grep -qx 'X11VNC=0' "$xb/p0/provision.env" && grep -qx 'DISABLE_WAYLAND=0' "$xb/p0/provision.env" \
+     && [[ ! -e "$xb/p0/x11vnc.secret" ]] && [[ -f "$xb/p0/36-x11vnc-xorg.sh" ]]; then
+    pass "default: wayland/x11vnc off"
+  else
+    fail "default remote-desktop flags: $(tail -3 "$xb/o0.log")"
+  fi
+  # --x11vnc 隐含 --disable-wayland, 默认密码 = --password, 明文不进日志/provision.env
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o1.iso" --password 'Pl@in99x' --x11vnc >"$xb/o1.log" 2>&1 && _xenv "$xb/o1.iso" "$xb/p1" \
+     && grep -qx 'X11VNC=1' "$xb/p1/provision.env" && grep -qx 'DISABLE_WAYLAND=1' "$xb/p1/provision.env" \
+     && grep -q '自动启用 --disable-wayland' "$xb/o1.log" \
+     && ( # shellcheck disable=SC1091
+          . "$xb/p1/x11vnc.secret"; [[ "$VNC_PASSWORD" == 'Pl@in99x' ]] ) \
+     && ! grep -q 'Pl@in99x' "$xb/o1.log" "$xb/p1/provision.env"; then
+    pass "--x11vnc implies --disable-wayland, password via secret file, not logged"
+  else
+    fail "--x11vnc build: $(tail -3 "$xb/o1.log")"
+  fi
+  # 默认凭据 → 告警; --vnc-password 覆盖
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o2.iso" --x11vnc >"$xb/o2.log" 2>&1 \
+     && grep -q 'x11vnc 使用默认密码' "$xb/o2.log" && ! grep -q 'ubuntu1990' "$xb/o2.log" \
+     && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o3.iso" --x11vnc --vnc-password 'vncpass1' >"$xb/o3.log" 2>&1 && _xenv "$xb/o3.iso" "$xb/p3" \
+     && ( # shellcheck disable=SC1091
+          . "$xb/p3/x11vnc.secret"; [[ "$VNC_PASSWORD" == 'vncpass1' ]] ) && ! grep -q 'vncpass1' "$xb/o3.log"; then
+    pass "x11vnc default-password warning + --vnc-password override"
+  else
+    fail "x11vnc password defaults"
+  fi
+  # 只有哈希 → 无 secret, 提示随机密码
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o4.iso" --password-hash "$(openssl passwd -6 x)" --x11vnc >"$xb/o4.log" 2>&1 && _xenv "$xb/o4.iso" "$xb/p4" \
+     && [[ ! -e "$xb/p4/x11vnc.secret" ]] && grep -q '/root/x11vnc-password' "$xb/o4.log"; then
+    pass "x11vnc hash-only: random password notice"
+  else
+    fail "x11vnc hash-only"
+  fi
+  # --disable-wayland 单独
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o5.iso" --password 'Pl@in99x' --disable-wayland >"$xb/o5.log" 2>&1 && _xenv "$xb/o5.iso" "$xb/p5" \
+     && grep -qx 'DISABLE_WAYLAND=1' "$xb/p5/provision.env" && grep -qx 'X11VNC=0' "$xb/p5/provision.env"; then
+    pass "--disable-wayland alone"
+  else
+    fail "--disable-wayland alone"
+  fi
+  # Server: 忽略并告警
+  if bash build-iso.sh --iso "$xb/s.iso" --out "$xb/o6.iso" --password 'Pl@in99x' --x11vnc --disable-wayland >"$xb/o6.log" 2>&1 && _xenv "$xb/o6.iso" "$xb/p6" \
+     && grep -q '只用于 Desktop' "$xb/o6.log" && grep -qx 'X11VNC=0' "$xb/p6/provision.env" && [[ ! -e "$xb/p6/x11vnc.secret" ]]; then
+    pass "server: --x11vnc ignored with warning"
+  else
+    fail "server x11vnc handling"
+  fi
+  for bad in "--x11vnc --no-provision" "--disable-wayland --no-provision" "--x11vnc --vnc-password 12345"; do
+    # shellcheck disable=SC2086
+    if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/bad.iso" --password x $bad --dry-run >/dev/null 2>&1; then
+      fail "should reject: $bad"
+    else
+      pass "rejects: $bad"
+    fi
+  done
+  rm -rf "$xb"
+else
+  echo "(xorriso/openssl missing, x11vnc build test skipped)"
+fi
+
 echo "== unity-cli script + offline seed =="
 if [[ -x software/80-unity-cli.sh ]] \
   && grep -q '/usr/local/bin/unity' software/80-unity-cli.sh \
@@ -981,7 +1139,77 @@ if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip 30" >/dev
 else
   fail "validate jenkins-plugins skip logic"
 fi
+# --require-x11vnc (build-iso --x11vnc): 捆绑里必须有 x11vnc + xauth
+if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip 30" >/dev/null 2>&1 \
+   && ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip 30" --require-x11vnc >/dev/null 2>&1; then
+  printf 'Package: x11vnc\nVersion: 1\n\nPackage: xauth\nVersion: 1\n\n' >> "$vb/apt/Packages"
+  if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip 30" --require-x11vnc >/dev/null 2>&1; then
+    pass "validate: x11vnc required only with --require-x11vnc"
+  else
+    fail "validate --require-x11vnc with x11vnc present"
+  fi
+else
+  fail "validate --require-x11vnc logic"
+fi
 rm -rf "$vb"
+
+echo "== apt deb reuse helper (fake debs) =="
+dr="$(mktemp -d)"
+mkdir -p "$dr/cache" "$dr/prev" "$dr/arch"
+printf 'aaa' > "$dr/cache/a_1_amd64.deb"          # 缓存命中
+printf 'bbb' > "$dr/prev/b_2_amd64.deb"           # 旧捆绑命中
+printf 'XXX' > "$dr/cache/c_3_amd64.deb"          # 同名但内容(哈希)不同 → 不复用
+printf 'd-old' > "$dr/cache/d_0_amd64.deb"        # 旧版本, 本次不需要
+printf 'eee' > "$dr/cache/e_5_amd64.deb"          # 大小对但用 SHA512
+_h() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
+{
+  echo "a_1_amd64.deb 3 SHA256:$(_h aaa)"
+  echo "b_2_amd64.deb 3 SHA256:$(_h bbb)"
+  echo "c_3_amd64.deb 3 SHA256:$(_h ccc)"
+  echo "e_5_amd64.deb 3 SHA512:$(printf eee | sha512sum | cut -d' ' -f1)"
+  echo "f_6_amd64.deb 3 SHA256:$(_h fff)"
+  echo "../evil.deb 3 SHA256:$(_h aaa)"
+} > "$dr/need"
+# shellcheck disable=SC1091
+. tools/apt-deb-reuse.sh
+n="$(aib_deb_seed "$dr/need" "$dr/arch" "$dr/reused" "$dr/cache" "$dr/prev")"
+if [[ "$n" -eq 3 && -f "$dr/arch/a_1_amd64.deb" && -f "$dr/arch/b_2_amd64.deb" && -f "$dr/arch/e_5_amd64.deb" \
+      && ! -e "$dr/arch/c_3_amd64.deb" && ! -e "$dr/arch/d_0_amd64.deb" && ! -e "$dr/evil.deb" ]]; then
+  pass "seed: reuse only name+size+hash matches (3), skip stale/mismatch/unneeded"
+else
+  fail "seed reuse ($n): $(ls "$dr/arch")"
+fi
+# 模拟 apt 下载缺的 c/f, 再回写缓存
+printf 'ccc' > "$dr/arch/c_3_amd64.deb"; printf 'fff' > "$dr/arch/f_6_amd64.deb"
+read -r syn pr < <(aib_deb_sync_cache "$dr/arch" "$dr/cache" "$dr/reused" 0)
+if [[ "$syn" -eq 3 && "$pr" -eq 0 && "$(cat "$dr/cache/c_3_amd64.deb")" == ccc && -f "$dr/cache/f_6_amd64.deb" \
+      && -f "$dr/cache/b_2_amd64.deb" && -f "$dr/cache/d_0_amd64.deb" ]]; then
+  pass "sync: new/changed debs written back, nothing pruned by default"
+else
+  fail "sync cache ($syn $pr)"
+fi
+read -r syn pr < <(aib_deb_sync_cache "$dr/arch" "$dr/cache" "$dr/reused" 1)
+if [[ "$syn" -eq 0 && "$pr" -eq 1 && ! -e "$dr/cache/d_0_amd64.deb" ]]; then
+  pass "sync: --prune-apt-cache removes unused only"
+else
+  fail "prune ($syn $pr)"
+fi
+# 第二轮: 全部命中
+rm -rf "$dr/arch"; mkdir -p "$dr/arch"; : > "$dr/reused2"
+sed -i '/evil/d' "$dr/need"
+n="$(aib_deb_seed "$dr/need" "$dr/arch" "$dr/reused2" "$dr/cache")"
+if [[ "$n" -eq 5 ]]; then pass "second run reuses all 5"; else fail "second run reused $n"; fi
+rm -rf "$dr"
+if grep -q 'print_uris install --download-only --reinstall' tools/fetch-offline-bundle.sh \
+   && grep -q 'aib_deb_seed' tools/fetch-offline-bundle.sh && grep -q 'aib_deb_sync_cache' tools/fetch-offline-bundle.sh \
+   && grep -q 'apt-deb-reuse.sh:/apt-deb-reuse.sh:ro' tools/fetch-offline-bundle.sh \
+   && grep -q 'reuse_prev gitea' tools/fetch-offline-bundle.sh && grep -q 'reuse_prev godot' tools/fetch-offline-bundle.sh \
+   && grep -q 'reuse_prev unity-cli' tools/fetch-offline-bundle.sh \
+   && ! grep -q 'apt-cache\|APT_CACHE' <(sed -n '/^expected_fp=/,/^FP$/p' tools/fetch-offline-bundle.sh); then
+  pass "fetch wires deb reuse + artifact reuse; cache not in fingerprint"
+else
+  fail "fetch reuse wiring"
+fi
 
 echo "== fetch-offline-bundle recursive depends =="
 if grep -q 'force-download' tools/fetch-offline-bundle.sh && grep -q 'apt-cache depends --recurse' tools/fetch-offline-bundle.sh \
@@ -1288,7 +1516,7 @@ fi
 
 echo "== shellcheck (if available) =="
 if command -v shellcheck >/dev/null; then
-  if shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh tools/ubuntu-mirror.sh tools/validate-offline-bundle.sh \
+  if shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh tools/ubuntu-mirror.sh tools/validate-offline-bundle.sh tools/apt-deb-reuse.sh \
       autoinstall/enable-offline-apt.sh autoinstall/restore-online-apt.sh test/local-check.sh \
     && shellcheck -e SC2054,SC2001 -x test/qemu-smoke.sh; then
     pass "shellcheck"

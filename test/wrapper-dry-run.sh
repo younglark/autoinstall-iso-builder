@@ -51,6 +51,15 @@ expect "jammy 用 22.04 构建" "$out" "UBUNTU_VERSION=22.04 --platform linux/am
 expect "APT_MIRROR 透传给 docker build" "$out" "--build-arg APT_MIRROR=http://mirrors.example/ubuntu --network=host"
 expect "fetch --out 改写" "$out" "--out /mnt/aib1/jammy"
 
+out="$(bash "$AIB" --dry-run build --iso u.iso --out o.iso --x11vnc --disable-wayland --vnc-password 'vnc s3cret')"
+expect "--x11vnc 透传" "$out" "--x11vnc --disable-wayland"
+expect "VNC 密码打码" "$out" "--vnc-password '***'"
+reject "VNC 密码不泄露" "$out" "s3cret"
+
+out="$(bash "$AIB" --dry-run fetch-offline --release noble --apt-cache "$work/debcache" --prune-apt-cache)"
+expect "--apt-cache cwd 外挂载并改写" "$out" "--apt-cache /mnt/aib1/debcache"
+expect "--prune-apt-cache 透传" "$out" "--prune-apt-cache"
+
 out="$(bash "$AIB" --dry-run fetch-offline --release noble)"
 expect "noble 用默认变体" "$out" "autoinstall-iso-builder:local"
 reject "noble 不用 jammy" "$out" "local-jammy"
