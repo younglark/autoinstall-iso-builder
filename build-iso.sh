@@ -29,7 +29,7 @@ PASS_PLAIN=""
 LOCALE_="en_US.UTF-8"
 KEYBOARD_="us"
 TIMEZONE_="Asia/Shanghai"
-MIRROR="http://archive.ubuntu.com/ubuntu"
+MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu"
 PACKAGES=""
 SSH_ALLOW_PW="true"
 SSH_AUTHORIZED_KEYS=""
@@ -92,7 +92,8 @@ usage() {
   --hostname NAME       默认 ubuntu-node
   --username NAME       默认 ubuntu
   --packages "a,b,c"    预装软件包, 逗号分隔
-  --mirror URL          默认 archive.ubuntu.com; 内网请填本地源
+  --mirror URL          默认清华 https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+                        (含 -security)。装完系统 apt 也用这个源。内网或官方源请覆盖
   --locale / --keyboard / --timezone
   --ssh-allow-pw BOOL   默认 true; false 时必须同时提供 --ssh-authorized-keys, 否则构建失败
   --ssh-authorized-keys FILE
@@ -145,7 +146,7 @@ usage() {
                  --hostname node01 --username ops \
                  --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
                  --packages "vim,curl,htop,net-tools" \
-                 --mirror http://mirrors.aliyun.com/ubuntu \
+                 --mirror http://archive.ubuntu.com/ubuntu \
                  --iso-sha256sums SHA256SUMS \
                  --ssh-authorized-keys ~/.ssh/id_ed25519.pub \
                  --pin-grok 0.1.0
@@ -424,7 +425,8 @@ if [[ "${FETCH_OFFLINE:-0}" -eq 1 ]]; then
   log "自动抓取离线捆绑 -> $OB_OUT (release=$REL_HINT force=${FORCE_FETCH:-0})"
   FETCH_ARGS=(--release "$REL_HINT" --out "$OB_OUT" --packages "$PACKAGES"
     --pin-node "$PIN_NODE_MAJOR" --pin-grok "$PIN_GROK"
-    --pin-opencode "$PIN_OPENCODE" --pin-openmausbot "$PIN_OPENMAUSBOT")
+    --pin-opencode "$PIN_OPENCODE" --pin-openmausbot "$PIN_OPENMAUSBOT"
+    --ubuntu-mirror "$MIRROR")
   [[ -n "$PIN_UNITY_CLI" ]] && FETCH_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
   FETCH_ARGS+=(--pin-gitea "$PIN_GITEA" --jenkins-plugins "$JENKINS_PLUGINS")
   [[ "${FORCE_FETCH:-0}" -eq 1 ]] && FETCH_ARGS+=(--force)
