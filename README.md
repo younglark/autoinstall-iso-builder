@@ -56,7 +56,7 @@
 默认预装（`--skip 45` / `--skip 45-gitea` 可跳过）。装机 chroot 里就会：
 
 - 写入 `/etc/gitea/app.ini`（`INSTALL_LOCK=true`，SQLite，每台机器独立生成 `SECRET_KEY` / `INTERNAL_TOKEN` / JWT），并 `gitea migrate`；
-- 创建管理员（默认用户名 = `--username`，密码 = `--password` 明文；可用 `--gitea-admin-user` / `--gitea-admin-password` / `--gitea-admin-email` 覆盖）。只给了 `--password-hash`、没有明文时，会生成随机密码并写入 **`/root/gitea-admin-password`**（root、0600）。构建时的明文密码单独放在 ISO 的 `/provision/gitea-admin.secret`（0600，不进 `provision.env` / 构建日志），装机用完即删。管理员 `must-change-password=false`，**装完请尽快改掉密码**；
+- 创建管理员（默认用户名 = `--username`（默认 `ubuntu`），密码 = `--password` 明文（都不传时为默认密码 `ubuntu1990`）；可用 `--gitea-admin-user` / `--gitea-admin-password` / `--gitea-admin-email` 覆盖）。只给了 `--password-hash`、没有明文时，会生成随机密码并写入 **`/root/gitea-admin-password`**（root、0600）。构建时的明文密码单独放在 ISO 的 `/provision/gitea-admin.secret`（0600，不进 `provision.env` / 构建日志），装机用完即删。管理员 `must-change-password=false`，**装完请尽快改掉密码**；
 - `systemctl enable gitea.service`（官方单元，`After=network-online.target`）。防火墙规则不动。
 
 开机后浏览器打开 `http://<本机IP>:3000/` 即可（`HTTP_ADDR=0.0.0.0`，局域网可访问）。**开放注册**（`DISABLE_REGISTRATION=false`），局域网里的人都能自助注册；若只想管理员拉人，把该值改成 `true` 后 `sudo systemctl restart gitea`。
@@ -117,6 +117,9 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
   --out out/node01.iso --hostname node01 --username ops \
   --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
   --ssh-authorized-keys ~/.ssh/id_ed25519.pub
+
+# 最简：不传用户名/密码 → 默认 ubuntu / ubuntu1990（构建时告警，装完请改）
+./scripts/aib.sh build --iso ~/Downloads/ubuntu-24.04.3-live-server-amd64.iso --out out/node01.iso
 
 ./scripts/aib.sh check-iso out/node01.iso          # 只读检查 user-data（--auto-disk 产物）
 ./scripts/aib.sh --dry-run build --iso ...          # 只打印 docker 命令, 不运行
@@ -331,6 +334,8 @@ cat /var/log/autoinstall/20-docker.log
 | `--iso` / `--out` | 输入/输出路径，必填 |
 | `--password-hash` | **推荐**。`openssl passwd -6 '密码'` 的结果 |
 | `--password` | 明文，脚本自动哈希；会进 shell 历史，仅调试用 |
+| `--username` | 默认 `ubuntu`（`git` 与 Gitea 系统用户冲突，会被拒绝） |
+| （都不传密码） | `--password` / `--password-hash` 都没给时，使用**默认密码 `ubuntu1990`**（构建时告警），Gitea 管理员同样是 `ubuntu` / `ubuntu1990`。这是公开的默认值，**装完请立即改**：`passwd`，并在 Gitea 网页里改管理员密码 |
 | `--packages` | 逗号分隔、**不要空格**（如 `vim,curl,htop`）；走 subiquity 的 apt（第三方包走 `software/`） |
 | `--mirror` | 内网源务必替换，否则每台机器都从公网拉 |
 | `--no-provision` | 不执行 `software/`，只做裸装机 |

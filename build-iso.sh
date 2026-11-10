@@ -20,7 +20,10 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SRC_ISO=""
 OUT_ISO=""
 HOSTNAME_="ubuntu-node"
-USERNAME_="ops"
+USERNAME_="ubuntu"
+# 未传 --password / --password-hash 时的默认密码 (构建时告警, 装完请改)
+DEFAULT_PASSWORD="ubuntu1990"
+USED_DEFAULT_PASSWORD=0
 PASS_HASH=""
 PASS_PLAIN=""
 LOCALE_="en_US.UTF-8"
@@ -71,7 +74,7 @@ usage() {
   --iso PATH            官方 Ubuntu Server ISO (22.04 / 24.04) 或 Ubuntu Desktop 24.04 ISO
   --out PATH            输出 ISO 路径
 
-身份 (二选一, 必填):
+身份 (二选一; 都不传则用默认用户 ubuntu / 密码 ubuntu1990, 构建时告警, 装完请改):
   --password-hash HASH  crypt 哈希, 推荐
   --password PLAIN      明文, 脚本用 openssl passwd -6 现场哈希 (会留在 shell 历史里)
 
@@ -82,7 +85,7 @@ usage() {
                         standard (ubuntu-desktop, 带 Office 等全套) | 任意 source id
   --realname NAME       identity.realname (登录界面显示名); desktop 默认等于 --username
   --hostname NAME       默认 ubuntu-node
-  --username NAME       默认 ops
+  --username NAME       默认 ubuntu
   --packages "a,b,c"    预装软件包, 逗号分隔
   --mirror URL          默认 archive.ubuntu.com; 内网请填本地源
   --locale / --keyboard / --timezone
@@ -205,6 +208,12 @@ done
 [[ -n "$OUT_ISO" ]] || { usage; die "缺少 --out"; }
 [[ -f "$SRC_ISO" ]] || die "源 ISO 不存在: $SRC_ISO"
 
+# 默认凭据: 两种密码参数都没传 → 默认密码 (Gitea 管理员随之默认相同)
+if [[ -z "$PASS_HASH" && -z "$PASS_PLAIN" ]]; then
+  PASS_PLAIN="$DEFAULT_PASSWORD"
+  USED_DEFAULT_PASSWORD=1
+fi
+
 if [[ -n "$SSH_AUTHORIZED_KEYS" ]]; then
   [[ -f "$SSH_AUTHORIZED_KEYS" ]] || die "--ssh-authorized-keys 文件不存在: $SSH_AUTHORIZED_KEYS"
 fi
@@ -263,8 +272,8 @@ if [[ "$_ssh_allow" == "false" && "$_has_keys" -eq 0 ]]; then
   die "--ssh-allow-pw false 但未提供任何 SSH 公钥; 装完将无法登录。请加 --ssh-authorized-keys, 或改回 --ssh-allow-pw true"
 fi
 
-if [[ -z "$PASS_HASH" && -z "$PASS_PLAIN" ]]; then
-  die "必须提供 --password-hash 或 --password (openssl passwd -6 '你的密码')"
+if [[ "$USED_DEFAULT_PASSWORD" -eq 1 ]]; then
+  warn "未传 --password / --password-hash: 使用默认密码 (用户 $USERNAME_; Gitea 管理员同此)。这是公开的默认值, 装完请立即修改: passwd + Gitea 网页改密"
 fi
 if [[ -z "$PASS_HASH" ]]; then
   command -v openssl >/dev/null || die "缺少 openssl, 无法哈希密码"

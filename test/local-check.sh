@@ -489,6 +489,51 @@ else
   fail "gitea admin password leak path"
 fi
 
+echo "== build-iso default credentials (ubuntu / ubuntu1990) =="
+if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
+  dc="$(mktemp -d)"
+  if bash test/make-fake-iso.sh server "$dc/src.iso" >/dev/null 2>&1 \
+     && bash build-iso.sh --iso "$dc/src.iso" --out "$dc/d.iso" >"$dc/d.log" 2>&1 \
+     && xorriso -osirrox on -indev "$dc/d.iso" -extract /nocloud "$dc/nc" -extract /provision "$dc/pv" >/dev/null 2>&1; then
+    ud_user="$(python3 -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["autoinstall"]["identity"]["username"])' "$dc/nc/user-data" 2>/dev/null \
+      || sed -n 's/^ *username: *//p' "$dc/nc/user-data" | head -1 | tr -d "'\"")"
+    ud_hash="$(python3 -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["autoinstall"]["identity"]["password"])' "$dc/nc/user-data" 2>/dev/null \
+      || sed -n 's/^ *password: *//p' "$dc/nc/user-data" | head -1 | tr -d "'\"")"
+    salt="$(printf '%s' "$ud_hash" | cut -d'$' -f3)"
+    # shellcheck disable=SC2016
+    if [[ "$ud_user" == "ubuntu" && "$ud_hash" == '$6$'* \
+          && "$(openssl passwd -6 -salt "$salt" ubuntu1990)" == "$ud_hash" ]]; then
+      pass "default user ubuntu + sha512 hash of default password"
+    else
+      fail "default credentials in user-data (user=$ud_user)"
+    fi
+    if grep -q '默认密码' "$dc/d.log" && ! grep -q 'ubuntu1990' "$dc/d.log"; then
+      pass "default password warning printed, plaintext not logged"
+    else
+      fail "default password warning / plaintext leak"
+    fi
+    if grep -qx 'GITEA_ADMIN_USER=ubuntu' "$dc/pv/provision.env" \
+       && ( # shellcheck disable=SC1091
+            . "$dc/pv/gitea-admin.secret"; [[ "$GITEA_ADMIN_PASSWORD" == ubuntu1990 ]] ); then
+      pass "gitea admin follows default credentials"
+    else
+      fail "gitea admin default credentials"
+    fi
+    # 显式密码时不告警
+    if bash build-iso.sh --iso "$dc/src.iso" --out "$dc/e.iso" --password 'Other#Pass9' >"$dc/e.log" 2>&1 \
+       && ! grep -q '默认密码' "$dc/e.log"; then
+      pass "no default-password warning when --password given"
+    else
+      fail "explicit --password still warned"
+    fi
+  else
+    fail "fake ISO build without credentials: $(tail -3 "$dc/d.log" 2>/dev/null)"
+  fi
+  rm -rf "$dc"
+else
+  echo "(xorriso/openssl missing, default credentials test skipped)"
+fi
+
 echo "== build-iso gitea flags (fake ISO) =="
 if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
   gt="$(mktemp -d)"
