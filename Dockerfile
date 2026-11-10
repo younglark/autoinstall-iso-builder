@@ -19,10 +19,10 @@ ARG NODE_MAJOR=24
 ARG TARGETARCH
 ARG AIB_VERSION=dev
 ARG VCS_REF=unknown
-# 默认清华源 (含 -security)。空值 (--build-arg APT_MIRROR=) 保留镜像自带官方源。
+# 默认清华源 http (含 -security; apt 走 GPG, 避免干净基础镜像缺 CA 无法校 https)。空值 (--build-arg APT_MIRROR=) 保留镜像自带官方源。
 # arm64 等 ports 架构用 APT_PORTS_MIRROR。
-ARG APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ubuntu
-ARG APT_PORTS_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports
+ARG APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu
+ARG APT_PORTS_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports
 
 LABEL org.opencontainers.image.title="autoinstall-iso-builder" \
       org.opencontainers.image.description="Bake Ubuntu autoinstall + preinstalled software into Ubuntu Server/Desktop ISOs (runs on macOS/Windows/Linux via Docker)" \

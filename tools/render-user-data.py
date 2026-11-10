@@ -81,8 +81,8 @@ def yaml_quoted_list_block(items, indent="    "):
     return "\n".join(lines)
 
 
-# 默认 apt 源: 清华大学开源镜像 (含 -security)。与 build-iso.sh / fetch-offline-bundle.sh 保持一致。
-DEFAULT_UBUNTU_MIRROR = "https://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+# 默认 apt 源: 清华大学开源镜像 http (含 -security; apt 走 GPG, 避免干净环境缺 CA)。与 build-iso.sh / fetch-offline-bundle.sh 保持一致。
+DEFAULT_UBUNTU_MIRROR = "http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
 
 
 def build_apt_primary_block(mirror: str, full_offline: bool) -> str:

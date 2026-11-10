@@ -29,7 +29,7 @@ PASS_PLAIN=""
 LOCALE_="en_US.UTF-8"
 KEYBOARD_="us"
 TIMEZONE_="Asia/Shanghai"
-MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
 PACKAGES=""
 SSH_ALLOW_PW="true"
 SSH_AUTHORIZED_KEYS=""
@@ -92,7 +92,7 @@ usage() {
   --hostname NAME       默认 ubuntu-node
   --username NAME       默认 ubuntu
   --packages "a,b,c"    预装软件包, 逗号分隔
-  --mirror URL          默认清华 https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+  --mirror URL          默认清华 http://mirrors.tuna.tsinghua.edu.cn/ubuntu
                         (含 -security)。装完系统 apt 也用这个源。内网或官方源请覆盖
   --locale / --keyboard / --timezone
   --ssh-allow-pw BOOL   默认 true; false 时必须同时提供 --ssh-authorized-keys, 否则构建失败

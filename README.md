@@ -135,7 +135,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 **镜像在本机构建，不从任何 registry 拉取**：
 - 第一次运行任意子命令时，包装脚本发现本地没有 `autoinstall-iso-builder:local`，就用仓库根目录的 `Dockerfile` 自动 `docker build`。**首次约 3–10 分钟**（主要是 apt 下载与 Node tarball，取决于网络；Apple Silicon 给 22.04/amd64 构建时更慢），之后每次运行秒级启动。
 - `git pull` 更新仓库后加 `--rebuild` 重新构建（Docker 层缓存仍生效，通常只重做最后几层）；镜像带 `aib.revision` 标签，脚本发现镜像比仓库旧时会提示。
-- 构建器镜像的 apt 源**默认已是清华**（`https://mirrors.tuna.tsinghua.edu.cn/ubuntu`；arm64 用 `ubuntu-ports`）。要换源：`APT_MIRROR=http://archive.ubuntu.com/ubuntu ./scripts/aib.sh --rebuild ...`（PowerShell：`$env:APT_MIRROR='...'`）；空值 `APT_MIRROR=` 保留 Docker 基础镜像自带的官方源。此项只影响构建器镜像，不影响装完机器的源。DNS/代理受限时可用 `AIB_BUILD_ARGS="--network=host"` 给自动 `docker build` 追加参数。
+- 构建器镜像的 apt 源**默认已是清华**（`http://mirrors.tuna.tsinghua.edu.cn/ubuntu`；arm64 用 `ubuntu-ports`）。要换源：`APT_MIRROR=http://archive.ubuntu.com/ubuntu ./scripts/aib.sh --rebuild ...`（PowerShell：`$env:APT_MIRROR='...'`）；空值 `APT_MIRROR=` 保留 Docker 基础镜像自带的官方源。此项只影响构建器镜像，不影响装完机器的源。DNS/代理受限时可用 `AIB_BUILD_ARGS="--network=host"` 给自动 `docker build` 追加参数。
 
 ```bash
 # macOS / Linux：子命令后面的参数与 build-iso.sh 完全一致
@@ -356,8 +356,10 @@ cat /var/log/autoinstall/20-docker.log
 
 抓离线包、构建 ISO，以及装完机器上的 Ubuntu apt（含 `-security` 口袋），**默认都走清华大学开源镜像**：
 
-- amd64 / i386：`https://mirrors.tuna.tsinghua.edu.cn/ubuntu`
-- 其他架构（`fetch-offline-bundle.sh --arch` 非 amd64/i386 时）：`https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports`
+- amd64 / i386：`http://mirrors.tuna.tsinghua.edu.cn/ubuntu`
+- 其他架构（`fetch-offline-bundle.sh --arch` 非 amd64/i386 时）：`http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports`
+
+默认用 **http** 而不是 https。干净的 `ubuntu:24.04` 容器、以及安装器 chroot 在装好 `ca-certificates` 之前，https 会因 TLS 证书无法校验而失败。apt 包本身由 GPG 签名校验，走 http 是安全的。需要 https 时再显式传 `--ubuntu-mirror` / `--mirror`。
 
 清华同步了 `noble-security` / `jammy-security`，因此不再单独指向 `security.ubuntu.com`。官方源把 security 口袋放到独立主机，功能和内容与镜像站的 `$release-security` 相同。
 
@@ -384,7 +386,7 @@ cat /var/log/autoinstall/20-docker.log
 | `--username` | 默认 `ubuntu`（`git` 与 Gitea 系统用户冲突，会被拒绝） |
 | （都不传密码） | `--password` / `--password-hash` 都没给时，使用**默认密码 `ubuntu1990`**（构建时告警），Gitea / Jenkins 管理员同样是 `ubuntu` / `ubuntu1990`。这是公开的默认值，**装完请立即改**：`passwd`，并在 Gitea / Jenkins 网页里改管理员密码 |
 | `--packages` | 逗号分隔、**不要空格**（如 `vim,curl,htop`）；走 subiquity 的 apt（第三方包走 `software/`） |
-| `--mirror` | 默认清华 `https://mirrors.tuna.tsinghua.edu.cn/ubuntu`（含 `-security`），写入 autoinstall `apt.primary`，**装完系统 apt 也用这个源**。内网源或官方源请显式覆盖，例如 `--mirror http://archive.ubuntu.com/ubuntu`。`build-iso.sh --fetch-offline` 会把同一 URL 传给抓包 |
+| `--mirror` | 默认清华 `http://mirrors.tuna.tsinghua.edu.cn/ubuntu`（含 `-security`），写入 autoinstall `apt.primary`，**装完系统 apt 也用这个源**。内网源或官方源请显式覆盖，例如 `--mirror http://archive.ubuntu.com/ubuntu`。`build-iso.sh --fetch-offline` 会把同一 URL 传给抓包 |
 | `--no-provision` | 不执行 `software/`，只做裸装机 |
 | `--skip "30 70"` | 跳过脚本：编号前缀或完整名均可（`30` / `30-jenkins`） |
 | `--strict` | 任一软件装失败就中止安装（默认记日志继续） |

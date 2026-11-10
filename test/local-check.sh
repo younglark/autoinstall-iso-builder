@@ -81,8 +81,8 @@ else
 fi
 
 echo "== default apt mirror is Tsinghua (overridable) =="
-DEFAULT_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu"
-DEFAULT_PORTS="https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports"
+DEFAULT_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+DEFAULT_PORTS="http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports"
 if python3 -c "
 import yaml
 d=yaml.safe_load(open('$tmp/user-data'))

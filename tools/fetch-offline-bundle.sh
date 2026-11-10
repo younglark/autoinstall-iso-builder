@@ -44,7 +44,7 @@ RESOLVER_SHA="$(sha256sum "$RESOLVER" 2>/dev/null | cut -c1-16)"
 SKIP_NPM=0
 FORCE=0
 APT_RUNNER="${AIB_APT_RUNNER:-docker}"
-# 默认清华源 (含 -security)。UBUNTU_MIRROR / --ubuntu-mirror 覆盖。
+# 默认清华源 http (含 -security; apt 走 GPG, http 避免干净容器缺 CA 无法校验证书)。UBUNTU_MIRROR / --ubuntu-mirror 覆盖。
 # 非 amd64/i386 在参数解析后改用 ubuntu-ports (见下方)。
 UBUNTU_MIRROR="${UBUNTU_MIRROR:-}"
 
@@ -69,7 +69,7 @@ usage() {
                         预装 Jenkins 插件 (按捆绑里同一 Jenkins 版本的 update center 解析全部必需依赖)
                         默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger
   --ubuntu-mirror URL   抓包时的 Ubuntu 源; 默认清华
-                        https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+                        http://mirrors.tuna.tsinghua.edu.cn/ubuntu
                         (非 amd64/i386 默认 .../ubuntu-ports)。含 -security 口袋
   --skip-npm            不打包 npm 全局树 (调试用)
   --apt-runner R        docker (默认) | direct (仅限容器内, 见脚本头注释)
@@ -115,8 +115,8 @@ esac
 # --ubuntu-mirror / 环境变量 UBUNTU_MIRROR 优先; 未指定时按架构选清华源
 if [[ -z "$UBUNTU_MIRROR" ]]; then
   case "$ARCH" in
-    amd64|i386) UBUNTU_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu" ;;
-    *)          UBUNTU_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports" ;;
+    amd64|i386) UBUNTU_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu" ;;
+    *)          UBUNTU_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports" ;;
   esac
 fi
 
