@@ -14,6 +14,7 @@ PIN_OPENCODE="${PIN_OPENCODE:-latest}"
 PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 PIN_GODOT="${PIN_GODOT:-4.7.2}"
+PIN_GITEA="${PIN_GITEA:-latest}"
 
 die()  { printf '[fail] %s\n' "$*" >&2; exit 1; }
 ok()   { printf '[ok] %s\n' "$*"; }
@@ -40,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --pin-openmausbot) PIN_OPENMAUSBOT="$2"; shift 2 ;;
     --pin-unity-cli) PIN_UNITY_CLI="$2"; shift 2 ;;
     --pin-godot) PIN_GODOT="$2"; shift 2 ;;
+    --pin-gitea) PIN_GITEA="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,6p' "$0"; exit 0 ;;
     *) die "未知参数: $1" ;;
@@ -88,6 +90,7 @@ done
 need_dirs=()
 should_skip 80-unity-cli || need_dirs+=(unity-cli)
 should_skip 85-godot || need_dirs+=(godot)
+should_skip 45-gitea || need_dirs+=(gitea)
 # npm prefix: 只要没全部跳过 npm CLI 就需要
 need_npm=0
 should_skip 50-grok || need_npm=1
@@ -125,9 +128,9 @@ if ! should_skip 40-nodejs; then
 fi
 
 # manifest release / pins
-mapfile -t meta < <(python3 - "$BUNDLE/manifest.json" "$EXPECT_RELEASE" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PIN_GODOT" <<'PY'
-import json, sys
-path, expect_rel, node, grok, oc, om, unity, godot = sys.argv[1:9]
+mapfile -t meta < <(python3 - "$BUNDLE/manifest.json" "$EXPECT_RELEASE" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PIN_GODOT" "$PIN_GITEA" "$(should_skip 45-gitea && echo 1 || echo 0)" <<'PY'
+import json, os, sys
+path, expect_rel, node, grok, oc, om, unity, godot, gitea, gitea_skip = sys.argv[1:11]
 m = json.load(open(path, encoding="utf-8"))
 errs = []
 rel = str(m.get("release") or "")
@@ -151,6 +154,20 @@ if unity:
 have_g = str(pins.get("godot") or (m.get("godot") or {}).get("version") or "")
 if godot and have_g and have_g != godot:
     errs.append(f"pins.godot={have_g} != {godot}")
+if gitea_skip != "1":
+    gm = m.get("gitea") or {}
+    have_pin = str(pins.get("gitea") or "")
+    have_ver = str(gm.get("version") or "")
+    gdir = os.path.join(os.path.dirname(path), "gitea")
+    if not have_pin and not gm:
+        errs.append("manifest 无 gitea (旧捆绑, 需 --force 重建)")
+    elif gitea and gitea != "latest" and have_ver and have_ver != gitea:
+        errs.append(f"gitea.version={have_ver} != {gitea}")
+    elif gitea and have_pin and have_pin != gitea and not (have_ver and have_ver == gitea):
+        errs.append(f"pins.gitea={have_pin} != {gitea}")
+    fn = str(gm.get("filename") or "")
+    if os.path.isdir(gdir) and (not fn or not os.path.isfile(os.path.join(gdir, fn)) or not os.path.isfile(os.path.join(gdir, "sha256"))):
+        errs.append("gitea/ 缺二进制或 sha256")
 print(rel or "")
 print(m.get("fingerprint") or "")
 for e in errs:

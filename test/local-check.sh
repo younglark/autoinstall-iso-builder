@@ -454,6 +454,87 @@ else
   fail "godot 4.7.2 script + offline seed + manifest"
 fi
 
+echo "== gitea script + offline seed + build flags =="
+if [[ -x software/45-gitea.sh ]] \
+  && grep -q '/usr/local/bin/gitea' software/45-gitea.sh \
+  && grep -q 'dl.gitea.com/gitea' software/45-gitea.sh \
+  && grep -q 'sha256sum' software/45-gitea.sh \
+  && grep -q 'offline_enabled' software/45-gitea.sh \
+  && grep -q '^INSTALL_LOCK = true' software/45-gitea.sh \
+  && grep -q '^HTTP_ADDR = 0.0.0.0' software/45-gitea.sh \
+  && grep -q 'GITEA_HTTP_PORT:-3000' software/45-gitea.sh \
+  && grep -q '^DISABLE_REGISTRATION = false' software/45-gitea.sh \
+  && grep -q '^OFFLINE_MODE = true' software/45-gitea.sh \
+  && grep -q 'DB_TYPE = sqlite3' software/45-gitea.sh \
+  && grep -q 'generate secret SECRET_KEY' software/45-gitea.sh \
+  && grep -q 'must-change-password=false' software/45-gitea.sh \
+  && grep -q 'After=network-online.target' software/45-gitea.sh \
+  && grep -q 'systemctl enable gitea.service' software/45-gitea.sh \
+  && grep -q 'gitea/' tools/fetch-offline-bundle.sh \
+  && grep -q 'dl.gitea.com/gitea' tools/fetch-offline-bundle.sh \
+  && grep -q -- '--pin-gitea' tools/validate-offline-bundle.sh \
+  && grep -q 'PIN_GITEA=%q' build-iso.sh \
+  && grep -q 'gitea-admin.secret' build-iso.sh \
+  && grep -q 'gitea-admin.secret' software/99-cleanup.sh \
+  && grep -qE '(^|[[:space:]])gitea([[:space:]]|$)' software/99-cleanup.sh; then
+  pass "gitea script + offline seed + manifest + build wiring"
+else
+  fail "gitea script + offline seed + manifest + build wiring"
+fi
+# 明文密码不能进 provision.env / 日志
+if ! sed -n '/^  {$/,/provision\/provision.env"$/p' build-iso.sh | grep -q 'GITEA_ADMIN_PASSWORD' \
+  && ! grep -nE '(echo|printf).*\$\{?ADMIN_PW' software/45-gitea.sh | grep -v RANDOM_PW_FILE | grep -q .; then
+  pass "gitea admin password not in provision.env / not echoed"
+else
+  fail "gitea admin password leak path"
+fi
+
+echo "== build-iso gitea flags (fake ISO) =="
+if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
+  gt="$(mktemp -d)"
+  bash test/make-fake-iso.sh server "$gt/src.iso" >/dev/null 2>&1 || bash test/make-fake-iso.sh "$gt/src.iso" >/dev/null 2>&1 || true
+  if [[ -f "$gt/src.iso" ]]; then
+    if bash build-iso.sh --iso "$gt/src.iso" --out "$gt/a.iso" --username ops --password 'Pl@inPass99' \
+         --pin-gitea 28.3.0 >"$gt/a.log" 2>&1 \
+       && xorriso -osirrox on -indev "$gt/a.iso" -extract /provision "$gt/a" >/dev/null 2>&1; then
+      if grep -qx 'PIN_GITEA=28.3.0' "$gt/a/provision.env" && grep -qx 'GITEA_ADMIN_USER=ops' "$gt/a/provision.env" \
+         && ! grep -q 'Pl@inPass99' "$gt/a/provision.env" && [[ -f "$gt/a/45-gitea.sh" ]] \
+         && ( # shellcheck disable=SC1091
+              . "$gt/a/gitea-admin.secret"; [[ "$GITEA_ADMIN_PASSWORD" == 'Pl@inPass99' ]] ) \
+         && ! grep -q 'Pl@inPass99' "$gt/a.log"; then
+        pass "gitea defaults: admin=username, password via separate secret file, not logged"
+      else
+        fail "gitea defaults in provision"
+      fi
+    else
+      fail "build-iso with gitea flags: $(tail -3 "$gt/a.log")"
+    fi
+    # 只有哈希 → 不带 secret 文件
+    if bash build-iso.sh --iso "$gt/src.iso" --out "$gt/b.iso" --password-hash "$(openssl passwd -6 x)" \
+         --gitea-admin-user boss --gitea-admin-email boss@example.com >"$gt/b.log" 2>&1 \
+       && xorriso -osirrox on -indev "$gt/b.iso" -extract /provision "$gt/b" >/dev/null 2>&1 \
+       && [[ ! -e "$gt/b/gitea-admin.secret" ]] && grep -qx 'GITEA_ADMIN_USER=boss' "$gt/b/provision.env" \
+       && grep -q '/root/gitea-admin-password' "$gt/b.log"; then
+      pass "gitea hash-only: no secret file, random password notice"
+    else
+      fail "gitea hash-only build"
+    fi
+    for bad in "--pin-gitea 1.2;rm" "--gitea-admin-user login" "--gitea-admin-user a/b" "--gitea-admin-password short" "--gitea-admin-email nope" "--username git"; do
+      # shellcheck disable=SC2086
+      if bash build-iso.sh --iso "$gt/src.iso" --out "$gt/c.iso" --password x $bad --dry-run >/dev/null 2>&1; then
+        fail "should reject: $bad"
+      else
+        pass "rejects: $bad"
+      fi
+    done
+  else
+    fail "make-fake-iso for gitea test"
+  fi
+  rm -rf "$gt"
+else
+  echo "(xorriso/openssl missing, gitea build test skipped)"
+fi
+
 echo "== fetch-offline-bundle recursive depends =="
 if grep -q 'force-download' tools/fetch-offline-bundle.sh && grep -q 'apt-cache depends --recurse' tools/fetch-offline-bundle.sh; then
   pass "fetch recursive depends download"
@@ -743,6 +824,8 @@ if grep -q '/usr/sbin' test/qemu-smoke.sh \
   && grep -qE '^[[:space:]]+rg$' test/qemu-smoke.sh \
   && grep -qE '^[[:space:]]+unity$' test/qemu-smoke.sh \
   && grep -qE '^[[:space:]]+godot$' test/qemu-smoke.sh \
+  && grep -qE '^[[:space:]]+gitea$' test/qemu-smoke.sh \
+  && grep -q 'INSTALL_LOCK' test/qemu-smoke.sh \
   && grep -q -- '--guard-only' test/qemu-smoke.sh; then
   pass "qemu-smoke paths + new tools + guard-only"
 else

@@ -13,6 +13,7 @@ fi
 rm -f /usr/sbin/policy-rc.d
 
 # --- 清理 ---
+rm -f /opt/provision/gitea-admin.secret
 rm -f /tmp/nodesource_setup.sh /tmp/node.tar.xz
 apt-get clean
 rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
@@ -28,6 +29,13 @@ _manifest_ver() {
     "docker compose")
       if command -v docker >/dev/null; then
         docker compose version 2>/dev/null | head -1 || echo "(not found)"
+      else
+        echo "(not found)"
+      fi
+      ;;
+    gitea)
+      if [ -x /usr/local/bin/gitea ]; then
+        /usr/local/bin/gitea --version 2>/dev/null | head -1
       else
         echo "(not found)"
       fi
@@ -57,7 +65,7 @@ mkdir -p /var/log/autoinstall
   echo "# provisioned at $(date -u +%FT%TZ)"
   echo "# host: $(cat /etc/hostname 2>/dev/null)"
   echo
-  for c in git gh rg docker "docker compose" nvidia-ctk java node npm grok opencode openmausbot unity godot jenkins sshd; do
+  for c in git gh rg docker "docker compose" nvidia-ctk java node npm grok opencode openmausbot unity godot gitea jenkins sshd; do
     printf '%-18s ' "$c"
     _manifest_ver "$c" || echo "(not found)"
   done

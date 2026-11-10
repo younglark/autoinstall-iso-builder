@@ -56,6 +56,11 @@ PIN_GROK="${PIN_GROK:-latest}"
 PIN_OPENCODE="${PIN_OPENCODE:-latest}"
 PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
+PIN_GITEA="${PIN_GITEA:-latest}"
+# Gitea 管理员 (默认 = --username / --password; 只有哈希时装机生成随机密码)
+GITEA_ADMIN_USER=""
+GITEA_ADMIN_PASSWORD=""
+GITEA_ADMIN_EMAIL=""
 
 usage() {
   cat <<'USAGE'
@@ -105,6 +110,12 @@ usage() {
   --pin-opencode VER    npm 版 opencode-ai, 默认 latest (PIN_OPENCODE)
   --pin-openmausbot VER npm 版 openmausbot, 默认 latest (PIN_OPENMAUSBOT)
   --pin-unity-cli VER  Unity CLI 版本, 默认拉 latest/latest-beta (PIN_UNITY_CLI)
+  --pin-gitea VER       Gitea 版本 (如 28.3.0), 默认 latest (PIN_GITEA)
+  --gitea-admin-user U  Gitea 管理员用户名, 默认 = --username
+  --gitea-admin-password P
+                        Gitea 管理员密码 (>=8 位), 默认 = --password 明文;
+                        只给了 --password-hash 时装机生成随机密码写入 /root/gitea-admin-password
+  --gitea-admin-email E Gitea 管理员邮箱, 默认 <用户名>@localhost
   --iso-sha256 HEX      校验源 ISO 的 SHA256, 不匹配则失败
   --iso-sha256sums FILE 用 SHA256SUMS 文件按 basename 校验源 ISO
   --menu-regex REGEX    要注入的菜单项标题正则。默认 server: "Try or Install";
@@ -177,6 +188,10 @@ while [[ $# -gt 0 ]]; do
     --pin-opencode)   PIN_OPENCODE="$2"; shift 2 ;;
     --pin-openmausbot) PIN_OPENMAUSBOT="$2"; shift 2 ;;
     --pin-unity-cli)  PIN_UNITY_CLI="$2"; shift 2 ;;
+    --pin-gitea)      PIN_GITEA="$2"; shift 2 ;;
+    --gitea-admin-user) GITEA_ADMIN_USER="$2"; shift 2 ;;
+    --gitea-admin-password) GITEA_ADMIN_PASSWORD="$2"; shift 2 ;;
+    --gitea-admin-email) GITEA_ADMIN_EMAIL="$2"; shift 2 ;;
     --iso-sha256)     ISO_SHA256="$2"; shift 2 ;;
     --iso-sha256sums) ISO_SHA256SUMS="$2"; shift 2 ;;
     --dry-run)        DRY_RUN=1; shift ;;
@@ -213,6 +228,29 @@ _pin_ok "$PIN_GROK" || die "非法 --pin-grok: $PIN_GROK"
 _pin_ok "$PIN_OPENCODE" || die "非法 --pin-opencode: $PIN_OPENCODE"
 _pin_ok "$PIN_OPENMAUSBOT" || die "非法 --pin-openmausbot: $PIN_OPENMAUSBOT"
 [[ -z "$PIN_UNITY_CLI" || "$PIN_UNITY_CLI" =~ ^[a-zA-Z0-9._+-]+$ ]] || die "非法 --pin-unity-cli: $PIN_UNITY_CLI"
+[[ "$PIN_GITEA" == "latest" || "$PIN_GITEA" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] \
+  || die "非法 --pin-gitea: $PIN_GITEA (latest 或 X.Y.Z, 如 28.3.0)"
+
+# Gitea 管理员 (45-gitea.sh)。默认取系统用户名与明文密码
+[[ -n "$GITEA_ADMIN_USER" ]] || GITEA_ADMIN_USER="$USERNAME_"
+[[ "$GITEA_ADMIN_USER" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,38}$ ]] \
+  || die "--gitea-admin-user 非法 (字母数字开头, 仅 [A-Za-z0-9._-], 最长 39): $GITEA_ADMIN_USER"
+case "$(printf '%s' "$GITEA_ADMIN_USER" | tr '[:upper:]' '[:lower:]')" in
+  api|assets|explore|login|user|users|org|repo|attachments|avatars|install|issues|pulls|notifications|swagger|-|.|..)
+    die "Gitea 管理员用户名 '$GITEA_ADMIN_USER' 是 Gitea 保留名; 请用 --gitea-admin-user 换一个" ;;
+esac
+if [[ -n "$GITEA_ADMIN_EMAIL" ]]; then
+  [[ "$GITEA_ADMIN_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || die "--gitea-admin-email 非法: $GITEA_ADMIN_EMAIL"
+fi
+if [[ -n "$GITEA_ADMIN_PASSWORD" ]]; then
+  [[ "${#GITEA_ADMIN_PASSWORD}" -ge 8 ]] || die "--gitea-admin-password 至少 8 位 (Gitea 默认 MIN_PASSWORD_LENGTH)"
+  [[ "$GITEA_ADMIN_PASSWORD" != *$'\n'* ]] || die "--gitea-admin-password 不能含换行"
+elif [[ -n "$PASS_PLAIN" ]]; then
+  GITEA_ADMIN_PASSWORD="$PASS_PLAIN"
+fi
+if ! should_skip_script 45-gitea && [[ "$USERNAME_" == "git" ]]; then
+  die "--username git 与 Gitea 的系统用户 git 冲突; 换个用户名, 或 --skip 45 不装 Gitea"
+fi
 
 # SSH: allow-pw=false 且无公钥 → 装完登不进, 构建期直接拒绝
 _ssh_allow="$(printf '%s' "$SSH_ALLOW_PW" | tr '[:upper:]' '[:lower:]')"
@@ -343,6 +381,7 @@ if [[ "${FETCH_OFFLINE:-0}" -eq 1 ]]; then
     --pin-node "$PIN_NODE_MAJOR" --pin-grok "$PIN_GROK"
     --pin-opencode "$PIN_OPENCODE" --pin-openmausbot "$PIN_OPENMAUSBOT")
   [[ -n "$PIN_UNITY_CLI" ]] && FETCH_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
+  FETCH_ARGS+=(--pin-gitea "$PIN_GITEA")
   [[ "${FORCE_FETCH:-0}" -eq 1 ]] && FETCH_ARGS+=(--force)
   bash "$SCRIPT_DIR/tools/fetch-offline-bundle.sh" "${FETCH_ARGS[@]}"
   OFFLINE_BUNDLE="$OB_OUT"
@@ -365,6 +404,7 @@ if [[ -n "$OFFLINE_BUNDLE" ]]; then
       --pin-opencode "$PIN_OPENCODE" --pin-openmausbot "$PIN_OPENMAUSBOT")
     [[ -n "$REL_FOR_V" ]] && VAL_ARGS+=(--release "$REL_FOR_V")
     [[ -n "$PIN_UNITY_CLI" ]] && VAL_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
+    VAL_ARGS+=(--pin-gitea "$PIN_GITEA")
     bash "$SCRIPT_DIR/tools/validate-offline-bundle.sh" "${VAL_ARGS[@]}"       || die "离线捆绑校验失败 (见上)。重建: ./tools/fetch-offline-bundle.sh --force ..."
   fi
 elif [[ "$OFFLINE" -eq 1 && "$PROVISION" -eq 1 ]]; then
@@ -506,6 +546,12 @@ if [[ "$PROVISION" -eq 1 ]]; then
 ' "$PIN_UNITY_CLI"
     printf 'PIN_GODOT=%q
 ' "${PIN_GODOT:-4.7.2}"
+    printf 'PIN_GITEA=%q
+' "$PIN_GITEA"
+    printf 'GITEA_ADMIN_USER=%q
+' "$GITEA_ADMIN_USER"
+    printf 'GITEA_ADMIN_EMAIL=%q
+' "$GITEA_ADMIN_EMAIL"
     printf 'OFFLINE=%q
 ' "$FULL_OFFLINE"
     printf 'OFFLINE_ROOT=%q
@@ -513,6 +559,14 @@ if [[ "$PROVISION" -eq 1 ]]; then
     printf 'EXTRA_APT_PACKAGES=%q
 ' "$PACKAGES"
   } > "$WORK/provision/provision.env"
+  # Gitea 管理员明文密码单独放 0600 文件 (不进 provision.env / 日志); 45-gitea.sh 用后删除
+  if [[ -n "$GITEA_ADMIN_PASSWORD" ]] && ! should_skip_script 45-gitea; then
+    ( umask 077; printf 'GITEA_ADMIN_PASSWORD=%q\n' "$GITEA_ADMIN_PASSWORD" > "$WORK/provision/gitea-admin.secret" )
+    chmod 0600 "$WORK/provision/gitea-admin.secret"
+    ok "Gitea 管理员 $GITEA_ADMIN_USER: 密码随 ISO 投递 (装机后删除目标机副本)"
+  elif ! should_skip_script 45-gitea; then
+    warn "Gitea 管理员 $GITEA_ADMIN_USER: 无明文密码 (只给了 --password-hash), 装机生成随机密码 → /root/gitea-admin-password"
+  fi
   SCRIPT_COUNT=$(find "$WORK/provision" -maxdepth 1 -name '[0-9][0-9]-*.sh' | wc -l)
   ok "已打包 $SCRIPT_COUNT 个软件预装脚本 (node>=$PIN_NODE_MAJOR grok=$PIN_GROK)"
   [[ -n "$PROVISION_SKIP" ]] && warn "跳过: $PROVISION_SKIP"

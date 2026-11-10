@@ -28,7 +28,7 @@ try {
   $keyArg = Join-Path $isosFull 'k.pub'
   $outArg = Join-Path 'out' 'n1.iso'   # Windows 上是 out\n1.iso
 
-  $out = Run-Aib --dry-run build --iso $isoArg --out $outArg --password 'p@ss word' --ssh-authorized-keys $keyArg --hostname n1
+  $out = Run-Aib --dry-run build --iso $isoArg --out $outArg --password 'p@ss word' --gitea-admin-password 'g1tea secret' --ssh-authorized-keys $keyArg --hostname n1
   Expect 'cwd 挂到 /work' $out "source=$projFull,target=/work"
   Expect 'cwd 外 ISO 父目录挂载' $out "source=$isosFull,target=/mnt/aib1"
   Expect 'ISO 参数改写' $out '--iso /mnt/aib1/u.iso'
@@ -40,6 +40,8 @@ try {
   Reject '无 ghcr 默认' $out 'ghcr.io'
   Expect '明文密码打码' $out "--password '***'"
   Reject '明文密码不泄露' $out 'p@ss'
+  Expect 'Gitea 密码打码' $out "--gitea-admin-password '***'"
+  Reject 'Gitea 密码不泄露' $out 'g1tea'
   Reject 'build 不强制平台' $out '--platform'
   if (Test-Path (Join-Path $proj 'out')) { Write-Output '[fail] dry-run 不应创建目录'; $script:Fail = 1 } else { Write-Output '[pass] dry-run 不创建目录' }
 
