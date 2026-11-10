@@ -64,6 +64,11 @@ PIN_GITEA="${PIN_GITEA:-latest}"
 GITEA_ADMIN_USER=""
 GITEA_ADMIN_PASSWORD=""
 GITEA_ADMIN_EMAIL=""
+# Jenkins 管理员 (同 Gitea 规则) 与预装插件
+JENKINS_ADMIN_USER=""
+JENKINS_ADMIN_PASSWORD=""
+DEFAULT_JENKINS_PLUGINS="workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger"
+JENKINS_PLUGINS="${JENKINS_PLUGINS:-$DEFAULT_JENKINS_PLUGINS}"
 
 usage() {
   cat <<'USAGE'
@@ -119,6 +124,14 @@ usage() {
                         Gitea 管理员密码 (>=8 位), 默认 = --password 明文;
                         只给了 --password-hash 时装机生成随机密码写入 /root/gitea-admin-password
   --gitea-admin-email E Gitea 管理员邮箱, 默认 <用户名>@localhost
+  --jenkins-admin-user U
+                        Jenkins 管理员用户名, 默认 = --username
+  --jenkins-admin-password P
+                        Jenkins 管理员密码, 默认 = --password 明文;
+                        只给了 --password-hash 时装机生成随机密码写入 /root/jenkins-admin-password
+  --jenkins-plugins "a b c"
+                        预装的 Jenkins 插件 (自动带全部依赖; 可写 name:version), 空格分隔
+                        默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger
   --iso-sha256 HEX      校验源 ISO 的 SHA256, 不匹配则失败
   --iso-sha256sums FILE 用 SHA256SUMS 文件按 basename 校验源 ISO
   --menu-regex REGEX    要注入的菜单项标题正则。默认 server: "Try or Install";
@@ -195,6 +208,9 @@ while [[ $# -gt 0 ]]; do
     --gitea-admin-user) GITEA_ADMIN_USER="$2"; shift 2 ;;
     --gitea-admin-password) GITEA_ADMIN_PASSWORD="$2"; shift 2 ;;
     --gitea-admin-email) GITEA_ADMIN_EMAIL="$2"; shift 2 ;;
+    --jenkins-admin-user) JENKINS_ADMIN_USER="$2"; shift 2 ;;
+    --jenkins-admin-password) JENKINS_ADMIN_PASSWORD="$2"; shift 2 ;;
+    --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
     --iso-sha256)     ISO_SHA256="$2"; shift 2 ;;
     --iso-sha256sums) ISO_SHA256SUMS="$2"; shift 2 ;;
     --dry-run)        DRY_RUN=1; shift ;;
@@ -257,6 +273,26 @@ if [[ -n "$GITEA_ADMIN_PASSWORD" ]]; then
 elif [[ -n "$PASS_PLAIN" ]]; then
   GITEA_ADMIN_PASSWORD="$PASS_PLAIN"
 fi
+# Jenkins 管理员 (30-jenkins.sh)。默认取系统用户名与明文密码
+[[ -n "$JENKINS_ADMIN_USER" ]] || JENKINS_ADMIN_USER="$USERNAME_"
+[[ "$JENKINS_ADMIN_USER" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
+  || die "--jenkins-admin-user 非法 (字母数字开头, 仅 [A-Za-z0-9._-], 最长 64): $JENKINS_ADMIN_USER"
+case "$(printf '%s' "$JENKINS_ADMIN_USER" | tr '[:upper:]' '[:lower:]')" in
+  system|anonymous|unknown|jenkins)
+    die "Jenkins 管理员用户名 '$JENKINS_ADMIN_USER' 是 Jenkins 保留/系统名; 请用 --jenkins-admin-user 换一个" ;;
+esac
+if [[ -n "$JENKINS_ADMIN_PASSWORD" ]]; then
+  [[ "$JENKINS_ADMIN_PASSWORD" != *$'\n'* ]] || die "--jenkins-admin-password 不能含换行"
+  [[ "${#JENKINS_ADMIN_PASSWORD}" -le 72 ]] || die "--jenkins-admin-password 最长 72 字节 (bcrypt 限制)"
+elif [[ -n "$PASS_PLAIN" ]]; then
+  JENKINS_ADMIN_PASSWORD="$PASS_PLAIN"
+fi
+# 插件白名单: name 或 name:version, 空格分隔 (防 provision.env / 命令注入)
+JENKINS_PLUGINS="$(printf '%s' "$JENKINS_PLUGINS" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+[[ -n "$JENKINS_PLUGINS" ]] || die "--jenkins-plugins 不能为空"
+for _jp in $JENKINS_PLUGINS; do
+  [[ "$_jp" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*(:[A-Za-z0-9._-]+)?$ ]] || die "--jenkins-plugins 含非法插件名: $_jp"
+done
 if ! should_skip_script 45-gitea && [[ "$USERNAME_" == "git" ]]; then
   die "--username git 与 Gitea 的系统用户 git 冲突; 换个用户名, 或 --skip 45 不装 Gitea"
 fi
@@ -273,7 +309,7 @@ if [[ "$_ssh_allow" == "false" && "$_has_keys" -eq 0 ]]; then
 fi
 
 if [[ "$USED_DEFAULT_PASSWORD" -eq 1 ]]; then
-  warn "未传 --password / --password-hash: 使用默认密码 (用户 $USERNAME_; Gitea 管理员同此)。这是公开的默认值, 装完请立即修改: passwd + Gitea 网页改密"
+  warn "未传 --password / --password-hash: 使用默认密码 (用户 $USERNAME_; Gitea/Jenkins 管理员同此)。这是公开的默认值, 装完请立即修改: passwd + Gitea/Jenkins 网页改密"
 fi
 if [[ -z "$PASS_HASH" ]]; then
   command -v openssl >/dev/null || die "缺少 openssl, 无法哈希密码"
@@ -390,7 +426,7 @@ if [[ "${FETCH_OFFLINE:-0}" -eq 1 ]]; then
     --pin-node "$PIN_NODE_MAJOR" --pin-grok "$PIN_GROK"
     --pin-opencode "$PIN_OPENCODE" --pin-openmausbot "$PIN_OPENMAUSBOT")
   [[ -n "$PIN_UNITY_CLI" ]] && FETCH_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
-  FETCH_ARGS+=(--pin-gitea "$PIN_GITEA")
+  FETCH_ARGS+=(--pin-gitea "$PIN_GITEA" --jenkins-plugins "$JENKINS_PLUGINS")
   [[ "${FORCE_FETCH:-0}" -eq 1 ]] && FETCH_ARGS+=(--force)
   bash "$SCRIPT_DIR/tools/fetch-offline-bundle.sh" "${FETCH_ARGS[@]}"
   OFFLINE_BUNDLE="$OB_OUT"
@@ -413,7 +449,7 @@ if [[ -n "$OFFLINE_BUNDLE" ]]; then
       --pin-opencode "$PIN_OPENCODE" --pin-openmausbot "$PIN_OPENMAUSBOT")
     [[ -n "$REL_FOR_V" ]] && VAL_ARGS+=(--release "$REL_FOR_V")
     [[ -n "$PIN_UNITY_CLI" ]] && VAL_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
-    VAL_ARGS+=(--pin-gitea "$PIN_GITEA")
+    VAL_ARGS+=(--pin-gitea "$PIN_GITEA" --jenkins-plugins "$JENKINS_PLUGINS")
     bash "$SCRIPT_DIR/tools/validate-offline-bundle.sh" "${VAL_ARGS[@]}"       || die "离线捆绑校验失败 (见上)。重建: ./tools/fetch-offline-bundle.sh --force ..."
   fi
 elif [[ "$OFFLINE" -eq 1 && "$PROVISION" -eq 1 ]]; then
@@ -532,6 +568,8 @@ if [[ "$PROVISION" -eq 1 ]]; then
   # 只带 .sh 和 env, 不带任何本地残留
   cp "$SCRIPT_DIR/software"/*.sh "$WORK/provision/"
   chmod 0755 "$WORK/provision"/*.sh
+  # Jenkins 插件解析器 (30-jenkins.sh 在线路径用; 与 fetch-offline-bundle 同一份)
+  cp "$SCRIPT_DIR/tools/resolve-jenkins-plugins.py" "$WORK/provision/"
   # 逐行 %q 写入, 保证 source 安全 (旧写法 EXTRA_APT_PACKAGES=vim, htop 会把 htop 当命令执行)
   {
     echo "# 由 build-iso.sh 生成 (printf %q; 请勿手改未加引号的值)"
@@ -561,6 +599,8 @@ if [[ "$PROVISION" -eq 1 ]]; then
 ' "$GITEA_ADMIN_USER"
     printf 'GITEA_ADMIN_EMAIL=%q
 ' "$GITEA_ADMIN_EMAIL"
+    printf 'JENKINS_ADMIN_USER=%q\n' "$JENKINS_ADMIN_USER"
+    printf 'JENKINS_PLUGINS=%q\n' "$JENKINS_PLUGINS"
     printf 'OFFLINE=%q
 ' "$FULL_OFFLINE"
     printf 'OFFLINE_ROOT=%q
@@ -575,6 +615,14 @@ if [[ "$PROVISION" -eq 1 ]]; then
     ok "Gitea 管理员 $GITEA_ADMIN_USER: 密码随 ISO 投递 (装机后删除目标机副本)"
   elif ! should_skip_script 45-gitea; then
     warn "Gitea 管理员 $GITEA_ADMIN_USER: 无明文密码 (只给了 --password-hash), 装机生成随机密码 → /root/gitea-admin-password"
+  fi
+  # Jenkins 管理员明文密码同理: 0600 文件, 30-jenkins.sh 只写 bcrypt 哈希进 init.groovy.d 并删除此文件
+  if [[ -n "$JENKINS_ADMIN_PASSWORD" ]] && ! should_skip_script 30-jenkins; then
+    ( umask 077; printf 'JENKINS_ADMIN_PASSWORD=%q\n' "$JENKINS_ADMIN_PASSWORD" > "$WORK/provision/jenkins-admin.secret" )
+    chmod 0600 "$WORK/provision/jenkins-admin.secret"
+    ok "Jenkins 管理员 $JENKINS_ADMIN_USER: 密码随 ISO 投递 (装机时转 bcrypt, 删除明文)"
+  elif ! should_skip_script 30-jenkins; then
+    warn "Jenkins 管理员 $JENKINS_ADMIN_USER: 无明文密码 (只给了 --password-hash), 装机生成随机密码 → /root/jenkins-admin-password"
   fi
   SCRIPT_COUNT=$(find "$WORK/provision" -maxdepth 1 -name '[0-9][0-9]-*.sh' | wc -l)
   ok "已打包 $SCRIPT_COUNT 个软件预装脚本 (node>=$PIN_NODE_MAJOR grok=$PIN_GROK)"

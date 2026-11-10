@@ -209,7 +209,7 @@ function Format-Cmd($list) {
   $out.Add('docker')
   $prev = ''
   foreach ($x in $list) {
-    $s = if (($prev -ceq '--password') -or ($prev -ceq '--gitea-admin-password')) { '***' } else { $x }
+    $s = if (($prev -ceq '--password') -or ($prev -ceq '--gitea-admin-password') -or ($prev -ceq '--jenkins-admin-password')) { '***' } else { $x }
     if ($s -match '^[A-Za-z0-9_./:=,@+%\\-]+$') { $out.Add($s) } else { $out.Add("'" + ($s -replace "'", "''") + "'") }
     $prev = $x
   }

@@ -216,7 +216,7 @@ DOCKER+=("${NEW_ARGS[@]+"${NEW_ARGS[@]}"}")
 print_cmd() {
   local line="" a prev=""
   for a in "$@"; do
-    if [[ "$prev" == "--password" || "$prev" == "--gitea-admin-password" ]]; then a="***"; fi
+    if [[ "$prev" == "--password" || "$prev" == "--gitea-admin-password" || "$prev" == "--jenkins-admin-password" ]]; then a="***"; fi
     if [[ "$a" =~ ^[A-Za-z0-9_./:=,@+%-]+$ ]]; then
       line="${line}${a} "
     else

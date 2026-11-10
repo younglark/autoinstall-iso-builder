@@ -37,6 +37,10 @@ PIN_OPENCODE="${PIN_OPENCODE:-latest}"
 PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 PIN_GITEA="${PIN_GITEA:-latest}"
+JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger}"
+# Jenkins 插件解析器 (纯 Python 标准库; 与 software/30-jenkins.sh 在线路径同一份)
+RESOLVER="$SCRIPT_DIR/resolve-jenkins-plugins.py"
+RESOLVER_SHA="$(sha256sum "$RESOLVER" 2>/dev/null | cut -c1-16)"
 SKIP_NPM=0
 FORCE=0
 APT_RUNNER="${AIB_APT_RUNNER:-docker}"
@@ -59,6 +63,9 @@ usage() {
   --pin-openmausbot VER 默认 latest
   --pin-unity-cli VER   Unity CLI 版本 (默认拉 latest/latest-beta)
   --pin-gitea VER       Gitea 版本 (默认 latest, 由 dl.gitea.com/gitea/version.json 解析)
+  --jenkins-plugins "a b"
+                        预装 Jenkins 插件 (按捆绑里同一 Jenkins 版本的 update center 解析全部必需依赖)
+                        默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger
   --ubuntu-mirror URL   容器内 Ubuntu 源
   --skip-npm            不打包 npm 全局树 (调试用)
   --apt-runner R        docker (默认) | direct (仅限容器内, 见脚本头注释)
@@ -84,6 +91,7 @@ while [[ $# -gt 0 ]]; do
     --pin-openmausbot) PIN_OPENMAUSBOT="$2"; shift 2 ;;
     --pin-unity-cli) PIN_UNITY_CLI="$2"; shift 2 ;;
     --pin-gitea) PIN_GITEA="$2"; shift 2 ;;
+    --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
     --ubuntu-mirror) UBUNTU_MIRROR="$2"; shift 2 ;;
     --skip-npm) SKIP_NPM=1; shift ;;
     --force) FORCE=1; shift ;;
@@ -102,6 +110,11 @@ esac
 
 [[ "$PIN_GITEA" == "latest" || "$PIN_GITEA" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] \
   || die "非法 --pin-gitea: $PIN_GITEA"
+JENKINS_PLUGINS="$(printf '%s' "$JENKINS_PLUGINS" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+[[ -n "$JENKINS_PLUGINS" ]] || die "--jenkins-plugins 不能为空"
+for _jp in $JENKINS_PLUGINS; do
+  [[ "$_jp" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*(:[A-Za-z0-9._-]+)?$ ]] || die "--jenkins-plugins 含非法插件名: $_jp"
+done
 
 if [[ -z "$OUT" ]]; then
   OUT="$CACHE_ROOT/${RELEASE}-${ARCH}"
@@ -132,7 +145,7 @@ case "$APT_RUNNER" in
 esac
 
 # 计算期望指纹; 已有捆绑指纹一致才复用 (否则提示 --force)
-expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" <<'FP'
+expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$RESOLVER_SHA" <<'FP'
 import hashlib, json, sys
 payload = {
   "schema": 3,
@@ -148,10 +161,13 @@ payload = {
     "gitea": sys.argv[9],
   },
   "extra_packages": [p for p in sys.argv[8].split(",") if p],
+  "jenkins_plugins": sorted(set(sys.argv[10].split())),
+  "jenkins_plugin_resolver": sys.argv[11],
   "seeds": [
     "git", "ripgrep", "openssh-server", "gh",
     "docker-ce", "nvidia-container-toolkit", "jenkins", "nodejs",
     "unity-cli", "godot", "gitea", "apt-sources",
+    "fontconfig", "libharfbuzz0b", "python3-bcrypt", "jenkins-plugins",
   ],
 }
 print(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16])
@@ -300,7 +316,7 @@ SEEDS=(
   gh
   docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   nvidia-container-toolkit
-  "$JAVA_PKG" jenkins
+  "$JAVA_PKG" jenkins fontconfig libharfbuzz0b python3-bcrypt
   nodejs
 )
 IFS=',' read -r -a EXTRA <<< "$EXTRA_PACKAGES"
@@ -337,9 +353,16 @@ if [ "${#_dl[@]}" -gt 0 ]; then
   _i=0
   while [ "$_i" -lt "${#_dl[@]}" ]; do
     _chunk=("${_dl[@]:_i:40}")
-    apt-get install -y --download-only --reinstall \
+    if ! apt-get install -y --download-only --reinstall \
       -o Dir::Cache::archives=/var/cache/apt/archives \
-      "${_chunk[@]}" || true
+      "${_chunk[@]}"; then
+      # 整批是一个事务: 批内有互斥的候选 (如 libqt5gui5t64 vs libqt5gui5-gles) 时整批作废,
+      # 会把同批的 libpsl5t64 / python3.12 等一起漏掉。逐个 apt-get download (不解析依赖, 不会冲突)。
+      echo "chunk failed; per-package download fallback (${#_chunk[@]})"
+      ( cd /var/cache/apt/archives && for _q in "${_chunk[@]}"; do
+          apt-get download -o APT::Sandbox::User=root "$_q" >/dev/null 2>&1 || echo "  skip: $_q"
+        done )
+    fi
     _i=$((_i + 40))
   done
 fi
@@ -387,6 +410,11 @@ fi
 
 # 记下 java 包名供安装时使用
 echo "$JAVA_PKG" > "$OUTDIR/java-package.txt"
+
+# Jenkins 版本 (插件在宿主机按此版本的 update center 解析, 不需要 Java)
+JDEB="$(ls "$OUTDIR"/apt/jenkins_*.deb | sort -V | tail -1)"
+JVER="$(dpkg-deb -f "$JDEB" Version)"
+printf '%s' "${JVER%%-*}" > "$OUTDIR/jenkins-version.txt"
 INNER
 chmod +x "$WORK/fetch-debs.sh"
 
@@ -411,9 +439,22 @@ if command -v sudo >/dev/null; then
 fi
 
 # 同步到 OUT (保留可复用)
-rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/package-list.txt" "$OUT/java-package.txt"
+rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/jenkins-plugins" "$OUT/jenkins-version.txt" "$OUT/package-list.txt" "$OUT/java-package.txt"
 mkdir -p "$OUT"
 cp -a "$WORK/out/." "$OUT/"
+
+# --------------- Jenkins 插件 (宿主机 python3; update center sha256 校验) ---------------
+JVER="$(cat "$OUT/jenkins-version.txt")"
+log "解析 Jenkins 插件 (Jenkins $JVER): $JENKINS_PLUGINS"
+JP_DIR="$OUT/jenkins-plugins"
+mkdir -p "$JP_DIR"
+# shellcheck disable=SC2086
+python3 "$RESOLVER" --jenkins-version "$JVER" --out "$JP_DIR" $JENKINS_PLUGINS \
+  || die "Jenkins 插件解析/下载失败"
+printf '%s' "$JVER" > "$JP_DIR/jenkins-version"
+# shellcheck disable=SC2086
+printf '%s\n' $JENKINS_PLUGINS | sort -u > "$JP_DIR/requested.txt"
+ok "Jenkins 插件: $(wc -l < "$JP_DIR/plugins.lock") 个 ($(du -sh "$JP_DIR" | cut -f1))"
 
 # --------------- npm 全局树 (宿主机 node, 与目标 arch 一致的 linux) ---------------
 if [[ "$SKIP_NPM" -eq 0 ]]; then
@@ -579,6 +620,18 @@ if gt.exists():
       "filename": (gt/"binary.name").read_text().strip() if (gt/"binary.name").exists() else None,
       "present": any(gt.glob("gitea-*-linux-amd64")),
     }
+jenkins_plugins_meta = None
+jp = out/"jenkins-plugins"
+if jp.is_dir():
+    lock = (jp/"plugins.lock").read_text().split() if (jp/"plugins.lock").exists() else []
+    jenkins_plugins_meta = {
+      "jenkins_version": (jp/"jenkins-version").read_text().strip() if (jp/"jenkins-version").exists() else None,
+      "resolver": "tools/resolve-jenkins-plugins.py",
+      "requested": (jp/"requested.txt").read_text().split() if (jp/"requested.txt").exists() else [],
+      "count": len(lock),
+      "size_bytes": sum(p.stat().st_size for p in jp.glob("*.jpi")),
+      "lock": lock,
+    }
 apt_src = out/"apt-sources"
 apt_sources_meta = None
 if apt_src.is_dir():
@@ -612,6 +665,7 @@ manifest = {
   "unity_cli": unity_meta or None,
   "godot": godot_meta or None,
   "gitea": gitea_meta or None,
+  "jenkins_plugins": jenkins_plugins_meta,
   "apt_sources": apt_sources_meta,
 }
 (out/"manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
