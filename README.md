@@ -4,7 +4,7 @@
 
 适用：Ubuntu Server **22.04 / 24.04**，以及 Ubuntu **Desktop 24.04**（`--edition desktop`，默认按 ISO 自动识别，见「[Ubuntu Desktop 24.04](#ubuntu-desktop-2404)」）。
 
-构建机：**Linux / WSL2 原生运行**；**macOS / Windows / Linux 都可以用 Docker 镜像**（`ghcr.io/younglark/autoinstall-iso-builder`），见「[在 macOS / Windows / Linux 上用容器构建](#在-macos--windows--linux-上用容器构建)」。产出的 ISO 只面向 x86_64 (amd64) 目标机。
+构建机：**Linux / WSL2 原生运行**；**macOS / Windows / Linux 都可以用 Docker 容器**（包装脚本首次运行时用仓库里的 `Dockerfile` 在本机构建镜像，不依赖任何镜像仓库），见「[在 macOS / Windows / Linux 上用容器构建](#在-macos--windows--linux-上用容器构建)」。产出的 ISO 只面向 x86_64 (amd64) 目标机。
 
 ---
 
@@ -89,7 +89,12 @@
 | Windows + WSL2 发行版 | 在 WSL 里装 docker 或启用 Docker Desktop 的 WSL 集成 | 在 WSL 里用 `./scripts/aib.sh`，或直接原生 `./build-iso.sh` |
 | Linux | docker engine | `./scripts/aib.sh`（或继续原生 `./build-iso.sh`） |
 
-只需要仓库里的 `scripts/aib.sh` / `scripts/aib.ps1` 两个文件，不必在宿主机装 xorriso / python / node。
+宿主机只需要 Docker 和本仓库（`git clone` 或下载 zip），不必装 xorriso / python / node。
+
+**镜像在本机构建，不从任何 registry 拉取**：
+- 第一次运行任意子命令时，包装脚本发现本地没有 `autoinstall-iso-builder:local`，就用仓库根目录的 `Dockerfile` 自动 `docker build`。**首次约 3–10 分钟**（主要是 apt 下载与 Node tarball，取决于网络；Apple Silicon 给 22.04/amd64 构建时更慢），之后每次运行秒级启动。
+- `git pull` 更新仓库后加 `--rebuild` 重新构建（Docker 层缓存仍生效，通常只重做最后几层）；镜像带 `aib.revision` 标签，脚本发现镜像比仓库旧时会提示。
+- 国内网络：`APT_MIRROR=http://mirrors.aliyun.com/ubuntu ./scripts/aib.sh ...`（PowerShell：`$env:APT_MIRROR='http://mirrors.aliyun.com/ubuntu'`）只影响镜像构建时的 apt 源；DNS/代理受限时可用 `AIB_BUILD_ARGS="--network=host"` 给自动 `docker build` 追加参数。
 
 ```bash
 # macOS / Linux：子命令后面的参数与 build-iso.sh 完全一致
@@ -118,24 +123,23 @@
 
 | 选项 | 作用 |
 |---|---|
-| `--tag TAG` / `AIB_TAG` | 镜像 tag，默认 `latest`；可钉 `v1.2.3` 或 `sha-xxxxxxx` |
-| `--image REF` / `AIB_IMAGE` | 镜像仓库，默认 `ghcr.io/younglark/autoinstall-iso-builder`（私有镜像仓库/内网同步时改这里） |
-| `--local` | 用本仓库 `Dockerfile` 现场 `docker build`（tag `autoinstall-iso-builder:local`），不拉 GHCR |
-| `--pull` | 运行前强制 `docker pull`（`latest` 会被缓存，更新时用） |
-| `--platform P` | 覆盖 docker `--platform` |
+| （默认） | 本地镜像 `autoinstall-iso-builder:local`（抓 22.04 捆绑用 `:local-jammy`），不存在时自动构建 |
+| `--rebuild` | 强制重新 `docker build` 本地镜像 |
+| `--image REF` / `AIB_IMAGE` | 改用指定的完整镜像引用（例如自己推到内网 registry 的镜像），此时不再自动构建 |
+| `--local` | 兼容旧用法，等同默认（无操作） |
+| `--platform P` | 覆盖 docker `--platform`（本地镜像 tag 会带架构后缀，如 `:local-amd64`，避免与本机架构镜像互相覆盖） |
+| `--docker-arg A` / `AIB_DOCKER_ARGS` | 追加 docker run 参数（如 `--network=host`、代理环境变量） |
 | `--dry-run` | 只打印要执行的 docker 命令（注意：写在子命令**之后**的 `--dry-run` 是 build-iso.sh 自己的干跑） |
 
 **路径与属主**：当前目录挂到容器 `/work`；`--iso` / `--out` / `--offline-bundle` / `--ssh-authorized-keys` / `--debs` / `--iso-sha256sums` / `--cache-root` / `--bundle` 若指向当前目录之外，包装脚本自动把其**父目录**挂到 `/mnt/aibN` 并改写参数（Windows 的 `C:\...` 盘符路径同理）。路径里不能有逗号（docker `--mount` 限制）。Linux / WSL2 上产出文件属于当前用户（容器内用 `AIB_UID/AIB_GID` 降权或事后 chown），不会留下 root 文件。
 
-**镜像 tag**：
+**本地镜像 tag**：
 
 | tag | 内容 |
 |---|---|
-| `latest`、`sha-<短提交>` | main 最新构建（Ubuntu 24.04 基底） |
-| `vX.Y.Z`、`X.Y.Z`、`X.Y` | 打版本 tag 时发布 |
-| 以上 + `-jammy` 后缀 | Ubuntu 22.04 基底，**只在给 22.04 抓离线捆绑时需要**；包装脚本按 `--release jammy` / 22.04 ISO 名自动选 |
-
-镜像是 `linux/amd64` + `linux/arm64` 多架构。
+| `autoinstall-iso-builder:local` | Ubuntu 24.04 基底，本机架构；`build` / `check-iso` / 抓 24.04 捆绑都用它 |
+| `autoinstall-iso-builder:local-jammy` | Ubuntu 22.04 基底，**只在给 22.04 抓离线捆绑时需要**；包装脚本按 `--release jammy` / 22.04 ISO 名自动选择并按需构建 |
+| `…-amd64` 后缀 | 仅在 ARM 主机上强制 `linux/amd64`（抓捆绑）时出现 |
 
 ### 容器里抓离线捆绑（无需 docker-in-docker）
 
@@ -143,7 +147,7 @@
 
 ```bash
 ./scripts/aib.sh fetch-offline --release noble --out cache/offline-bundles/noble-amd64 --packages "vim,curl"
-./scripts/aib.sh fetch-offline --release jammy --out cache/offline-bundles/jammy-amd64   # 自动用 :latest-jammy
+./scripts/aib.sh fetch-offline --release jammy --out cache/offline-bundles/jammy-amd64   # 自动构建并使用 :local-jammy
 
 ./scripts/aib.sh build --iso ubuntu-24.04.3-live-server-amd64.iso --out out/offline.iso \
   --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
@@ -155,13 +159,16 @@
 - 默认缓存目录是挂载目录下的 `cache/offline-bundles/`（容器内 `OFFLINE_CACHE_ROOT=/work/cache/offline-bundles`），重复构建可复用。
 - `--apt-runner direct` 只能在一次性容器里用（会改写本机 `/etc/apt`）；脚本会检查容器标记、root、发行版代号与架构，不匹配直接失败。
 
-### 本地构建镜像 / 国内网络
+### 手动构建镜像（可选）
+
+包装脚本会自动构建；想手动构建或推到自己的 registry 时：
 
 ```bash
 docker build -t autoinstall-iso-builder:local .                                   # 24.04 基底
 docker build -t autoinstall-iso-builder:local-jammy --build-arg UBUNTU_VERSION=22.04 .
 docker build --build-arg APT_MIRROR=http://mirrors.aliyun.com/ubuntu -t autoinstall-iso-builder:local .   # 换 apt 源
-./scripts/aib.sh --local build ...    # 或让包装脚本现场构建
+./scripts/aib.sh --rebuild version    # 或让包装脚本重建
+./scripts/aib.sh --image registry.example.com/aib:1 build ...      # 使用自建镜像
 ```
 
 ### 写 U 盘（各平台）
@@ -177,8 +184,8 @@ docker build --build-arg APT_MIRROR=http://mirrors.aliyun.com/ubuntu -t autoinst
 ### 容器方案的限制
 
 - macOS / Windows 上**不能**直接跑 `test/qemu-smoke.sh` 的完整装机冒烟（需要 qemu + libguestfs，最好有 KVM）；容器里只提供 `check-iso`（只读检查）。完整冒烟请在 Linux 宿主机或 Linux VM 里做。
-- GitHub Actions 只在 Linux runner 上真跑容器；macOS / Windows runner 没有可用的 Linux docker，只用 `--dry-run` 校验包装脚本的参数/路径改写（`test/wrapper-dry-run.sh` / `.ps1`）。
-- 首次推送 GHCR 后，包默认是**私有**的：需要在 GitHub → Packages → autoinstall-iso-builder → Package settings 里改为 Public，否则未登录的 `docker pull` 会失败（或先 `docker login ghcr.io`）。
+- 首次运行要现场构建镜像（约 3–10 分钟），需要能访问 Ubuntu apt 源与 nodejs.org。
+- CI 只在 ubuntu runner 上跑：容器端到端（自动本地构建 + 假 ISO）以及 bash / PowerShell 包装脚本的 `--dry-run` 断言；不在 macOS / Windows runner 上跑（省分钟数），这两个平台的真机运行未经 CI 覆盖。
 
 ---
 
@@ -370,7 +377,7 @@ cat /var/log/autoinstall/20-docker.log
 bash test/local-check.sh
 ```
 
-覆盖 Python 语法、grub 转义/幂等/旧参数修复、user-data YAML、默认 interactive storage / `--auto-disk`、公钥、pool-before-provision 顺序与 skip 前缀、`qemu-smoke` 对交互选盘 ISO 的拒绝（迷你 ISO + `--guard-only`，无需真开机），以及 Desktop 24.04（基于真实 24.04.5.1 Desktop ISO 抽出的 grub.cfg / loopback.cfg / install-sources.yaml 夹具）的版本识别、菜单注入与渲染语义。`.github/workflows/ci.yml` 在 PR/push 上运行 ShellCheck、这些校验、包装脚本 dry-run，以及用 `test/make-fake-iso.sh` 拼的假 ISO（只有 grub.cfg / install-sources.yaml / .disk/info，几百 KB）端到端跑一遍 `build-iso.sh`（Server + Desktop）。`.github/workflows/image.yml` 构建容器镜像，在容器里经 `scripts/aib.sh` 再跑一遍假 ISO 端到端，并在 ubuntu / macOS / Windows runner 上跑包装脚本 dry-run；main 与 `vX.Y.Z` tag 推送到 GHCR（PR 只构建不推送）。BIOS/UEFI/QEMU 与 Secure Boot 验证见下文，不在轻量 CI 下载真实 ISO。
+覆盖 Python 语法、grub 转义/幂等/旧参数修复、user-data YAML、默认 interactive storage / `--auto-disk`、公钥、pool-before-provision 顺序与 skip 前缀、`qemu-smoke` 对交互选盘 ISO 的拒绝（迷你 ISO + `--guard-only`，无需真开机），以及 Desktop 24.04（基于真实 24.04.5.1 Desktop ISO 抽出的 grub.cfg / loopback.cfg / install-sources.yaml 夹具）的版本识别、菜单注入与渲染语义。`.github/workflows/ci.yml` 在 PR/push 上运行 ShellCheck、这些校验、包装脚本 dry-run，以及用 `test/make-fake-iso.sh` 拼的假 ISO（只有 grub.cfg / install-sources.yaml / .disk/info，几百 KB）端到端跑一遍 `build-iso.sh`（Server + Desktop）。同一个 workflow 的 `container-smoke` job（PR 与 main）经 `scripts/aib.sh` 自动本地构建镜像，在容器里再跑一遍假 ISO 端到端；包装脚本 dry-run 同时测 bash 与 PowerShell（ubuntu runner 自带 pwsh）。镜像不推送到任何 registry。BIOS/UEFI/QEMU 与 Secure Boot 验证见下文，不在轻量 CI 下载真实 ISO。
 
 ### 全离线模式（`--offline` + `--offline-bundle`）
 

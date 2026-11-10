@@ -2,12 +2,14 @@
 # =============================================================================
 # autoinstall-iso-builder — 跨平台构建镜像 (macOS / Windows / Linux 均用 Docker 运行)
 #
-#   docker run --rm -v "$PWD:/work" ghcr.io/younglark/autoinstall-iso-builder build --iso ... --out ...
-#   推荐用包装脚本: scripts/aib.sh (macOS/Linux) / scripts/aib.ps1 (Windows)
+#   推荐用包装脚本: scripts/aib.sh (macOS/Linux) / scripts/aib.ps1 (Windows),
+#   首次运行会自动 docker build 本镜像 (tag autoinstall-iso-builder:local), 不依赖任何 registry。
+#   手动: docker build -t autoinstall-iso-builder:local . &&
+#         docker run --rm -v "$PWD:/work" autoinstall-iso-builder:local build --iso ... --out ...
 #
-# 变体: UBUNTU_VERSION=24.04 (默认, tag: latest / vX.Y.Z / sha-xxxx)
-#       UBUNTU_VERSION=22.04 (tag 后缀 -jammy; 只在给 22.04 抓离线捆绑时需要)
-# 架构: linux/amd64 + linux/arm64。ISO 重打包与架构无关;
+# 变体: UBUNTU_VERSION=24.04 (默认, tag :local)
+#       UBUNTU_VERSION=22.04 (tag :local-jammy; 只在给 22.04 抓离线捆绑时需要)
+# 架构: amd64 / arm64 均可本机构建。ISO 重打包与架构无关;
 #       抓离线捆绑 (apt 解析 + npm) 必须 linux/amd64 (包装脚本自动加 --platform)。
 # =============================================================================
 ARG UBUNTU_VERSION=24.04

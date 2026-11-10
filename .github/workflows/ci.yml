@@ -29,8 +29,12 @@ jobs:
       - name: Local validators (render / grub / skip / yaml)
         run: bash test/local-check.sh
 
-      - name: Wrapper dry-run (aib.sh)
-        run: bash test/wrapper-dry-run.sh
+      # 包装脚本只测参数/路径改写 (不需要 docker)。ubuntu runner 自带 pwsh, 一个 job 同时测 bash + PowerShell 版,
+      # 不开 macOS/Windows runner (私有仓库按分钟计费, 二者分别 10x / 2x)。
+      - name: Wrapper dry-run (aib.sh + aib.ps1)
+        run: |
+          bash test/wrapper-dry-run.sh
+          pwsh -NoProfile -File test/wrapper-dry-run.ps1
 
       # 真实 Ubuntu ISO 太大 (~2-6GB) 不下载; 用 fixtures 拼的假 ISO 端到端跑 build-iso.sh
       - name: E2E build-iso.sh with fake ISO (native)
@@ -42,3 +46,49 @@ jobs:
               --password-hash "$(openssl passwd -6 ci)" --auto-disk
             bash test/qemu-smoke.sh "$RUNNER_TEMP/out-$e.iso" --guard-only
           done
+
+  # ---------------------------------------------------------------------------
+  # 容器路径: scripts/aib.sh 自动本地构建镜像 -> 假 ISO 端到端 build -> check-iso。
+  # 只在 PR 和 main 上跑 (feat/** push 已有 PR 覆盖, 省分钟数)。镜像不推送到任何 registry。
+  # ---------------------------------------------------------------------------
+  container-smoke:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auto-build local image + help / version / local-check
+        run: |
+          set -euo pipefail
+          scripts/aib.sh help                 # 首次运行: 镜像不存在 -> 自动 docker build
+          docker image inspect autoinstall-iso-builder:local >/dev/null
+          test "$(docker image inspect -f '{{ index .Config.Labels "aib.revision" }}' autoinstall-iso-builder:local)" = "$GITHUB_SHA"
+          scripts/aib.sh version
+          scripts/aib.sh local-check
+          scripts/aib.sh fetch-offline --help >/dev/null
+
+      - name: E2E build with fake ISO via aib.sh (server + desktop, ISO outside cwd)
+        run: |
+          set -euo pipefail
+          isodir="$RUNNER_TEMP/isos"
+          mkdir -p "$isodir" work
+          cd work
+          for e in server desktop; do
+            ../scripts/aib.sh shell -c "bash /opt/aib/test/make-fake-iso.sh $e /work/fake-$e.iso"
+            mv "fake-$e.iso" "$isodir/"
+            ../scripts/aib.sh build --iso "$isodir/fake-$e.iso" --out "out/$e.iso" \
+              --hostname ci-$e --password-hash "$(openssl passwd -6 ci)" \
+              --ssh-authorized-keys ../test/fixtures/authorized_keys --auto-disk
+            test -s "out/$e.iso"
+            test "$(stat -c %u "out/$e.iso")" = "$(id -u)"   # Linux 上产出属于当前用户
+            ../scripts/aib.sh check-iso "out/$e.iso"
+          done
+          ls -la out
+
+      - name: fetch-offline direct mode guard (release mismatch must fail fast, no network)
+        run: |
+          set +e
+          out="$(docker run --rm autoinstall-iso-builder:local fetch-offline --release jammy --out /tmp/b 2>&1)"
+          rc=$?
+          echo "$out"
+          test "$rc" -ne 0 && echo "$out" | grep -q 'direct 模式要求容器发行版与 --release 一致'

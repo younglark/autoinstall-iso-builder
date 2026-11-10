@@ -16,6 +16,7 @@ reject() {
   if [[ "$2" != *"$3"* ]]; then pass "$1"; else fail "$1: 不应出现 [$3] in: $2"; fi
 }
 
+unset AIB_IMAGE AIB_PLATFORM AIB_DOCKER_ARGS AIB_BUILD_ARGS APT_MIRROR
 work="$(mktemp -d -t aib-dry-XXXXXX)"
 trap 'rm -rf -- "$work"' EXIT
 mkdir -p "$work/proj" "$work/isos dir"
@@ -31,30 +32,38 @@ expect "ISO 参数改写" "$out" "/mnt/aib1/u.iso"
 expect "同目录复用挂载" "$out" "/mnt/aib1/k.pub"
 reject "不重复挂载" "$out" "/mnt/aib2"
 expect "--out 相对路径" "$out" "--out /work/out/n1.iso"
-expect "默认镜像" "$out" "ghcr.io/younglark/autoinstall-iso-builder:latest build"
+expect "默认本地镜像" "$out" "autoinstall-iso-builder:local build"
+expect "默认打印自动构建命令" "$out" "docker build -t autoinstall-iso-builder:local --build-arg UBUNTU_VERSION=24.04"
+reject "无 ghcr 默认" "$out" "ghcr.io"
 expect "明文密码打码" "$out" "--password '***'"
 reject "明文密码不泄露" "$out" "p@ss"
 reject "build 不强制平台" "$out" "--platform"
 if [[ -d "$work/proj/out" ]]; then fail "dry-run 不应创建目录"; else pass "dry-run 不创建目录"; fi
 
-out="$(bash "$AIB" --dry-run --tag v1.2.3 fetch-offline --release 22.04 --out "$work/bundles/jammy")"
+out="$(AIB_BUILD_ARGS="--network=host" APT_MIRROR=http://mirrors.example/ubuntu bash "$AIB" --dry-run fetch-offline --release 22.04 --out "$work/bundles/jammy")"
 expect "fetch 强制 amd64" "$out" "--platform linux/amd64"
-expect "jammy 变体" "$out" "autoinstall-iso-builder:v1.2.3-jammy fetch-offline"
+expect "jammy 本地变体" "$out" "autoinstall-iso-builder:local-jammy"
+expect "jammy 用 22.04 构建" "$out" "UBUNTU_VERSION=22.04 --platform linux/amd64"
+expect "APT_MIRROR 透传给 docker build" "$out" "--build-arg APT_MIRROR=http://mirrors.example/ubuntu --network=host"
 expect "fetch --out 改写" "$out" "--out /mnt/aib1/jammy"
 
 out="$(bash "$AIB" --dry-run fetch-offline --release noble)"
-expect "noble 用默认变体" "$out" "autoinstall-iso-builder:latest fetch-offline"
+expect "noble 用默认变体" "$out" "autoinstall-iso-builder:local"
+reject "noble 不用 jammy" "$out" "local-jammy"
 
 out="$(bash "$AIB" --dry-run build --iso ubuntu-22.04.5-live-server-amd64.iso --out o.iso --fetch-offline)"
 expect "build --fetch-offline 强制 amd64" "$out" "--platform linux/amd64"
-expect "22.04 ISO 选 jammy 变体" "$out" ":latest-jammy build"
+expect "22.04 ISO 选 jammy 变体" "$out" "autoinstall-iso-builder:local-jammy"
 
-out="$(AIB_IMAGE=example.org/me/aib bash "$AIB" --dry-run --local check-iso ../x.iso)"
-expect "--local 先 docker build" "$out" "docker build -t autoinstall-iso-builder:local"
-expect "--local 用本地 tag" "$out" "autoinstall-iso-builder:local check-iso /mnt/aib1/x.iso"
+out="$(bash "$AIB" --dry-run --local --rebuild check-iso ../x.iso)"
+expect "--rebuild 先构建" "$out" "# --rebuild"
+expect "--local 兼容无操作" "$out" "autoinstall-iso-builder:local check-iso /mnt/aib1/x.iso"
+if bash "$AIB" --dry-run --rebuild --image x/y:1 version >/dev/null 2>&1; then fail "--rebuild + --image 应报错"; else pass "--rebuild + --image 报错"; fi
+if bash "$AIB" --dry-run --tag v1 version >/dev/null 2>&1; then fail "--tag 已移除应报错"; else pass "--tag 已移除"; fi
 
 out="$(AIB_IMAGE=example.org/me/aib bash "$AIB" --dry-run --platform linux/arm64 build --iso a.iso --out b.iso)"
-expect "AIB_IMAGE 覆盖" "$out" "example.org/me/aib:latest"
+expect "AIB_IMAGE 覆盖 (原样使用)" "$out" "example.org/me/aib build"
+reject "--image 不自动构建" "$out" "docker build"
 expect "--platform 覆盖" "$out" "--platform linux/arm64"
 
 if [[ "$(uname -s)" == "Linux" && "$(id -u)" -ne 0 ]]; then
@@ -64,7 +73,7 @@ else
 fi
 
 out="$(AIB_DOCKER_ARGS="--network=host -e HTTPS_PROXY=http://p:3128" bash "$AIB" --dry-run --docker-arg --dns=1.1.1.1 local-check)"
-expect "AIB_DOCKER_ARGS 透传" "$out" "--network=host -e HTTPS_PROXY=http://p:3128 --dns=1.1.1.1 ghcr.io/younglark/autoinstall-iso-builder:latest local-check"
+expect "AIB_DOCKER_ARGS 透传" "$out" "--network=host -e HTTPS_PROXY=http://p:3128 --dns=1.1.1.1 autoinstall-iso-builder:local local-check"
 
 if bash "$AIB" --dry-run --bogus build >/dev/null 2>&1; then fail "未知包装选项应报错"; else pass "未知包装选项报错"; fi
 

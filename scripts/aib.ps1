@@ -6,13 +6,15 @@
   .\scripts\aib.ps1 [包装选项] <子命令> [子命令参数...]
 
   包装选项 (必须写在子命令之前):
-    --image REF     镜像仓库, 默认 ghcr.io/younglark/autoinstall-iso-builder (或环境变量 AIB_IMAGE)
-    --tag TAG       镜像 tag, 默认 latest (或 AIB_TAG); 抓 jammy 捆绑时自动用 <tag>-jammy
-    --local         用本仓库 Dockerfile 现场 docker build (tag: autoinstall-iso-builder:local)
-    --pull          运行前强制 docker pull
+    (默认)          用本地镜像 autoinstall-iso-builder:local (抓 22.04 捆绑用 :local-jammy);
+                    不存在时自动用本仓库 Dockerfile docker build (首次约 3-10 分钟, 之后秒级)
+    --rebuild       强制重新 docker build 本地镜像 (git pull 更新仓库后用; 仍复用未变的层缓存)
+    --image REF     改用指定的完整镜像引用 (自建/内网仓库), 不再自动构建 (或环境变量 AIB_IMAGE)
+    --local         兼容旧用法, 等同默认 (无操作)
     --platform P    覆盖 docker --platform (默认: 需要 apt 解析的步骤强制 linux/amd64)
     --docker-arg A  追加一个 docker run 参数, 可重复 (如 --docker-arg --network=host);
                     也可用环境变量 AIB_DOCKER_ARGS (按空白切分)
+    (环境变量 AIB_BUILD_ARGS 追加到自动 docker build, 如 --network=host; APT_MIRROR 换 apt 源)
     --dry-run       只打印将执行的 docker 命令, 不运行 (不需要 docker)
     -h, --help
 
@@ -32,17 +34,15 @@ Set-StrictMode -Version 2
 function Show-Usage {
   $text = Get-Content -LiteralPath $PSCommandPath -Raw -Encoding UTF8
   $m = [regex]::Match($text, '(?s)\.DESCRIPTION\r?\n(.*?)\r?\n\.EXAMPLE')
-  if ($m.Success) { Write-Output $m.Groups[1].Value } else { Write-Output 'aib.ps1 [--image R] [--tag T] [--local] [--pull] [--platform P] [--dry-run] <subcommand> [args...]' }
+  if ($m.Success) { Write-Output $m.Groups[1].Value } else { Write-Output 'aib.ps1 [--rebuild] [--image R] [--platform P] [--docker-arg A] [--dry-run] <subcommand> [args...]' }
 }
 function Fail([string]$msg) { [Console]::Error.WriteLine("[aib] 错误: $msg"); exit 1 }
 function Info([string]$msg) { [Console]::Error.WriteLine("[aib] $msg") }
 
 $OnWindows = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
-$Image = if ($env:AIB_IMAGE) { $env:AIB_IMAGE } else { 'ghcr.io/younglark/autoinstall-iso-builder' }
-$Tag = if ($env:AIB_TAG) { $env:AIB_TAG } else { 'latest' }
+$Image = if ($env:AIB_IMAGE) { $env:AIB_IMAGE } else { '' }   # 空 = 本地构建的镜像
 $Platform = if ($env:AIB_PLATFORM) { $env:AIB_PLATFORM } else { '' }
-$LocalBuild = $false
-$Pull = $false
+$Rebuild = $false
 $DryRun = $false
 $ExtraDockerArgs = New-Object System.Collections.Generic.List[string]
 if ($env:AIB_DOCKER_ARGS) { foreach ($x in ($env:AIB_DOCKER_ARGS -split '\s+')) { if ($x) { $ExtraDockerArgs.Add($x) } } }
@@ -52,13 +52,13 @@ $i = 0
 # 注意: 不用 switch——switch 里的 continue/break 作用于 switch 本身而非 while
 while ($i -lt $all.Count) {
   $a = $all[$i]
-  if ($a -ceq '--image' -or $a -ceq '--tag' -or $a -ceq '--platform' -or $a -ceq '--docker-arg') {
+  if ($a -ceq '--image' -or $a -ceq '--platform' -or $a -ceq '--docker-arg') {
     if ($i + 1 -ge $all.Count) { Fail "$a 需要参数" }
     $v = $all[$i + 1]
-    if ($a -ceq '--image') { $Image = $v } elseif ($a -ceq '--tag') { $Tag = $v } elseif ($a -ceq '--platform') { $Platform = $v } else { $ExtraDockerArgs.Add($v) }
+    if ($a -ceq '--image') { $Image = $v } elseif ($a -ceq '--platform') { $Platform = $v } else { $ExtraDockerArgs.Add($v) }
     $i += 2
-  } elseif ($a -ceq '--local') { $LocalBuild = $true; $i++ }
-  elseif ($a -ceq '--pull') { $Pull = $true; $i++ }
+  } elseif ($a -ceq '--local') { $i++ }
+  elseif ($a -ceq '--rebuild') { $Rebuild = $true; $i++ }
   elseif ($a -ceq '--dry-run') { $DryRun = $true; $i++ }
   elseif (@('-h', '--help', '-?', '/?') -contains $a) { Show-Usage; exit 0 }
   elseif ($a -ceq '--') { $i++; break }
@@ -143,7 +143,21 @@ if ($SubCmd -in @('fetch-offline', 'fetch')) {
   if ($isoLeaf -match '22\.04|jammy') { $Variant = '-jammy' }
 }
 if (-not $Platform -and $NeedsAmd64) { $Platform = 'linux/amd64' }
-$ImageRef = if ($LocalBuild) { "autoinstall-iso-builder:local$Variant" } else { "${Image}:${Tag}$Variant" }
+function Get-NormArch([string]$a) {
+  switch -Regex ($a) { '^(x86_64|amd64|x64)$' { return 'amd64' } '^(aarch64|arm64)$' { return 'arm64' } default { return $a.ToLower() } }
+}
+$hostArch = $env:PROCESSOR_ARCHITECTURE
+try { $hostArch = [string][System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture } catch { }
+$hostArch = Get-NormArch $hostArch
+# 只有强制平台与本机架构不同 (如 ARM 机器抓捆绑) 才加架构后缀
+$ArchSuffix = ''
+if ($Platform) {
+  $wantArch = Get-NormArch ($Platform -replace '^.*/', '')
+  if ($wantArch -ne $hostArch) { $ArchSuffix = "-$wantArch" }
+}
+$AutoBuild = -not $Image
+if ($Rebuild -and -not $AutoBuild) { Fail '--rebuild 只作用于本地镜像, 不能与 --image 同用' }
+$ImageRef = if ($AutoBuild) { "autoinstall-iso-builder:local$Variant$ArchSuffix" } else { $Image }
 
 # ---------------------------------------------------------------- docker 命令
 $Docker = New-Object System.Collections.Generic.List[string]
@@ -171,12 +185,22 @@ $Docker.Add($SubCmd)
 foreach ($x in $NewArgs) { $Docker.Add($x) }
 
 $Build = $null
-if ($LocalBuild) {
-  $repoRoot = Split-Path -Parent $PSScriptRoot
+$Revision = ''
+$repoRoot = Split-Path -Parent $PSScriptRoot
+if (Get-Command git -ErrorAction SilentlyContinue) {
+  $r = (& git -C $repoRoot rev-parse HEAD 2>$null)
+  if ($LASTEXITCODE -eq 0 -and $r) { $Revision = ([string]$r).Trim() }
+}
+if ($AutoBuild) {
+  if (-not (Test-Path -LiteralPath (Join-Path $repoRoot 'Dockerfile'))) { Fail "找不到 $repoRoot\Dockerfile; 请在完整仓库里运行, 或用 --image 指定镜像" }
   $ubuntu = if ($Variant -eq '-jammy') { '22.04' } else { '24.04' }
   $Build = New-Object System.Collections.Generic.List[string]
   $Build.AddRange([string[]]@('build', '-t', $ImageRef, '--build-arg', "UBUNTU_VERSION=$ubuntu"))
   if ($Platform) { $Build.AddRange([string[]]@('--platform', $Platform)) }
+  if ($env:AIB_BUILD_ARGS) { foreach ($x in ($env:AIB_BUILD_ARGS -split '\s+')) { if ($x) { $Build.Add($x) } } }
+  if ($env:APT_MIRROR) { $Build.AddRange([string[]]@('--build-arg', "APT_MIRROR=$($env:APT_MIRROR)")) }
+  # 只打 label, 不传 build-arg (build-arg 变化会让 apt 层缓存失效)
+  if ($Revision) { $Build.AddRange([string[]]@('--label', "aib.revision=$Revision")) }
   $Build.Add($repoRoot)
 }
 
@@ -193,10 +217,9 @@ function Format-Cmd($list) {
 }
 
 if ($DryRun) {
-  if ($Build) { Write-Output (Format-Cmd $Build) }
-  if ($Pull -and -not $LocalBuild) {
-    $p = @('pull'); if ($Platform) { $p += @('--platform', $Platform) }; $p += $ImageRef
-    Write-Output (Format-Cmd $p)
+  if ($Build) {
+    if ($Rebuild) { Write-Output '# --rebuild: 先构建镜像' } else { Write-Output '# 本地镜像不存在时先构建:' }
+    Write-Output (Format-Cmd $Build)
   }
   Write-Output (Format-Cmd $Docker)
   exit 0
@@ -211,13 +234,26 @@ $osType = (& docker info --format '{{.OSType}}' 2>$null)
 if ($osType -and $osType.Trim() -ne 'linux') { Fail "Docker 当前是 $osType containers 模式; 请在 Docker Desktop 托盘菜单切换到 Linux containers" }
 
 if ($Build) {
-  Info "本地构建镜像 $ImageRef"
-  & docker @Build
-  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-} elseif ($Pull) {
-  $p = @('pull'); if ($Platform) { $p += @('--platform', $Platform) }; $p += $ImageRef
-  & docker @p
-  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  $doBuild = $Rebuild
+  if (-not $doBuild) {
+    & docker image inspect $ImageRef *> $null
+    if ($LASTEXITCODE -ne 0) {
+      Info "本地镜像 $ImageRef 不存在, 首次构建 (约 3-10 分钟, 取决于网络; 国内可设 `$env:APT_MIRROR='http://mirrors.aliyun.com/ubuntu')"
+      $doBuild = $true
+    } elseif ($Revision) {
+      $haveRev = (& docker image inspect -f '{{ index .Config.Labels "aib.revision" }}' $ImageRef 2>$null)
+      if ($haveRev) { $haveRev = ([string]$haveRev).Trim() }
+      if ($haveRev -and $haveRev -ne '<no value>' -and $haveRev -ne $Revision) {
+        Info "提示: 本地镜像构建于 $($haveRev.Substring(0, [Math]::Min(7, $haveRev.Length))), 仓库已是 $($Revision.Substring(0, 7)); 如脚本有更新请加 --rebuild"
+      }
+    }
+  } else {
+    Info "重新构建本地镜像 $ImageRef"
+  }
+  if ($doBuild) {
+    & docker @Build | Out-Host
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  }
 }
 if ($NeedsAmd64 -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64')) {
   Info 'ARM 主机: apt 解析步骤以 linux/amd64 仿真运行, 会比较慢'

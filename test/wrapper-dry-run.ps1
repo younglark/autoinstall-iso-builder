@@ -15,6 +15,7 @@ function Reject($name, $hay, $needle) {
 }
 function Run-Aib { $r = & $Aib @args; if ($LASTEXITCODE -ne 0) { throw "aib.ps1 exit $LASTEXITCODE" }; return ($r -join "`n") }
 
+foreach ($v in 'AIB_IMAGE', 'AIB_PLATFORM', 'AIB_DOCKER_ARGS', 'AIB_BUILD_ARGS', 'APT_MIRROR') { Remove-Item -Path "Env:$v" -ErrorAction SilentlyContinue }
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("aib-dry-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $proj = Join-Path $work 'proj'
 $isos = Join-Path $work 'isos dir'
@@ -34,19 +35,25 @@ try {
   Expect '同目录复用挂载' $out '/mnt/aib1/k.pub'
   Reject '不重复挂载' $out '/mnt/aib2'
   Expect '--out 反斜杠转正斜杠' $out '--out /work/out/n1.iso'
-  Expect '默认镜像' $out 'ghcr.io/younglark/autoinstall-iso-builder:latest build'
+  Expect '默认本地镜像' $out 'autoinstall-iso-builder:local build'
+  Expect '默认打印自动构建命令' $out 'docker build -t autoinstall-iso-builder:local --build-arg UBUNTU_VERSION=24.04'
+  Reject '无 ghcr 默认' $out 'ghcr.io'
   Expect '明文密码打码' $out "--password '***'"
   Reject '明文密码不泄露' $out 'p@ss'
   Reject 'build 不强制平台' $out '--platform'
   if (Test-Path (Join-Path $proj 'out')) { Write-Output '[fail] dry-run 不应创建目录'; $script:Fail = 1 } else { Write-Output '[pass] dry-run 不创建目录' }
 
-  $out = Run-Aib --dry-run --tag v1.2.3 fetch-offline --release 22.04 --out (Join-Path $work 'bundles\jammy')
+  $out = Run-Aib --dry-run fetch-offline --release 22.04 --out (Join-Path $work 'bundles\jammy')
   Expect 'fetch 强制 amd64' $out '--platform linux/amd64'
-  Expect 'jammy 变体' $out 'autoinstall-iso-builder:v1.2.3-jammy fetch-offline'
+  Expect 'jammy 本地变体' $out 'autoinstall-iso-builder:local-jammy'
+  Expect 'jammy 用 22.04 构建' $out 'UBUNTU_VERSION=22.04 --platform linux/amd64'
 
-  $out = Run-Aib --dry-run --local check-iso (Join-Path '..' 'x.iso')
-  Expect '--local 先 docker build' $out 'docker build -t autoinstall-iso-builder:local'
+  $out = Run-Aib --dry-run --local --rebuild check-iso (Join-Path '..' 'x.iso')
+  Expect '--rebuild 先构建' $out '# --rebuild'
   Expect 'check-iso 路径改写' $out 'check-iso /mnt/aib1/x.iso'
+  $out = Run-Aib --dry-run --image example.org/me/aib build --iso a.iso --out b.iso
+  Expect '--image 原样使用' $out 'example.org/me/aib build'
+  Reject '--image 不自动构建' $out 'docker build'
 
   if ($OnWindows) {
     # 盘符路径 / 不同盘符 / 大小写不敏感
@@ -58,7 +65,7 @@ try {
   }
 
   $out = Run-Aib --dry-run --docker-arg --network=host local-check
-  Expect '--docker-arg 透传' $out '--network=host ghcr.io/younglark/autoinstall-iso-builder:latest local-check'
+  Expect '--docker-arg 透传' $out '--network=host autoinstall-iso-builder:local local-check'
 
   & $Aib --dry-run --bogus build *> $null
   if ($LASTEXITCODE -ne 0) { Write-Output '[pass] 未知包装选项报错' } else { Write-Output '[fail] 未知包装选项应报错'; $script:Fail = 1 }
