@@ -123,7 +123,9 @@ id ubuntu >/dev/null 2>&1 || useradd -u 1000 -m ubuntu
 chown gdm /run/user/120/gdm/Xauthority; chown ubuntu /run/user/1000/gdm/Xauthority
 [ "$(xauth -f /run/user/1000/gdm/Xauthority list | wc -l)" = 2 ] \
   && ! xauth -f /run/user/1000/gdm/Xauthority list | grep -q ':[0-9]' || { echo "FAIL xauth fixture"; exit 1; }
-/tmp/xbin/Xorg -displayfd 3 -auth /run/user/120/gdm/Xauthority -nolisten tcp -screen 0 800x600x24 3>/tmp/dfd0 >/dev/null 2>&1 &
+# 和真机 24.04 一样 rootless: 登录界面的 X 属 gdm, 会话的 X 属登录用户 (x11vnc 必须同一用户才能用 MIT-SHM)
+mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+setpriv --reuid=gdm --regid="$(id -g gdm)" --init-groups /tmp/xbin/Xorg -displayfd 3 -auth /run/user/120/gdm/Xauthority -nolisten tcp -screen 0 800x600x24 3>/tmp/dfd0 >/dev/null 2>&1 &
 X0=$!
 sleep 2
 [ "$(tr -dc 0-9 < /tmp/dfd0)" = 0 ] || { echo "FAIL greeter displayfd != 0"; exit 1; }
@@ -143,7 +145,7 @@ listening || { echo "FAIL :0 not listening"; tail /tmp/aibx/*.log; exit 1; }
 [ "$(ps -o user= -p "$(pgrep -x x11vnc | head -1)")" = gdm ] || { echo "FAIL greeter x11vnc not running as gdm"; ps -o user,args -C x11vnc; exit 1; }
 echo "OK greeter :0 (x11vnc as gdm)"
 # 用户登录: 起 :1, 登录界面退出
-/tmp/xbin/Xorg -displayfd 3 -auth /run/user/1000/gdm/Xauthority -nolisten tcp -screen 0 800x600x24 3>/tmp/dfd1 >/dev/null 2>&1 &
+setpriv --reuid=ubuntu --regid="$(id -g ubuntu)" --init-groups /tmp/xbin/Xorg -displayfd 3 -auth /run/user/1000/gdm/Xauthority -nolisten tcp -screen 0 800x600x24 3>/tmp/dfd1 >/dev/null 2>&1 &
 sleep 1
 [ "$(tr -dc 0-9 < /tmp/dfd1)" = 1 ] || { echo "FAIL session displayfd != 1"; exit 1; }
 kill "$X0"
@@ -157,7 +159,8 @@ kill "$FP"; wait "$FP" 2>/dev/null || true
 pgrep -x x11vnc >/dev/null && { echo "FAIL x11vnc left running"; exit 1; }
 echo "OK stop"
 IN
-if docker run --rm --network none \
+# SYS_PTRACE: follower 以 root 读 gdm / 用户的 Xorg 的 /proc/<pid>/fd (真机 systemd 下 root 本来就有)
+if docker run --rm --network none --cap-add SYS_PTRACE \
      -v "$work/out2/apt:/opt/offline/apt:ro" -v "$ROOT:/src:ro" -v "$work/offline-test.sh:/t.sh:ro" \
      "$IMG" bash /t.sh > "$work/o.log" 2>&1; then
   cat "$work/o.log"
