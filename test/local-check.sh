@@ -1220,6 +1220,187 @@ else
   echo "(xorriso/openssl missing, jenkins build test skipped)"
 fi
 
+echo "== service URL host: <hostname>.local / --service-url-host (lib-service-url.sh) =="
+su_t="$(mktemp -d)"
+# shellcheck disable=SC1091
+. software/lib-service-url.sh
+for h in ubuntu-node n1 a 0 desk-01 "$(printf 'a%.0s' {1..63})"; do
+  if aib_valid_mdns_label "$h"; then pass "hostname ok: ${h:0:20}"; else fail "hostname should be valid: $h"; fi
+done
+for h in "" Node01 a.b a_b -a a- "a b" "$(printf 'a%.0s' {1..64})" 'a;rm'; do
+  if aib_valid_mdns_label "$h"; then fail "hostname should be invalid: [$h]"; else pass "hostname rejected: [${h:0:20}]"; fi
+done
+for h in localhost 192.168.1.20 10.0.0.5 ci.example.com node01.lan a-b.c-d.example; do
+  if aib_valid_service_host "$h"; then pass "service host ok: $h"; else fail "service host should be valid: $h"; fi
+done
+for h in "" http://x x:8080 1.2.3 999.1.1.1 01.2.3.4 a..b .a a. -a.com "x y" 'a;b' fe80::1 a_b.com; do
+  if aib_valid_service_host "$h"; then fail "service host should be invalid: [$h]"; else pass "service host rejected: [$h]"; fi
+done
+printf 'node07\n' > "$su_t/hostname"
+printf 'Box9.example.com\n' > "$su_t/hostname-fqdn"
+printf 'bad_name\n' > "$su_t/hostname-bad"
+_su() { env -i PATH="$PATH" "$@" bash -c '. software/lib-service-url.sh; aib_service_url_host' 2>/dev/null; }
+if [[ "$(_su AIB_HOSTNAME_FILE="$su_t/hostname")" == "node07.local" \
+   && "$(_su AIB_HOSTNAME_FILE="$su_t/hostname-fqdn")" == "box9.local" \
+   && "$(_su AIB_HOSTNAME_FILE="$su_t/hostname-bad" AIB_HOSTNAME=fallback-1)" == "fallback-1.local" \
+   && "$(_su AIB_HOSTNAME_FILE="$su_t/none" AIB_HOSTNAME=)" == "localhost" \
+   && "$(_su AIB_HOSTNAME_FILE="$su_t/hostname" SERVICE_URL_HOST=192.168.1.20)" == "192.168.1.20" \
+   && "$(_su AIB_HOSTNAME_FILE="$su_t/hostname" SERVICE_URL_HOST=CI.Example.com)" == "ci.example.com" \
+   && "$(_su AIB_HOSTNAME_FILE="$su_t/hostname" SERVICE_URL_HOST='http://x')" == "node07.local" ]]; then
+  pass "aib_service_url_host: /etc/hostname → .local, FQDN first label, fallback, override"
+else
+  fail "aib_service_url_host resolution"
+fi
+# Gitea: 用 45-gitea.sh 里真实的 app.ini heredoc 渲染 (只替换变量), 再验证 URL 三项与重跑同步
+# shellcheck disable=SC2016  # 字面量 $CONF / 子 shell 脚本, 不在此展开
+_ini_tmpl="$(sed -n '/^  cat > "\$CONF" <<INI$/,/^INI$/p' software/45-gitea.sh | sed '1d;$d')"
+_render_ini() { # $1 = SERVICE_URL_HOST (可空)
+  # shellcheck disable=SC2016
+  env -i PATH="$PATH" AIB_HOSTNAME_FILE="$su_t/hostname" SERVICE_URL_HOST="$1" TMPL="$_ini_tmpl" bash -c '
+    . software/lib-service-url.sh
+    GITEA_USER=git WORK_DIR=/var/lib/gitea HTTP_PORT=3000 SECRET_KEY=s INTERNAL_TOKEN=t JWT_SECRET=j LFS_JWT_SECRET=l
+    URL_HOST="$(aib_service_url_host)"; ROOT_URL="http://${URL_HOST}:${HTTP_PORT}/"
+    eval "cat <<INI
+$TMPL
+INI"'
+}
+_render_ini "" > "$su_t/app.ini"
+_render_ini "10.0.0.5" > "$su_t/app2.ini"
+if [[ -s "$su_t/app.ini" ]] \
+   && grep -qx 'ROOT_URL = http://node07.local:3000/' "$su_t/app.ini" \
+   && grep -qx 'DOMAIN = node07.local' "$su_t/app.ini" && grep -qx 'SSH_DOMAIN = node07.local' "$su_t/app.ini" \
+   && grep -qx 'HTTP_ADDR = 0.0.0.0' "$su_t/app.ini" && grep -qx 'HTTP_PORT = 3000' "$su_t/app.ini" \
+   && ! grep -q 'localhost:3000' "$su_t/app.ini" \
+   && grep -qx 'ROOT_URL = http://10.0.0.5:3000/' "$su_t/app2.ini" && grep -qx 'SSH_DOMAIN = 10.0.0.5' "$su_t/app2.ini"; then
+  pass "gitea app.ini: ROOT_URL/DOMAIN/SSH_DOMAIN = <hostname>.local (override → IP), still 0.0.0.0:3000"
+else
+  fail "gitea app.ini URL rendering: $(grep -E '^(ROOT_URL|DOMAIN|SSH_DOMAIN)' "$su_t/app.ini" | tr '\n' ' ')"
+fi
+aib_gitea_set_url "$su_t/app.ini" newhost.local 3000
+if grep -qx 'ROOT_URL = http://newhost.local:3000/' "$su_t/app.ini" && grep -qx 'DOMAIN = newhost.local' "$su_t/app.ini" \
+   && grep -qx 'SSH_DOMAIN = newhost.local' "$su_t/app.ini" && grep -qx 'SECRET_KEY = s' "$su_t/app.ini" \
+   && [[ "$(grep -c '^ROOT_URL' "$su_t/app.ini")" -eq 1 ]]; then
+  pass "aib_gitea_set_url updates existing app.ini (keys kept)"
+else
+  fail "aib_gitea_set_url"
+fi
+if grep -q 'aib_service_url_host' software/45-gitea.sh && grep -q 'aib_gitea_set_url' software/45-gitea.sh \
+   && grep -q 'aib_service_url_host' software/30-jenkins.sh && grep -q 'aib_jenkins_set_url' software/30-jenkins.sh \
+   && grep -q 'jenkins.model.JenkinsLocationConfiguration.xml' software/30-jenkins.sh \
+   && ! grep -qi 'configuration-as-code' software/30-jenkins.sh; then
+  pass "gitea / jenkins hooks wired to lib-service-url (no JCasC)"
+else
+  fail "gitea / jenkins hooks wiring"
+fi
+# Jenkins: 新建 / 更新 JenkinsLocationConfiguration.xml (保留 adminAddress)
+aib_jenkins_set_url "$su_t/loc.xml" "http://node07.local:8080/"
+cp "$su_t/loc.xml" "$su_t/loc-new.xml"
+printf '%s\n' "<?xml version='1.1' encoding='UTF-8'?>" '<jenkins.model.JenkinsLocationConfiguration>' \
+  '  <adminAddress>ops@example.com</adminAddress>' '  <jenkinsUrl>http://old:8080/</jenkinsUrl>' \
+  '</jenkins.model.JenkinsLocationConfiguration>' > "$su_t/loc2.xml"
+aib_jenkins_set_url "$su_t/loc2.xml" "http://192.168.1.20:8080/"
+printf '%s\n' "<?xml version='1.1' encoding='UTF-8'?>" '<jenkins.model.JenkinsLocationConfiguration>' \
+  '  <adminAddress>ops@example.com</adminAddress>' '</jenkins.model.JenkinsLocationConfiguration>' > "$su_t/loc3.xml"
+aib_jenkins_set_url "$su_t/loc3.xml" "http://n.local:8080/"
+if grep -q '<jenkinsUrl>http://node07.local:8080/</jenkinsUrl>' "$su_t/loc-new.xml" \
+   && python3 -c 'import sys,xml.dom.minidom as m; [m.parse(f) for f in sys.argv[1:]]' "$su_t/loc-new.xml" "$su_t/loc2.xml" "$su_t/loc3.xml" \
+   && grep -q '<jenkinsUrl>http://192.168.1.20:8080/</jenkinsUrl>' "$su_t/loc2.xml" && ! grep -q 'old:8080' "$su_t/loc2.xml" \
+   && grep -q 'ops@example.com' "$su_t/loc2.xml" \
+   && grep -q '<jenkinsUrl>http://n.local:8080/</jenkinsUrl>' "$su_t/loc3.xml" && grep -q 'ops@example.com' "$su_t/loc3.xml"; then
+  pass "jenkins JenkinsLocationConfiguration.xml: create / update / insert, valid XML"
+else
+  fail "jenkins location xml"
+fi
+# 12-avahi-mdns.sh: MDNS_AVAHI=0 空跑; AIB_SKIP_PKG=1 时只打印主机名
+if [[ -x software/12-avahi-mdns.sh ]] \
+   && env -i PATH="$PATH" MDNS_AVAHI=0 bash software/12-avahi-mdns.sh 2>&1 | grep -q '^skip:' \
+   && env -i PATH="$PATH" MDNS_AVAHI=1 AIB_SKIP_PKG=1 AIB_HOSTNAME_FILE="$su_t/hostname" SERVICE_URL_HOST=1.2.3.4 \
+        bash software/12-avahi-mdns.sh 2>&1 | grep -q 'node07.local' \
+   && grep -q 'avahi-daemon libnss-mdns' software/12-avahi-mdns.sh \
+   && grep -q 'offline_apt_install' software/12-avahi-mdns.sh \
+   && grep -q "grep -q '^ENABLED=yes' /etc/ufw/ufw.conf" software/12-avahi-mdns.sh \
+   && grep -q 'ufw allow 5353/udp' software/12-avahi-mdns.sh && ! grep -qE 'ufw (--force )?enable' software/12-avahi-mdns.sh \
+   && grep -q 'systemctl enable avahi-daemon.service' software/12-avahi-mdns.sh \
+   && grep -qE '^  avahi-daemon libnss-mdns$' tools/fetch-offline-bundle.sh \
+   && grep -q -- '--require-mdns' tools/validate-offline-bundle.sh && grep -q -- '--require-mdns' build-iso.sh; then
+  pass "12-avahi-mdns: skip when not needed, ufw only if active, offline seed + validate"
+else
+  fail "12-avahi-mdns script / seed wiring"
+fi
+
+if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
+  bash test/make-fake-iso.sh server "$su_t/s.iso" >/dev/null 2>&1
+  bash test/make-fake-iso.sh desktop "$su_t/d.iso" >/dev/null 2>&1
+  _suenv() { rm -rf "$2"; xorriso -osirrox on -indev "$1" -extract /provision "$2" >/dev/null 2>&1; }
+  # 默认: hostname ubuntu-node → ubuntu-node.local; Server 装 Avahi; provision.env + 实际钩子算出的主机
+  if bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o1.iso" --password 'Pl@in99x' >"$su_t/o1.log" 2>&1 && _suenv "$su_t/o1.iso" "$su_t/p1" \
+     && grep -qx 'AIB_HOSTNAME=ubuntu-node' "$su_t/p1/provision.env" && grep -qx "SERVICE_URL_HOST=''" "$su_t/p1/provision.env" \
+     && grep -qx 'MDNS_AVAHI=1' "$su_t/p1/provision.env" \
+     && [[ -f "$su_t/p1/12-avahi-mdns.sh" && -f "$su_t/p1/lib-service-url.sh" ]] \
+     && grep -q 'http://ubuntu-node.local:3000/' "$su_t/o1.log" && grep -q 'http://ubuntu-node.local:8080/' "$su_t/o1.log" \
+     && grep -q '每台机器要用不同的 --hostname' "$su_t/o1.log" \
+     && [[ "$(env -i PATH="$PATH" AIB_HOSTNAME_FILE="$su_t/none" bash -c ". '$su_t/p1/provision.env'; . '$su_t/p1/lib-service-url.sh'; aib_service_url_host" 2>/dev/null)" == "ubuntu-node.local" ]]; then
+    pass "server default: URLs ubuntu-node.local, MDNS_AVAHI=1, lib + avahi hook shipped"
+  else
+    fail "server default service URL build: $(tail -3 "$su_t/o1.log")"
+  fi
+  # --hostname + --service-url-host 覆盖
+  if bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o2.iso" --password 'Pl@in99x' --hostname node07 --service-url-host 192.168.1.20 >"$su_t/o2.log" 2>&1 && _suenv "$su_t/o2.iso" "$su_t/p2" \
+     && grep -qx 'AIB_HOSTNAME=node07' "$su_t/p2/provision.env" && grep -qx 'SERVICE_URL_HOST=192.168.1.20' "$su_t/p2/provision.env" \
+     && grep -q 'http://192.168.1.20:3000/' "$su_t/o2.log" && grep -q 'http://192.168.1.20:8080/' "$su_t/o2.log" \
+     && ! grep -q '每台机器要用不同的 --hostname' "$su_t/o2.log" \
+     && [[ "$(env -i PATH="$PATH" AIB_HOSTNAME_FILE="$su_t/hostname" bash -c ". '$su_t/p2/provision.env'; . '$su_t/p2/lib-service-url.sh'; aib_service_url_host" 2>/dev/null)" == "192.168.1.20" ]] \
+     && bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o2b.iso" --password x --service-url-host CI.Example.COM --dry-run >"$su_t/o2b.log" 2>&1 \
+     && grep -q 'http://ci.example.com:8080/' "$su_t/o2b.log"; then
+    pass "--service-url-host overrides (IP / FQDN lowercased), written to provision.env"
+  else
+    fail "--service-url-host override: $(tail -3 "$su_t/o2.log")"
+  fi
+  # --skip 45: 只有 Jenkins, 仍装 Avahi; --skip "30 45": 不装 Avahi, --service-url-host 告警忽略
+  if bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o3.iso" --password x --skip 45 >"$su_t/o3.log" 2>&1 && _suenv "$su_t/o3.iso" "$su_t/p3" \
+     && grep -qx 'MDNS_AVAHI=1' "$su_t/p3/provision.env" && ! grep -q ':3000/' "$su_t/o3.log" && grep -q 'ubuntu-node.local:8080/' "$su_t/o3.log" \
+     && bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o4.iso" --password x --skip 30 >"$su_t/o4.log" 2>&1 && _suenv "$su_t/o4.iso" "$su_t/p4" \
+     && grep -qx 'MDNS_AVAHI=1' "$su_t/p4/provision.env" && ! grep -q ':8080/' "$su_t/o4.log" \
+     && bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o5.iso" --password x --skip "30 45" --service-url-host 10.0.0.5 >"$su_t/o5.log" 2>&1 && _suenv "$su_t/o5.iso" "$su_t/p5" \
+     && grep -qx 'MDNS_AVAHI=0' "$su_t/p5/provision.env" && grep -q -- '--service-url-host 只用于预装的 Gitea / Jenkins' "$su_t/o5.log" \
+     && bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o6.iso" --password x --skip 12 --dry-run >"$su_t/o6.log" 2>&1 \
+     && grep -q '跳过了 12-avahi-mdns' "$su_t/o6.log"; then
+    pass "--skip 45 / --skip 30 keep avahi; --skip \"30 45\" disables it; --skip 12 warns"
+  else
+    fail "skip handling for avahi: $(tail -2 "$su_t/o3.log" "$su_t/o5.log")"
+  fi
+  # Desktop: 同样写 MDNS_AVAHI=1 (钩子发现已装就跳过 apt)
+  if bash build-iso.sh --iso "$su_t/d.iso" --out "$su_t/o7.iso" --password 'Pl@in99x' --hostname desk-01 >"$su_t/o7.log" 2>&1 && _suenv "$su_t/o7.iso" "$su_t/p7" \
+     && grep -qx 'MDNS_AVAHI=1' "$su_t/p7/provision.env" && grep -qx 'AIB_HOSTNAME=desk-01' "$su_t/p7/provision.env" \
+     && grep -q 'http://desk-01.local:3000/' "$su_t/o7.log"; then
+    pass "desktop: desk-01.local URLs"
+  else
+    fail "desktop service URL: $(tail -3 "$su_t/o7.log")"
+  fi
+  # 非法 --hostname / --service-url-host 构建期失败 (中文提示, 不自动改写)
+  for bad in Node01 node.lan node_1 -node node- "$(printf 'n%.0s' {1..64})"; do
+    if bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/bad.iso" --password x --hostname "$bad" --dry-run >"$su_t/bad.log" 2>&1; then
+      fail "should reject --hostname $bad"
+    elif grep -q -- '--hostname 非法' "$su_t/bad.log" && grep -q '小写字母' "$su_t/bad.log"; then
+      pass "rejects --hostname ${bad:0:20}"
+    else
+      fail "--hostname $bad message: $(tail -2 "$su_t/bad.log")"
+    fi
+  done
+  for bad in "http://x" "x:8080" "1.2.3" "a..b" "a_b.lan"; do
+    if bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/bad.iso" --password x --service-url-host "$bad" --dry-run >"$su_t/bad.log" 2>&1; then
+      fail "should reject --service-url-host $bad"
+    elif grep -q -- '--service-url-host 非法' "$su_t/bad.log"; then
+      pass "rejects --service-url-host $bad"
+    else
+      fail "--service-url-host $bad message: $(tail -2 "$su_t/bad.log")"
+    fi
+  done
+else
+  echo "(xorriso/openssl missing, service URL build test skipped)"
+fi
+rm -rf "$su_t"
+
 echo "== validate-offline-bundle jenkins-plugins =="
 vb="$(mktemp -d)"
 mkdir -p "$vb/apt" "$vb/apt-sources/keyrings" "$vb/apt-sources/sources.list.d" "$vb/jenkins-plugins"
@@ -1242,6 +1423,21 @@ if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkin
 else
   fail "validate rejects complete jenkins-plugins"
 fi
+# --require-mdns (build-iso Server + Gitea/Jenkins): 捆绑里必须有 avahi-daemon + libnss-mdns; skip 12 或两者都 skip 时不要求
+if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "timestamper git" --require-mdns >"$vb.mdns.log" 2>&1 \
+   && grep -q 'avahi-daemon libnss-mdns' "$vb.mdns.log" && grep -q -- '--force' "$vb.mdns.log" \
+   && bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip 12" --jenkins-plugins "timestamper git" --require-mdns >/dev/null 2>&1 \
+   && bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip 30" --require-mdns >/dev/null 2>&1; then
+  printf 'Package: avahi-daemon\nVersion: 1\n\nPackage: libnss-mdns\nVersion: 1\n\n' >> "$vb/apt/Packages"
+  if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "timestamper git" --require-mdns >/dev/null 2>&1; then
+    pass "validate: avahi required only with --require-mdns and Gitea/Jenkins kept (hint --force)"
+  else
+    fail "validate --require-mdns with avahi present"
+  fi
+else
+  fail "validate --require-mdns logic: $(head -3 "$vb.mdns.log")"
+fi
+rm -f "$vb.mdns.log"
 if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "git gitea" >/dev/null 2>&1; then
   pass "validate rejects plugin list mismatch"
 else

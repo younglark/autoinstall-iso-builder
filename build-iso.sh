@@ -75,6 +75,9 @@ DISABLE_WAYLAND=0   # 内部: 由 EDITION + WAYLAND 推导后写入 provision.en
 X11VNC=0
 VNC_PASSWORD=""
 NO_FLCLASH=0
+# Gitea / Jenkins 对外 URL 主机: 默认 <hostname>.local (mDNS); --service-url-host 覆盖 (IP / FQDN / localhost)
+SERVICE_URL_HOST=""
+MDNS_AVAHI=0        # 内部: Gitea 或 Jenkins 未被 --skip 时为 1 (12-avahi-mdns.sh 装 Avahi)
 
 usage() {
   cat <<'USAGE'
@@ -95,7 +98,9 @@ usage() {
   --desktop-source S    仅 desktop: minimal (默认, ubuntu-desktop-minimal) |
                         standard (ubuntu-desktop, 带 Office 等全套) | 任意 source id
   --realname NAME       identity.realname (登录界面显示名); desktop 默认等于 --username
-  --hostname NAME       默认 ubuntu-node
+  --hostname NAME       默认 ubuntu-node。必须是单个 DNS 标签 (mDNS 主机名): 小写字母 / 数字 / 中间的
+                        连字符, 1-63 位, 不能含点或下划线, 不能以连字符开头或结尾。
+                        Gitea / Jenkins 的 URL 默认是 http://<NAME>.local:3000/ 与 :8080/ (每台机器请用不同名字)
   --username NAME       默认 ubuntu
   --packages "a,b,c"    预装软件包, 逗号分隔
   --mirror URL          默认清华 https://mirrors.tuna.tsinghua.edu.cn/ubuntu
@@ -139,6 +144,9 @@ usage() {
   --jenkins-admin-password P
                         Jenkins 管理员密码, 默认 = --password 明文;
                         只给了 --password-hash 时装机生成随机密码写入 /root/jenkins-admin-password
+  --service-url-host H  Gitea / Jenkins 对外 URL 的主机部分, 覆盖默认的 <hostname>.local:
+                        IPv4 / FQDN / localhost, 如 192.168.1.20 或 ci.example.com
+                        → http://H:3000/ 与 http://H:8080/
   --jenkins-plugins "a b c"
                         预装的 Jenkins 插件 (自动带全部依赖; 可写 name:version), 空格分隔
                         默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger
@@ -230,6 +238,7 @@ while [[ $# -gt 0 ]]; do
     --jenkins-admin-user) JENKINS_ADMIN_USER="$2"; shift 2 ;;
     --jenkins-admin-password) JENKINS_ADMIN_PASSWORD="$2"; shift 2 ;;
     --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
+    --service-url-host) SERVICE_URL_HOST="$2"; shift 2 ;;
     --wayland)        WAYLAND=1; shift ;;
     --disable-wayland|--x11vnc)
       die "$1 已移除: Desktop 现在默认关闭 Wayland 并预装 x11vnc; 要保留 Wayland 且不装 x11vnc 请用 --wayland" ;;
@@ -263,6 +272,18 @@ if [[ -n "$SSH_AUTHORIZED_KEYS" ]]; then
   [[ -f "$SSH_AUTHORIZED_KEYS" ]] || die "--ssh-authorized-keys 文件不存在: $SSH_AUTHORIZED_KEYS"
 fi
 
+# hostname: mDNS / RFC 1123 单标签 (Gitea / Jenkins URL 用 <hostname>.local); 不自动改写
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/software/lib-service-url.sh"
+aib_valid_mdns_label "$HOSTNAME_" \
+  || die "--hostname 非法: '$HOSTNAME_'。必须是单个主机名标签: 只含小写字母 a-z、数字 0-9 和中间的连字符 -,
+  1-63 位, 不能含点 (.) 或下划线 (_), 不能以连字符开头或结尾。例如: ubuntu-node、node01、desk-01"
+if [[ -n "$SERVICE_URL_HOST" ]]; then
+  SERVICE_URL_HOST="$(printf '%s' "$SERVICE_URL_HOST" | tr '[:upper:]' '[:lower:]')"
+  aib_valid_service_host "$SERVICE_URL_HOST" \
+    || die "--service-url-host 非法: '$SERVICE_URL_HOST'。只接受 IPv4 (如 192.168.1.20)、主机名 / FQDN
+  (如 ci.example.com, 每段只含字母数字和中间的连字符) 或 localhost; 不要带 http:// 或端口"
+fi
 # username / packages 白名单 (与 render-user-data 一致; 防止 provision.env 注入)
 [[ "$USERNAME_" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]   || die "--username 非法 (POSIX: 以小写字母或 _ 开头, 仅 [a-z0-9_-], 最长 32): $USERNAME_"
 if [[ -n "$PACKAGES" ]]; then
@@ -330,6 +351,26 @@ for _jp in $JENKINS_PLUGINS; do
 done
 if ! should_skip_script 45-gitea && [[ "$USERNAME_" == "git" ]]; then
   die "--username git 与 Gitea 的系统用户 git 冲突; 换个用户名, 或 --skip 45 不装 Gitea"
+fi
+
+# Gitea / Jenkins 对外 URL (装机时由钩子按目标机 /etc/hostname 落地; 这里只决定是否装 Avahi 并提示)
+if [[ "$PROVISION" -eq 1 ]] && { ! should_skip_script 30-jenkins || ! should_skip_script 45-gitea; }; then
+  if [[ -n "$SERVICE_URL_HOST" ]]; then
+    _url_host="$SERVICE_URL_HOST"
+  else
+    _url_host="$HOSTNAME_.local"
+  fi
+  MDNS_AVAHI=1
+  should_skip_script 45-gitea   || log "Gitea URL: http://$_url_host:3000/"
+  should_skip_script 30-jenkins || log "Jenkins URL: http://$_url_host:8080/"
+  if should_skip_script 12-avahi-mdns; then
+    warn "--skip 跳过了 12-avahi-mdns: 不装 / 不启用 Avahi, $HOSTNAME_.local 可能无法解析"
+  fi
+  if [[ -z "$SERVICE_URL_HOST" ]]; then
+    warn "Gitea / Jenkins URL 用 $HOSTNAME_.local (mDNS): 同一网络里每台机器要用不同的 --hostname (重名时 Avahi 会改成 $HOSTNAME_-2.local, URL 失效); 装完改主机名 URL 不会跟着变; Android / Docker 容器 / 跨网段通常解析不了 .local, 可用 --service-url-host 改成 IP 或域名"
+  fi
+elif [[ -n "$SERVICE_URL_HOST" ]]; then
+  warn "--service-url-host 只用于预装的 Gitea / Jenkins; 两者都没装 (--skip / --no-provision), 忽略"
 fi
 
 # SSH: allow-pw=false 且无公钥 → 装完登不进, 构建期直接拒绝
@@ -537,6 +578,8 @@ if [[ -n "$OFFLINE_BUNDLE" ]]; then
     VAL_ARGS+=(--pin-gitea "$PIN_GITEA" --jenkins-plugins "$JENKINS_PLUGINS")
     # Desktop 默认 (未加 --wayland) 装 x11vnc: 捆绑必须带 x11vnc + xauth (validate 自己处理 --skip 36)
     [[ "$X11VNC" -eq 1 ]] && VAL_ARGS+=(--require-x11vnc)
+    # Server 预装 Gitea / Jenkins: <hostname>.local 要 Avahi (Desktop 自带); 2026-11 之前的捆绑没有 → --force-fetch
+    [[ "$EDITION" == "server" && "$MDNS_AVAHI" -eq 1 ]] && VAL_ARGS+=(--require-mdns)
     bash "$SCRIPT_DIR/tools/validate-offline-bundle.sh" "${VAL_ARGS[@]}"       || die "离线捆绑校验失败 (见上)。重建: ./tools/fetch-offline-bundle.sh --force ..."
   fi
 elif [[ "$OFFLINE" -eq 1 && "$PROVISION" -eq 1 ]]; then
@@ -697,6 +740,9 @@ if [[ "$PROVISION" -eq 1 ]]; then
 ' "$GITEA_ADMIN_EMAIL"
     printf 'JENKINS_ADMIN_USER=%q\n' "$JENKINS_ADMIN_USER"
     printf 'JENKINS_PLUGINS=%q\n' "$JENKINS_PLUGINS"
+    printf 'AIB_HOSTNAME=%q\n' "$HOSTNAME_"
+    printf 'SERVICE_URL_HOST=%q\n' "$SERVICE_URL_HOST"
+    printf 'MDNS_AVAHI=%q\n' "$MDNS_AVAHI"
     printf 'DISABLE_WAYLAND=%q\n' "$DISABLE_WAYLAND"
     printf 'X11VNC=%q\n' "$X11VNC"
     printf 'OFFLINE=%q

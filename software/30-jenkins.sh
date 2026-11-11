@@ -8,11 +8,15 @@
 #   * 插件: 默认 Pipeline / git / gitea / docker-workflow / credentials-binding / timestamper
 #     (+ 全部必需依赖)。在线用 resolve-jenkins-plugins.py (纯 Python 标准库) 按本机 Jenkins 版本的
 #     update center 解析并 sha256 校验; 离线直接拷贝捆绑 jenkins-plugins/ (fetch 时用同一脚本按同一版本解析)
-#   * 监听 0.0.0.0:8080 (默认), 不改 JENKINS_URL / 防火墙
+#   * 监听 0.0.0.0:8080 (默认), 不改防火墙
+#   * Jenkins URL = http://<主机名>.local:8080/ (mDNS, 主机名取目标机 /etc/hostname; 构建时
+#     --service-url-host 可改成 IP / FQDN / localhost): 写 jenkins.model.JenkinsLocationConfiguration.xml
 set -euo pipefail
 HERE="$(cd -- "$(dirname -- "$0")" && pwd)"
 # shellcheck disable=SC1091
 [ -f "$HERE/lib-offline.sh" ] && . "$HERE/lib-offline.sh"
+# shellcheck disable=SC1091
+. "$HERE/lib-service-url.sh"
 export DEBIAN_FRONTEND=noninteractive
 
 JENKINS_HOME_DIR="/var/lib/jenkins"
@@ -96,6 +100,16 @@ for f in jenkins.install.InstallUtil.lastExecVersion jenkins.install.UpgradeWiza
   printf '%s' "$JENKINS_VERSION" > "$JENKINS_HOME_DIR/$f"
   chown jenkins:jenkins "$JENKINS_HOME_DIR/$f"
 done
+
+# ---------------------------------------------------------------- Jenkins URL
+# 不写的话首页会提示 "Jenkins URL 未配置", 构建链接 / Webhook 回调地址也不对
+JENKINS_HTTP_PORT="${JENKINS_HTTP_PORT:-8080}"
+JENKINS_URL_VALUE="http://$(aib_service_url_host):${JENKINS_HTTP_PORT}/"
+LOCATION_XML="$JENKINS_HOME_DIR/jenkins.model.JenkinsLocationConfiguration.xml"
+aib_jenkins_set_url "$LOCATION_XML" "$JENKINS_URL_VALUE"
+chown jenkins:jenkins "$LOCATION_XML"
+chmod 0644 "$LOCATION_XML"
+echo "Jenkins URL = $JENKINS_URL_VALUE ($LOCATION_XML)"
 
 # ---------------------------------------------------------------- 插件
 if offline_enabled 2>/dev/null; then
@@ -211,4 +225,5 @@ fi
 java -version 2>&1 | head -1
 grep -q 'runSetupWizard=false' "$DROPIN_DIR/50-autoinstall.conf"
 [ -f "$ADMIN_GROOVY" ]
-echo "jenkins ok: http://<本机IP>:8080/ (0.0.0.0:8080); 管理员 $ADMIN_USER; 插件: $JENKINS_PLUGINS"
+grep -qF "<jenkinsUrl>${JENKINS_URL_VALUE}</jenkinsUrl>" "$LOCATION_XML"
+echo "jenkins ok: ${JENKINS_URL_VALUE} (也可 http://<本机IP>:${JENKINS_HTTP_PORT}/, 监听 0.0.0.0:${JENKINS_HTTP_PORT}); 管理员 $ADMIN_USER; 插件: $JENKINS_PLUGINS"

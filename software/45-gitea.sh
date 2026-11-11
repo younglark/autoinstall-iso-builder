@@ -8,12 +8,16 @@
 #   * 系统用户 git (home /home/git; 系统 OpenSSH + Gitea 管理 authorized_keys → git@host:user/repo.git)
 #   * /etc/gitea/app.ini: INSTALL_LOCK, SQLite, 每台机器独立生成的 SECRET_KEY / INTERNAL_TOKEN / JWT,
 #     HTTP 0.0.0.0:3000 (局域网可访问, 不与 Jenkins 8080 冲突), LFS, OFFLINE_MODE, 开放注册
+#   * ROOT_URL / DOMAIN / SSH_DOMAIN = <主机名>.local (mDNS, 主机名取目标机 /etc/hostname);
+#     构建时 --service-url-host 可改成 IP / FQDN / localhost (lib-service-url.sh)
 #   * 管理员账号在 chroot 内直接写 SQLite 创建 (不需要 Gitea 在运行)
 #   * gitea.service enabled (官方单元 + After=network-online.target); 防火墙不动
 set -euo pipefail
 HERE="$(cd -- "$(dirname -- "$0")" && pwd)"
 # shellcheck disable=SC1091
 [ -f "$HERE/lib-offline.sh" ] && . "$HERE/lib-offline.sh"
+# shellcheck disable=SC1091
+. "$HERE/lib-service-url.sh"
 
 PIN="${PIN_GITEA:-latest}"
 DL_BASE="${GITEA_DL_BASE:-https://dl.gitea.com/gitea}"
@@ -28,6 +32,9 @@ UNIT="/etc/systemd/system/gitea.service"
 HTTP_PORT="${GITEA_HTTP_PORT:-3000}"
 # 管理员凭据: provision.env 给用户名/邮箱; 明文密码 (若构建时有) 在单独 0600 文件, 用后即删
 SECRET_FILE="$HERE/gitea-admin.secret"
+# 对外 URL 主机: <主机名>.local 或 --service-url-host
+URL_HOST="$(aib_service_url_host)"
+ROOT_URL="http://${URL_HOST}:${HTTP_PORT}/"
 RANDOM_PW_FILE="/root/gitea-admin-password"
 
 case "$PIN" in
@@ -134,10 +141,11 @@ PROTOCOL = http
 ; 监听所有网卡, 局域网可直接访问 http://<本机IP>:${HTTP_PORT}/
 HTTP_ADDR = 0.0.0.0
 HTTP_PORT = ${HTTP_PORT}
-; 网页上显示的克隆地址; 用 IP/域名访问时请改成 http://<IP或域名>:${HTTP_PORT}/ 并同步 DOMAIN / SSH_DOMAIN
-ROOT_URL = http://localhost:${HTTP_PORT}/
-DOMAIN = localhost
-SSH_DOMAIN = localhost
+; 网页上显示的克隆 / Webhook 地址 (装机时取 <主机名>.local 或 --service-url-host);
+; 改主机名或换成 IP/域名时同步改这三项后重启 gitea
+ROOT_URL = ${ROOT_URL}
+DOMAIN = ${URL_HOST}
+SSH_DOMAIN = ${URL_HOST}
 APP_DATA_PATH = ${WORK_DIR}/data
 ; 使用系统 OpenSSH (端口 22), Gitea 维护 ~git/.ssh/authorized_keys
 DISABLE_SSH = false
@@ -187,6 +195,9 @@ ROOT_PATH = ${WORK_DIR}/log
 INI
   umask 022
 fi
+# 已有 app.ini (重跑) 时也同步 URL 三项 (密钥保持不变)
+aib_gitea_set_url "$CONF" "$URL_HOST" "$HTTP_PORT"
+echo "Gitea ROOT_URL = ${ROOT_URL} (DOMAIN / SSH_DOMAIN = ${URL_HOST})"
 chown root:"$GITEA_USER" "$CONF"
 chmod 0640 "$CONF"
 
@@ -263,5 +274,6 @@ systemctl enable gitea.service 2>/dev/null \
 # ---------------------------------------------------------------- 校验
 [ -x "$INSTALL_BIN" ] || { echo "ERROR: 缺少 $INSTALL_BIN"; exit 1; }
 grep -q '^INSTALL_LOCK = true' "$CONF" || { echo "ERROR: app.ini 缺 INSTALL_LOCK"; exit 1; }
+grep -qxF "ROOT_URL = ${ROOT_URL}" "$CONF" || { echo "ERROR: app.ini ROOT_URL 未写成 ${ROOT_URL}"; exit 1; }
 [ -s "$WORK_DIR/data/gitea.db" ] || { echo "ERROR: SQLite 数据库未初始化"; exit 1; }
-echo "gitea ok: http://<本机IP>:${HTTP_PORT}/ (0.0.0.0:${HTTP_PORT}); 管理员 ${ADMIN_USER}; ssh git@<host>:<user>/<repo>.git"
+echo "gitea ok: ${ROOT_URL} (也可 http://<本机IP>:${HTTP_PORT}/, 监听 0.0.0.0:${HTTP_PORT}); 管理员 ${ADMIN_USER}; ssh git@${URL_HOST}:<user>/<repo>.git"
