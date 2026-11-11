@@ -279,9 +279,23 @@ for grp in sel[0].get("Depends", "").split(","):
     alts = [a for a in alts if a]
     if alts and not any(a in have for a in alts):
         miss.append("|".join(alts))
+# Recommends (libappindicator3-1, 托盘图标): 39-grok-bot.sh 会连同它装; 缺了只告警 (装机退回只装 deb)
+rmiss = []
+for grp in sel[0].get("Recommends", "").split(","):
+    alts = [re.sub(r"\(.*?\)|:any", "", a).strip() for a in grp.split("|")]
+    alts = [a for a in alts if a]
+    if alts and not any(a in have for a in alts):
+        rmiss.append("|".join(alts))
 print("MISS " + " ".join(miss) if miss else "OK")
+if rmiss:
+    print("RECMISS " + " ".join(rmiss))
 GBPY
 )" || _gbchk="ERR"
+    _gbrec="$(sed -n 's/^RECMISS //p' <<<"$_gbchk")"
+    _gbchk="$(head -n1 <<<"$_gbchk")"
+    if [[ -n "$_gbrec" ]]; then
+      echo "warn: apt 池缺 Grok Bot 的 Recommends: $_gbrec (托盘图标可能不显示; --force-fetch 重建可补上)" >&2
+    fi
     case "$_gbchk" in
       OK) ;;
       NOPKG) missing+=("grok-bot") ;;

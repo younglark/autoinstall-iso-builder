@@ -63,6 +63,23 @@ grokbot_installed() {
   dpkg-query -W -f='${Status}' grok-bot 2>/dev/null | grep -q 'install ok installed'
 }
 
+# deb + 它的 Recommends (libappindicator3-1: 托盘图标) 一起装, 其余包仍不装 Recommends。
+# Recommends 装不上 (源里没有 / 离线池缺) 时退回只装 deb, 不因为托盘库 SKIP 整个应用。
+apt_install_grokbot() { # deb
+  local deb="$1" recs=()
+  mapfile -t recs < <(grokbot_available_recommends "$deb")
+  if [ "${#recs[@]}" -gt 0 ]; then
+    echo "Grok Bot Recommends: ${recs[*]}"
+    if apt-get install -y --no-install-recommends "$deb" "${recs[@]}"; then
+      return 0
+    fi
+    echo "warn: 连同 Recommends (${recs[*]}) 安装失败, 改为只装 deb (托盘图标可能不显示)"
+  else
+    echo "warn: 没有可装的 Recommends ($(grokbot_recommends "$deb" | tr '\n' ' ')), 只装 deb"
+  fi
+  apt-get install -y --no-install-recommends "$deb"
+}
+
 install_offline() {
   local dir name deb sha ver
   dir="$(offline_root)/grok-bot"
@@ -81,7 +98,7 @@ install_offline() {
     return 0
   fi
   # 依赖由本地 file: 源 (离线捆绑 apt/) 提供
-  apt-get install -y --no-install-recommends "$deb"
+  apt_install_grokbot "$deb"
 }
 
 install_online() {
@@ -98,7 +115,7 @@ install_online() {
   if grokbot_download_to "$tmp" "$ARCH"; then
     # apt 解析依赖 (GTK / NSS 等, Desktop 基本都已装); update 失败不致命
     apt-get update || echo "warn: apt-get update 失败, 用现有索引继续"
-    apt-get install -y --no-install-recommends "$GROK_BOT_DEB_PATH" || rc=1
+    apt_install_grokbot "$GROK_BOT_DEB_PATH" || rc=1
   else
     rc=1
   fi

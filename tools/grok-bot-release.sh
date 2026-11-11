@@ -135,6 +135,28 @@ grokbot_resolve() { # [pin] [dpkg-arch] [url] [sha256]
   [[ "$GROK_BOT_DEB_NAME" =~ ^[A-Za-z0-9._+~-]+\.deb$ ]] || { echo "ERROR: Grok Bot deb 文件名非法: $GROK_BOT_DEB_NAME" >&2; return 1; }
 }
 
+# deb 的 Recommends (每组取第一个候选, 去掉版本约束), 一行一个。0.79.4: libappindicator3-1
+# (noble/jammy 都有这个包; libayatana-appindicator3-1 也 Provides 它)。
+grokbot_recommends() { # deb
+  dpkg-deb -f "$1" Recommends 2>/dev/null | tr ',' '\n' | while IFS= read -r r; do
+    r="${r%%|*}"
+    r="$(printf '%s' "$r" | sed 's/([^)]*)//g; s/:any//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [[ "$r" =~ ^[a-z0-9][a-z0-9.+-]+$ ]] && printf '%s\n' "$r"
+  done
+  return 0
+}
+
+# 上面的 Recommends 里 apt 当前能装的那些 (有 Candidate), 一行一个
+grokbot_available_recommends() { # deb
+  local r c
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    c="$(apt-cache policy "$r" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+    if [ -n "$c" ] && [ "$c" != "(none)" ]; then printf '%s\n' "$r"; fi
+  done < <(grokbot_recommends "$1")
+  return 0
+}
+
 grokbot_verify_deb() { # deb expect_sha [expect_ver] [dpkg-arch]
   local deb="$1" expect="$2" ver="${3:-}" arch="${4:-}" actual f
   [ -f "$deb" ] || { echo "ERROR: 缺少 $deb" >&2; return 1; }

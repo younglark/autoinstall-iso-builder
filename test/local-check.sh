@@ -1691,6 +1691,77 @@ if (
 else
   fail "grok-bot-release helper: $(tail -5 "$gt/rel.log")"
 fi
+# Recommends 解析 (每组取第一个, 去版本约束 / :any); 钩子连同 Recommends 装, 失败退回只装 deb
+# shellcheck disable=SC2016
+if (
+  set -euo pipefail
+  # shellcheck disable=SC1091
+  . tools/grok-bot-release.sh
+  mkdir -p "$gt/rpkg/DEBIAN"
+  printf 'Package: grok-bot\nVersion: 0.79.4\nArchitecture: amd64\nMaintainer: t <t@t>\nRecommends: libappindicator3-1 (>= 0.4), foo-a:any | foo-b, bad;name\nDescription: t\n' > "$gt/rpkg/DEBIAN/control"
+  dpkg-deb --build "$gt/rpkg" "$gt/r.deb" >/dev/null
+  [[ "$(grokbot_recommends "$gt/r.deb" | tr '\n' ' ')" == "libappindicator3-1 foo-a " ]]
+  rm -rf "$gt/rpkg/DEBIAN" && mkdir -p "$gt/rpkg/DEBIAN"
+  printf 'Package: grok-bot\nVersion: 0.79.4\nArchitecture: amd64\nMaintainer: t <t@t>\nDescription: t\n' > "$gt/rpkg/DEBIAN/control"
+  dpkg-deb --build "$gt/rpkg" "$gt/n.deb" >/dev/null
+  [[ -z "$(grokbot_recommends "$gt/n.deb")" ]]
+) >"$gt/rec.log" 2>&1 \
+   && grep -q 'apt_install_grokbot "$deb"' software/39-grok-bot.sh && grep -q 'apt_install_grokbot "$GROK_BOT_DEB_PATH"' software/39-grok-bot.sh \
+   && grep -q 'grokbot_available_recommends' software/39-grok-bot.sh \
+   && grep -q 'GROKBOT_RECS\[@\]' tools/fetch-offline-bundle.sh && grep -q 'RECMISS' tools/validate-offline-bundle.sh; then
+  pass "grok-bot Recommends (libappindicator3-1): parsed, installed with the deb, bundled in the apt closure, validate warns if missing"
+else
+  fail "grok-bot Recommends: $(tail -5 "$gt/rec.log")"
+fi
+# fetch --edition: server 默认不抓 Grok Bot; 指纹不同; Desktop 抓的超集捆绑 server 也直接复用 (不联网: 只走到指纹判断)
+# shellcheck disable=SC2016
+if grep -q 'FETCH_ARGS+=(--edition "$EDITION")' build-iso.sh; then
+  pass "build-iso passes --edition to fetch-offline-bundle"
+else
+  fail "build-iso --edition passthrough"
+fi
+if bash tools/fetch-offline-bundle.sh --edition bogus --out "$gt/fb" >/dev/null 2>&1; then
+  fail "fetch --edition bogus should fail"
+else
+  pass "fetch rejects --edition bogus"
+fi
+if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+  _fb="$gt/fb"; mkdir -p "$_fb/apt"
+  _mf() { printf '{"fingerprint": "%s", "pins": {"grok_bot": "%s"}}\n' "$1" "$2" > "$_fb/manifest.json"; }
+  _want() { sed -n 's/.*want=\([0-9a-f]*\).*/\1/p' "$1" | head -n1; }
+  _mf 0000000000000000 x
+  bash tools/fetch-offline-bundle.sh --out "$_fb" >"$gt/f1.log" 2>&1 || true
+  bash tools/fetch-offline-bundle.sh --out "$_fb" --edition server >"$gt/f2.log" 2>&1 || true
+  _fd="$(_want "$gt/f1.log")"; _fs="$(_want "$gt/f2.log")"
+  if [[ -n "$_fd" && -n "$_fs" && "$_fd" != "$_fs" ]] && grep -q 'edition server, 默认不捆绑' "$gt/f2.log"; then
+    pass "fetch: --edition server drops Grok Bot (fingerprint differs from desktop/all)"
+  else
+    fail "fetch --edition fingerprint: $(tail -2 "$gt/f1.log" "$gt/f2.log")"
+  fi
+  _mf "$_fd" 'latest|||recommends'
+  if bash tools/fetch-offline-bundle.sh --out "$_fb" --edition server >"$gt/f3.log" 2>&1 && grep -q '多带了 Grok Bot' "$gt/f3.log" \
+     && bash tools/fetch-offline-bundle.sh --out "$_fb" --no-grok-bot >"$gt/f4.log" 2>&1 \
+     && bash tools/fetch-offline-bundle.sh --out "$_fb" --edition desktop >"$gt/f5.log" 2>&1 && grep -q '复用已有捆绑' "$gt/f5.log"; then
+    pass "fetch: desktop bundle (with grok-bot) reused as-is for --edition server / --no-grok-bot / desktop"
+  else
+    fail "fetch superset reuse: $(tail -2 "$gt/f3.log" "$gt/f4.log" "$gt/f5.log")"
+  fi
+  _mf "$_fs" none
+  if bash tools/fetch-offline-bundle.sh --out "$_fb" --edition server >"$gt/f6.log" 2>&1 \
+     && ! bash tools/fetch-offline-bundle.sh --out "$_fb" >"$gt/f7.log" 2>&1 && grep -q '指纹不匹配' "$gt/f7.log"; then
+    pass "fetch: server bundle reused for server; desktop needs --force (no grok-bot inside)"
+  else
+    fail "fetch server bundle: $(tail -2 "$gt/f6.log" "$gt/f7.log")"
+  fi
+  _mf "$_fd" 'latest|||'
+  if ! bash tools/fetch-offline-bundle.sh --out "$_fb" --edition server >"$gt/f8.log" 2>&1; then
+    pass "fetch: manifest grok_bot pin must reproduce the fingerprint (no blind reuse)"
+  else
+    fail "fetch superset check too lax"
+  fi
+else
+  echo "(docker unavailable, fetch --edition fingerprint test skipped)"
+fi
 # 公钥: 与官方 deb postinst 内嵌的同一把 (指纹写在文件头)
 if grep -q '380F F4BC DC34 A4BD 92A3  5653 42A1 772E 62E4 92D6' tools/grok-bot-archive-key.asc \
    && [[ "$(grep -vE '^(#|-----|=|$)' tools/grok-bot-archive-key.asc | base64 -d | wc -c)" -gt 1000 ]]; then
@@ -2216,17 +2287,20 @@ if ! _gbv >"$vb.gb.log" 2>&1 && grep -q 'grok-bot/' "$vb.gb.log" && GBV_SKIP="$v
   mkdir -p "$vb/grok-bot"; echo deb > "$vb/grok-bot/grok-bot_0.79.4_amd64.deb"
   echo grok-bot_0.79.4_amd64.deb > "$vb/grok-bot/deb.name"; echo 0.79.4 > "$vb/grok-bot/version"
   _gbsha="$(sha256sum "$vb/grok-bot/grok-bot_0.79.4_amd64.deb" | cut -d' ' -f1)"; echo "$_gbsha" > "$vb/grok-bot/sha256"
-  printf 'Package: grok-bot\nVersion: 0.79.4\nDepends: libgtk-3-0, libnss3, libasound2t64 | libasound2\n\n' >> "$vb/apt/Packages"
+  printf 'Package: grok-bot\nVersion: 0.79.4\nDepends: libgtk-3-0, libnss3, libasound2t64 | libasound2\nRecommends: libappindicator3-1\n\n' >> "$vb/apt/Packages"
   printf 'Package: libgtk-3-0t64\nVersion: 1\nProvides: libgtk-3-0 (= 1)\n\nPackage: libasound2t64\nVersion: 1\n\n' >> "$vb/apt/Packages"
   if ! _gbv >"$vb.gb.log" 2>&1 && grep -q 'apt 缺包: libnss3' "$vb.gb.log"; then
     printf 'Package: libnss3\nVersion: 1\n\n' >> "$vb/apt/Packages"
     if _gbv --grok-bot-version 0.79.4 --grok-bot-sha256 "${_gbsha^^}" >/dev/null 2>&1 \
        && ! _gbv --grok-bot-version 0.79.5 >/dev/null 2>&1 \
+       && grep -q '缺 Grok Bot 的 Recommends: libappindicator3-1' <(_gbv 2>&1) \
+       && printf 'Package: libayatana-appindicator3-1\nVersion: 1\nProvides: libappindicator3-1 (= 12.10)\n\n' >> "$vb/apt/Packages" \
+       && _gbv >"$vb.gbr.log" 2>&1 && ! grep -q 'Recommends' "$vb.gbr.log" \
        && ! _gbv --grok-bot-sha256 "$(printf 'a%.0s' {1..64})" >/dev/null 2>&1 \
        && echo tampered >> "$vb/grok-bot/grok-bot_0.79.4_amd64.deb" && ! _gbv >/dev/null 2>&1; then
-      pass "validate --require-grok-bot: dir + sha256 + version/sha pins + pool deps (Provides ok); --skip 39 not required"
+      pass "validate --require-grok-bot: dir + sha256 + version/sha pins + pool deps (Provides ok) + Recommends warn-only; --skip 39 not required"
     else
-      fail "validate --require-grok-bot pins / tamper"
+      fail "validate --require-grok-bot pins / tamper: $(_gbv 2>&1 | tail -4)"
     fi
   else
     fail "validate --require-grok-bot missing dep: $(head -3 "$vb.gb.log")"
@@ -2234,7 +2308,7 @@ if ! _gbv >"$vb.gb.log" 2>&1 && grep -q 'grok-bot/' "$vb.gb.log" && GBV_SKIP="$v
 else
   fail "validate --require-grok-bot missing dir: $(head -3 "$vb.gb.log")"
 fi
-rm -f "$vb.gb.log"
+rm -f "$vb.gb.log" "$vb.gbr.log"
 rm -rf "$vb"
 
 echo "== apt deb reuse helper (fake debs) =="
@@ -2289,7 +2363,7 @@ if grep -q 'print_uris install --download-only --reinstall' tools/fetch-offline-
    && grep -q 'apt-deb-reuse.sh:/apt-deb-reuse.sh:ro' tools/fetch-offline-bundle.sh \
    && grep -q 'reuse_prev gitea' tools/fetch-offline-bundle.sh && grep -q 'reuse_prev godot' tools/fetch-offline-bundle.sh \
    && grep -q 'reuse_prev unity-cli' tools/fetch-offline-bundle.sh \
-   && ! grep -q 'apt-cache\|APT_CACHE' <(sed -n '/^expected_fp=/,/^FP$/p' tools/fetch-offline-bundle.sh); then
+   && ! grep -q 'apt-cache\|APT_CACHE' <(sed -n '/^bundle_fp() {/,/^FP$/p' tools/fetch-offline-bundle.sh); then
   pass "fetch wires deb reuse + artifact reuse; cache not in fingerprint"
 else
   fail "fetch reuse wiring"

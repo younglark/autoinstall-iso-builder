@@ -46,6 +46,7 @@ apt-get update -qq >/dev/null
 apt-get install -y -qq --no-install-recommends ca-certificates curl apparmor >/dev/null
 EDITION=desktop bash /prov/39-grok-bot.sh > /logs/online.log 2>&1; echo "rc=$?" >> /logs/online.log
 dpkg-query -W -f='${Status} ${Version}\n' grok-bot >> /logs/online.log 2>&1
+dpkg-query -W -f='${Status}\n' libappindicator3-1 2>/dev/null | grep -q 'install ok installed' && echo "RECS_OK" >> /logs/online.log
 test -f /etc/apt/sources.list.d/grok-bot.sources && echo "SOURCES_OK" >> /logs/online.log
 test -f /etc/apparmor.d/grok-bot && echo "APPARMOR_OK" >> /logs/online.log
 test -x /usr/bin/grok-bot && echo "BIN_OK" >> /logs/online.log
@@ -55,8 +56,8 @@ ON
 docker run --rm --network host -v "$work/prov:/prov:ro" -v "$work/logs:/logs" -v "$work/online.sh:/online.sh:ro" "$IMG" bash /online.sh || true
 if grep -qx 'rc=0' "$work/logs/online.log" && grep -q 'install ok installed' "$work/logs/online.log" \
    && grep -q 'sha256 来源: ' "$work/logs/online.log" && ! grep -q '^SKIP:' "$work/logs/online.log" \
-   && grep -qx SOURCES_OK "$work/logs/online.log" && grep -qx APPARMOR_OK "$work/logs/online.log" && grep -qx BIN_OK "$work/logs/online.log"; then
-  pass "online: feed → verified deb → apt install; grok-bot.sources kept; AppArmor profile installed ($(grep -o 'install ok installed .*' "$work/logs/online.log"))"
+   && grep -qx SOURCES_OK "$work/logs/online.log" && grep -qx RECS_OK "$work/logs/online.log" && grep -qx APPARMOR_OK "$work/logs/online.log" && grep -qx BIN_OK "$work/logs/online.log"; then
+  pass "online: feed → verified deb → apt install (+ Recommends libappindicator3-1); grok-bot.sources kept; AppArmor profile installed ($(grep -o 'install ok installed .*' "$work/logs/online.log"))"
 else
   fail "online install: $(tail -15 "$work/logs/online.log")"
 fi
@@ -82,7 +83,8 @@ printf '%s\n' "$GROK_BOT_VERSION" > /bundle/grok-bot/version
 printf '%s\n' "$GROK_BOT_SHA256" > /bundle/grok-bot/sha256
 printf '%s\n' "$GROK_BOT_DEB_NAME" > /bundle/grok-bot/deb.name
 mkdir -p /bundle/apt /tmp/arch/partial
-apt-get install -y -qq --download-only --no-install-recommends -o Dir::Cache::archives=/tmp/arch -o Dir::State::status=/tmp/status0 "$GROK_BOT_DEB_PATH" >/dev/null
+apt-get install -y -qq --download-only --no-install-recommends -o Dir::Cache::archives=/tmp/arch -o Dir::State::status=/tmp/status0 "$GROK_BOT_DEB_PATH" \
+  $(grokbot_available_recommends "$GROK_BOT_DEB_PATH") >/dev/null
 cp /tmp/arch/*.deb "$GROK_BOT_DEB_PATH" /bundle/apt/
 cd /bundle/apt && dpkg-scanpackages . /dev/null > Packages 2>/dev/null
 echo "debs=$(ls /bundle/apt/*.deb | wc -l) size=$(du -sh /bundle/apt | cut -f1)"
@@ -101,6 +103,7 @@ echo https://mirrors.tuna.tsinghua.edu.cn/ubuntu > /opt/offline/ubuntu-mirror.ur
 bash /opt/offline/enable-offline-apt.sh > /logs/enable.log 2>&1 || echo "ENABLE_FAIL" >> /logs/offline.log
 EDITION=desktop OFFLINE=1 OFFLINE_ROOT=/opt/offline bash /prov/39-grok-bot.sh >> /logs/offline.log 2>&1; echo "rc=$?" >> /logs/offline.log
 dpkg-query -W -f='${Status} ${Version}\n' grok-bot >> /logs/offline.log 2>&1
+dpkg-query -W -f='${Status}\n' libappindicator3-1 2>/dev/null | grep -q 'install ok installed' && echo "RECS_OK" >> /logs/offline.log
 test ! -e /etc/apt/sources.list.d/grok-bot.sources && test -f /etc/apt/sources.list.d.offline-bak/grok-bot.sources && echo "MOVED_OK" >> /logs/offline.log
 apt-get update > /logs/offline-update1.log 2>&1 && echo "UPDATE1_OK" >> /logs/offline.log
 cp /etc/apt/sources.list.d.offline-bak/grok-bot.sources /tmp/gb.before
@@ -117,8 +120,9 @@ chmod a+r "$work/offline.sh"
 docker run --rm --network none -v "$work/prov:/prov:ro" -v "$work/bundle:/opt/offline" -v "$work/logs:/logs" -v "$work/offline.sh:/offline.sh:ro" "$IMG" bash /offline.sh || true
 if grep -qx 'rc=0' "$work/logs/offline.log" && grep -q 'install ok installed' "$work/logs/offline.log" \
    && ! grep -q '^SKIP:' "$work/logs/offline.log" && ! grep -q ENABLE_FAIL "$work/logs/offline.log" \
-   && grep -qx MOVED_OK "$work/logs/offline.log" && grep -qx UPDATE1_OK "$work/logs/offline.log"; then
-  pass "offline (--network none): installed from bundle; grok-bot.sources parked in offline-bak; apt-get update ok"
+   && grep -qx MOVED_OK "$work/logs/offline.log" && grep -qx UPDATE1_OK "$work/logs/offline.log" \
+   && grep -qx RECS_OK "$work/logs/offline.log"; then
+  pass "offline (--network none): installed from bundle (+ libappindicator3-1); grok-bot.sources parked in offline-bak; apt-get update ok"
 else
   fail "offline install: $(tail -15 "$work/logs/offline.log")"
 fi

@@ -64,6 +64,7 @@ PIN_GROK_BOT="${PIN_GROK_BOT:-latest}"
 GROK_BOT_DEB_URL="${GROK_BOT_DEB_URL:-}"
 GROK_BOT_SHA256="${GROK_BOT_SHA256:-}"
 NO_GROK_BOT=0
+BUNDLE_EDITION="all"   # --edition: all (默认) | desktop | server; server 默认不抓 Grok Bot
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger}"
 # Jenkins 插件解析器 (纯 Python 标准库; 与 software/30-jenkins.sh 在线路径同一份)
 RESOLVER="$SCRIPT_DIR/resolve-jenkins-plugins.py"
@@ -106,6 +107,9 @@ usage() {
   --grok-bot-url URL    完全钉扎 Grok Bot .deb URL (必须同时给 --grok-bot-sha256)
   --grok-bot-sha256 H   Grok Bot .deb 期望 sha256
   --no-grok-bot         不捆绑 Grok Bot (配合 build-iso --no-grok-bot)
+  --edition E           捆绑给哪个版本用: all (默认, 同 desktop) | desktop | server。
+                        server 时默认不抓 Grok Bot (只在 Desktop 安装); build-iso 自动传当前 edition。
+                        server 构建遇到已带 grok-bot 的捆绑 (desktop 抓的) 仍直接复用
   --ubuntu-mirror URL   抓包时的 Ubuntu 源; 默认清华
                         https://mirrors.tuna.tsinghua.edu.cn/ubuntu
                         (非 amd64/i386 默认 .../ubuntu-ports)。含 -security。
@@ -148,6 +152,7 @@ while [[ $# -gt 0 ]]; do
     --grok-bot-url) GROK_BOT_DEB_URL="$2"; shift 2 ;;
     --grok-bot-sha256) GROK_BOT_SHA256="$2"; shift 2 ;;
     --no-grok-bot) NO_GROK_BOT=1; shift ;;
+    --edition) BUNDLE_EDITION="$2"; shift 2 ;;
     --ubuntu-mirror) UBUNTU_MIRROR="$2"; shift 2 ;;
     --skip-npm) SKIP_NPM=1; shift ;;
     --force) FORCE=1; shift ;;
@@ -210,9 +215,20 @@ GROK_BOT_SHA256="$(printf '%s' "$GROK_BOT_SHA256" | tr '[:upper:]' '[:lower:]')"
 [[ -z "$GROK_BOT_DEB_URL" ]] || grokbot_valid_url "$GROK_BOT_DEB_URL" || die "非法 --grok-bot-url: $GROK_BOT_DEB_URL"
 [[ -z "$GROK_BOT_SHA256" ]] || grokbot_valid_sha256 "$GROK_BOT_SHA256" || die "非法 --grok-bot-sha256"
 [[ -z "$GROK_BOT_DEB_URL" || -n "$GROK_BOT_SHA256" ]] || die "--grok-bot-url 必须同时给 --grok-bot-sha256"
+case "$BUNDLE_EDITION" in
+  all|desktop) ;;
+  server)
+    if [[ "$NO_GROK_BOT" -ne 1 ]]; then
+      NO_GROK_BOT=1
+      log "Grok Bot: --edition server, 默认不捆绑 (只在 Desktop 安装)"
+    fi
+    ;;
+  *) die "--edition 必须是 all | desktop | server (got: $BUNDLE_EDITION)" ;;
+esac
 # 指纹: 不捆绑记为 none; latest 不随 feed 变化 (同 FlClash: 复用已有捆绑, 要新版用 --force)
+# "|recommends": 捆绑里含 deb 的 Recommends (libappindicator3-1); 没有它的旧捆绑指纹不同, 需要 --force
 GROKBOT_FP="none"
-[[ "$NO_GROK_BOT" -eq 1 ]] || GROKBOT_FP="${PIN_GROK_BOT}|${GROK_BOT_DEB_URL}|${GROK_BOT_SHA256}"
+[[ "$NO_GROK_BOT" -eq 1 ]] || GROKBOT_FP="${PIN_GROK_BOT}|${GROK_BOT_DEB_URL}|${GROK_BOT_SHA256}|recommends"
 rustdesk_valid_version "$PIN_RUSTDESK" || die "非法 --pin-rustdesk: $PIN_RUSTDESK"
 JENKINS_PLUGINS="$(printf '%s' "$JENKINS_PLUGINS" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
 [[ -n "$JENKINS_PLUGINS" ]] || die "--jenkins-plugins 不能为空"
@@ -254,7 +270,8 @@ case "$APT_RUNNER" in
 esac
 
 # 计算期望指纹; 已有捆绑指纹一致才复用 (否则提示 --force)
-expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$RESOLVER_SHA" "$PIN_RUSTDESK" "$NVIDIA_FP_DRIVER" "$NVIDIA_FP_FLAVOURS" "$GROKBOT_FP" <<'FP'
+bundle_fp() { # grok_bot 指纹项
+  python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$RESOLVER_SHA" "$PIN_RUSTDESK" "$NVIDIA_FP_DRIVER" "$NVIDIA_FP_FLAVOURS" "$1" <<'FP'
 import hashlib, json, sys
 payload = {
   "schema": 3,
@@ -290,10 +307,20 @@ payload = {
 }
 print(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16])
 FP
-)"
+}
+expected_fp="$(bundle_fp "$GROKBOT_FP")"
 
 if [[ "$FORCE" -ne 1 && -f "$OUT/manifest.json" && -d "$OUT/apt" ]]; then
   have_fp="$(python3 -c "import json;print(json.load(open('$OUT/manifest.json')).get('fingerprint',''))" 2>/dev/null || true)"
+  # 不要 Grok Bot (server / --no-grok-bot) 时, 带 grok-bot 的同参数捆绑 (Desktop 抓的超集) 也可复用:
+  # 用 manifest 里记录的 grok_bot 指纹项重算一次, 一致就复用 (多出的 grok-bot/ 在 Server 上不会被装)
+  if [[ -n "$have_fp" && "$have_fp" != "$expected_fp" && "$GROKBOT_FP" == "none" ]]; then
+    have_gb="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('pins',{}).get('grok_bot',''))" "$OUT/manifest.json" 2>/dev/null || true)"
+    if [[ -n "$have_gb" && "$have_gb" != "none" && "$(bundle_fp "$have_gb")" == "$have_fp" ]]; then
+      log "已有捆绑多带了 Grok Bot ($have_gb), 本次不需要, 照常复用"
+      expected_fp="$have_fp"
+    fi
+  fi
   if [[ -n "$have_fp" && "$have_fp" == "$expected_fp" ]]; then
     ok "复用已有捆绑 (fingerprint=$have_fp): $OUT ($(du -sh "$OUT" | cut -f1))"
     python3 -c "import json;print(json.dumps(json.load(open('$OUT/manifest.json')),indent=2,ensure_ascii=False))" 2>/dev/null || true
@@ -551,6 +578,7 @@ if [ -n "$RUSTDESK_DEB" ]; then
 fi
 # Grok Bot 官方 deb (宿主机已校验): 同 FlClash, Depends 并入种子 (libgtk-3-0, libnss3, libsecret-1-0, …)
 GROKBOT_DEB=""
+GROKBOT_RECS=()
 GROKBOT_IN="${FETCH_GROKBOT_DIR:-/grok-bot-in}"
 if [ -z "${FETCH_MINIMAL_SEEDS:-}" ] && [ -d "$GROKBOT_IN" ]; then
   for _f in "$GROKBOT_IN"/*.deb; do
@@ -568,7 +596,22 @@ if [ -n "$GROKBOT_DEB" ]; then
     first="${dep%%|*}"
     first="$(printf '%s' "$first" | sed 's/([^)]*)//g; s/^[[:space:]]*//; s/[[:space:]]*$//')"
     [ -n "$first" ] && printf '%s\n' "$first"
+  done)  # Recommends (libappindicator3-1, 托盘图标) 也进捆绑: 39-grok-bot.sh 会连同它一起装; 源里没有的跳过
+  GROKBOT_RECS=()
+  while IFS= read -r _r; do
+    [ -n "$_r" ] || continue
+    _c="$(apt-cache policy "$_r" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+    if [ -n "$_c" ] && [ "$_c" != "(none)" ]; then
+      GROKBOT_RECS+=("$_r"); SEEDS+=("$_r")
+    else
+      echo "warn: Grok Bot Recommends $_r 在 $RELEASE 源里没有, 不捆绑"
+    fi
+  done < <(dpkg-deb -f "$GROKBOT_DEB" Recommends 2>/dev/null | tr ',' '\n' | while IFS= read -r rec; do
+    rec="${rec%%|*}"
+    rec="$(printf '%s' "$rec" | sed 's/([^)]*)//g; s/:any//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "$rec" ] && printf '%s\n' "$rec"
   done)
+  echo "Grok Bot Recommends 捆绑: ${GROKBOT_RECS[*]:-(无)}"
 fi
 # NVIDIA 驱动 + Canonical 预编译签名模块 + 同版本内核 (24-nvidia-driver.sh 离线路径)
 # 每个 flavour: 模块 meta 的版本必须能找到同版本的 linux-<flavour> / linux-image-<flavour> /
@@ -709,7 +752,7 @@ if [ -n "$RUSTDESK_DEB" ]; then
 fi
 if [ -n "$GROKBOT_DEB" ]; then
   echo "apt download-only for local Grok Bot deb (resolve Depends against $RELEASE)"
-  apt-get install -y --download-only --no-install-recommends -o Dir::Cache::archives="$ARCHIVES" "$GROKBOT_DEB" || {
+  apt-get install -y --download-only --no-install-recommends -o Dir::Cache::archives="$ARCHIVES" "$GROKBOT_DEB" ${GROKBOT_RECS[@]+"${GROKBOT_RECS[@]}"} || {
     echo "ERROR: 无法解析/下载 Grok Bot 的 apt 依赖: $GROKBOT_DEB" >&2
     exit 1
   }

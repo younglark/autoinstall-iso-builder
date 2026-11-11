@@ -704,12 +704,16 @@ if [[ "${FETCH_OFFLINE:-0}" -eq 1 ]]; then
     FETCH_ARGS+=(--nvidia-driver-version "$PIN_NVIDIA_DRIVER")
     [[ -n "$NVIDIA_KERNEL_FLAVOUR" ]] && FETCH_ARGS+=(--nvidia-kernel-flavours "$NVIDIA_KERNEL_FLAVOUR")
   fi
-  if should_skip_script 39-grok-bot; then
-    FETCH_ARGS+=(--no-grok-bot)
-  else
-    FETCH_ARGS+=(--grok-bot-version "$PIN_GROK_BOT")
-    [[ -n "$GROK_BOT_DEB_URL" ]] && FETCH_ARGS+=(--grok-bot-url "$GROK_BOT_DEB_URL")
-    [[ -n "$GROK_BOT_SHA256" ]] && FETCH_ARGS+=(--grok-bot-sha256 "$GROK_BOT_SHA256")
+  # Grok Bot 只在 Desktop 装: Server 构建传 --edition server, 默认不抓 (已有 Desktop 抓的超集捆绑照常复用)
+  FETCH_ARGS+=(--edition "$EDITION")
+  if [[ "$EDITION" == "desktop" ]]; then
+    if should_skip_script 39-grok-bot; then
+      FETCH_ARGS+=(--no-grok-bot)
+    else
+      FETCH_ARGS+=(--grok-bot-version "$PIN_GROK_BOT")
+      [[ -n "$GROK_BOT_DEB_URL" ]] && FETCH_ARGS+=(--grok-bot-url "$GROK_BOT_DEB_URL")
+      [[ -n "$GROK_BOT_SHA256" ]] && FETCH_ARGS+=(--grok-bot-sha256 "$GROK_BOT_SHA256")
+    fi
   fi
   [[ "${FORCE_FETCH:-0}" -eq 1 ]] && FETCH_ARGS+=(--force)
   bash "$SCRIPT_DIR/tools/fetch-offline-bundle.sh" "${FETCH_ARGS[@]}"
