@@ -1170,7 +1170,8 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
   if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o1.iso" --password 'Pl@in99x' >"$xb/o1.log" 2>&1 && _xenv "$xb/o1.iso" "$xb/p1" \
      && grep -qx 'REMOTE_DESKTOP=rustdesk' "$xb/p1/provision.env" && grep -qx 'X11VNC=0' "$xb/p1/provision.env" \
      && grep -qx 'DISABLE_WAYLAND=1' "$xb/p1/provision.env" && grep -qx 'PIN_RUSTDESK=1.5.1' "$xb/p1/provision.env" \
-     && grep -qx "RUSTDESK_SERVER=''" "$xb/p1/provision.env" \
+     && grep -qx "RUSTDESK_SERVER=''" "$xb/p1/provision.env" && grep -qx 'RUSTDESK_ALLOW_ID=0' "$xb/p1/provision.env" \
+     && grep -q '只允许局域网 IP 直连' "$xb/o1.log" \
      && [[ -f "$xb/p1/36-x11vnc-xorg.sh" && -f "$xb/p1/38-rustdesk.sh" && -f "$xb/p1/rustdesk-release.sh" ]] \
      && [[ ! -e "$xb/p1/x11vnc.secret" ]] && ! grep -q 'VNC 流量不加密' "$xb/o1.log" \
      && grep -q '21118' "$xb/o1.log" && grep -q 'RustDesk 安全提示' "$xb/o1.log" \
@@ -1188,8 +1189,12 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
      && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o3.iso" --rustdesk-password 'rdpass1x' --rustdesk-server 'RD.Example.com:21116' --pin-rustdesk 1.5.0 >"$xb/o3.log" 2>&1 && _xenv "$xb/o3.iso" "$xb/p3" \
      && ( # shellcheck disable=SC1091
           . "$xb/p3/rustdesk.secret"; [[ "$RUSTDESK_PASSWORD" == 'rdpass1x' ]] ) && ! grep -q 'rdpass1x' "$xb/o3.log" \
-     && grep -qx 'RUSTDESK_SERVER=rd.example.com:21116' "$xb/p3/provision.env" && grep -qx 'PIN_RUSTDESK=1.5.0' "$xb/p3/provision.env"; then
-    pass "rustdesk default-password warning + --rustdesk-password / --rustdesk-server / --pin-rustdesk"
+     && grep -qx 'RUSTDESK_SERVER=rd.example.com:21116' "$xb/p3/provision.env" && grep -qx 'PIN_RUSTDESK=1.5.0' "$xb/p3/provision.env" \
+     && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o3b.iso" --password 'Pl@in99x' --rustdesk-allow-id >"$xb/o3b.log" 2>&1 && _xenv "$xb/o3b.iso" "$xb/p3b" \
+     && grep -qx 'RUSTDESK_ALLOW_ID=1' "$xb/p3b/provision.env" && grep -q '保留公共 ID 服务器' "$xb/o3b.log" \
+     && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o3c.iso" --password 'Pl@in99x' --rustdesk-allow-id --rustdesk-server rd.example.com >"$xb/o3c.log" 2>&1 && _xenv "$xb/o3c.iso" "$xb/p3c" \
+     && grep -qx 'RUSTDESK_ALLOW_ID=0' "$xb/p3c/provision.env" && grep -q -- '--rustdesk-allow-id 与 --rustdesk-server 同用' "$xb/o3c.log"; then
+    pass "rustdesk default-password warning + --rustdesk-password / --rustdesk-server / --pin-rustdesk / --rustdesk-allow-id"
   else
     fail "rustdesk password / server defaults: $(tail -3 "$xb/o2.log" "$xb/o3.log")"
   fi
@@ -1352,46 +1357,90 @@ if EDITION=desktop REMOTE_DESKTOP=rustdesk AIB_TARGET_ROOT="$t" AIB_SKIP_PKG=1 b
      && grep -qx 'direct-server Y' "$t/etc/aib/rustdesk.options" \
      && grep -qx 'verification-method use-permanent-password' "$t/etc/aib/rustdesk.options" \
      && grep -qx 'approve-mode password' "$t/etc/aib/rustdesk.options" \
-     && ! grep -q 'rendezvous\|relay' "$t/etc/aib/rustdesk.options" \
+     && grep -qx 'direct-access-port 21118' "$t/etc/aib/rustdesk.options" \
+     && grep -qx 'custom-rendezvous-server 127.0.0.1' "$t/etc/aib/rustdesk.options" \
+     && grep -qx 'relay-server 127.0.0.1' "$t/etc/aib/rustdesk.options" \
+     && grep -qx 'api-server http://127.0.0.1' "$t/etc/aib/rustdesk.options" \
+     && ! grep -qi 'rustdesk\.com' "$t/etc/aib/rustdesk.options" \
      && grep -qx '\[options\]' "$t/root/.config/rustdesk/RustDesk2.toml" \
      && grep -qx "direct-server = 'Y'" "$t/root/.config/rustdesk/RustDesk2.toml" \
+     && grep -qx "direct-access-port = '21118'" "$t/root/.config/rustdesk/RustDesk2.toml" \
+     && grep -qx "custom-rendezvous-server = '127.0.0.1'" "$t/root/.config/rustdesk/RustDesk2.toml" \
+     && grep -qx "relay-server = '127.0.0.1'" "$t/root/.config/rustdesk/RustDesk2.toml" \
+     && grep -qx "api-server = 'http://127.0.0.1'" "$t/root/.config/rustdesk/RustDesk2.toml" \
+     && grep -q '只允许局域网 IP 直连' "$tmp/rd-on.log" \
      && ! grep -qi 'password = ' "$t/root/.config/rustdesk/RustDesk2.toml" \
      && grep -q '^After=rustdesk.service' "$u" && grep -q '^Wants=rustdesk.service' "$u" \
      && grep -qx 'ConditionPathExists=!/var/lib/aib/rustdesk-setup.done' "$u" && grep -q '^Restart=on-failure' "$u" \
      && grep -q '^WantedBy=multi-user.target' "$u" && [[ -x "$su" ]] \
      && ! grep -rq 'S3cret' "$t/etc/systemd" "$t/usr" "$t/etc/aib/rustdesk.options" "$t/root/.config"; then
-    pass "38-rustdesk: secret → /etc/aib (0600), options + RustDesk2.toml preset, first-boot oneshot unit"
+    pass "38-rustdesk: secret → /etc/aib (0600), LAN-only options (direct 21118, rendezvous/relay/api → 127.0.0.1) + RustDesk2.toml preset, first-boot oneshot unit"
   else
     fail "38-rustdesk files: $(tail -5 "$tmp/rd-on.log")"
   fi
   if command -v shellcheck >/dev/null; then
     if shellcheck "$su"; then pass "aib-rustdesk-setup shellcheck"; else fail "aib-rustdesk-setup shellcheck"; fi
   fi
-  # 首次开机脚本: 用假 rustdesk CLI 验证 IPC 设置流程 (选项读回确认, 密码 Done! 后删除明文, 打标记)
-  fr="$rr/fake"; mkdir -p "$fr/opt"
+  # 首次开机脚本: 用假 rustdesk / systemctl / pgrep 验证就绪等待 + IPC 设置流程
+  # (选项读回确认, 密码 Done! 后删除明文, 打标记; 不调用 --get-id, 不记录 ID, 不泄露密码)
+  fr="$rr/fake"; mkdir -p "$fr/opt" "$fr/bin" "$fr/conf"
   cat > "$fr/rustdesk" <<STUB
 #!/bin/bash
 case "\$1" in
-  --get-id) echo 123456789 ;;
+  --get-id) touch "$fr/get-id-called"; echo 123456789 ;;
   --option) if [ \$# -eq 3 ]; then printf '%s' "\$3" > "$fr/opt/\$2"; else cat "$fr/opt/\$2" 2>/dev/null; echo; fi ;;
-  --password) if [ -n "\${STUB_PW_FAIL:-}" ]; then echo "Failed to connect"; else printf '%s' "\$2" > "$fr/pw"; echo "Done!"; fi ;;
+  --password)
+    n=\$(( \$(cat "$fr/pwn" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "$fr/pwn"
+    if [ -n "\${STUB_PW_FAIL:-}" ]; then echo "Failed to connect for \$2"
+    elif [ "\$n" -le "\${STUB_PW_FAIL_FIRST:-0}" ]; then echo "No such file or directory (os error 2)"
+    else printf '%s' "\$2" > "$fr/pw"; echo "Done!"; fi ;;
 esac
 STUB
-  chmod +x "$fr/rustdesk"
+  printf '#!/bin/bash\n[ -e "%s/svc-active" ]\n' "$fr" > "$fr/bin/systemctl"
+  printf '#!/bin/bash\n[ -e "%s/proc-up" ]\n' "$fr" > "$fr/bin/pgrep"
+  chmod +x "$fr/rustdesk" "$fr/bin/systemctl" "$fr/bin/pgrep"
+  mksock() { python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"; }
   cp "$t/etc/aib/rustdesk.secret" "$fr/secret"
-  run_setup() { AIB_RUSTDESK_SECRET="$fr/secret" AIB_RUSTDESK_OPTIONS="$t/etc/aib/rustdesk.options" AIB_RUSTDESK_STAMP="$fr/done" RUSTDESK_BIN="$fr/rustdesk" bash "$su"; }
-  if STUB_PW_FAIL=1 run_setup >"$tmp/rd-setup-fail.log" 2>&1; then
-    fail "aib-rustdesk-setup should fail when --password fails"
-  elif [[ -f "$fr/secret" && ! -e "$fr/done" ]] && grep -q '设置固定密码失败' "$tmp/rd-setup-fail.log"; then
-    pass "aib-rustdesk-setup: password failure keeps secret for retry"
+  run_setup() { PATH="$fr/bin:$PATH" AIB_RUSTDESK_SECRET="$fr/secret" AIB_RUSTDESK_OPTIONS="$t/etc/aib/rustdesk.options" \
+      AIB_RUSTDESK_STAMP="$fr/done" AIB_RUSTDESK_CONF_DIR="$fr/conf" AIB_RUSTDESK_IPC="$fr/ipc" \
+      AIB_RUSTDESK_POLL=1 RUSTDESK_BIN="$fr/rustdesk" bash "$su"; }
+  # 1) 服务 / 进程 / IPC 都没就绪: 超时退出, 不碰密码 (不会出现「设置固定密码失败」假失败)
+  if AIB_RUSTDESK_READY_TIMEOUT=2 run_setup >"$tmp/rd-setup-nr.log" 2>&1; then
+    fail "aib-rustdesk-setup should wait/fail when RustDesk not ready"
+  elif [[ -f "$fr/secret" && ! -e "$fr/done" && ! -e "$fr/pwn" ]] && grep -q '等待 RustDesk 就绪超时' "$tmp/rd-setup-nr.log" \
+       && grep -q 'IPC socket' "$tmp/rd-setup-nr.log" && grep -q 'rustdesk.service 未 active' "$tmp/rd-setup-nr.log" \
+       && ! grep -q '设置固定密码失败' "$tmp/rd-setup-nr.log"; then
+    pass "aib-rustdesk-setup: waits for service/process/config/IPC (timeout), password untouched"
   else
-    fail "aib-rustdesk-setup failure path: $(cat "$tmp/rd-setup-fail.log")"
+    fail "aib-rustdesk-setup not-ready path: $(cat "$tmp/rd-setup-nr.log")"
   fi
-  if run_setup >"$tmp/rd-setup.log" 2>&1 && [[ ! -e "$fr/secret" && -s "$fr/done" ]] \
-     && [[ "$(cat "$fr/pw")" == 'S3cret#rd' ]] && [[ "$(cat "$fr/opt/direct-server")" == Y ]] \
+  # 2) 等待中途就绪 (IPC socket 晚 2 秒出现) → 继续
+  touch "$fr/svc-active" "$fr/proc-up"
+  ( sleep 2; mksock "$fr/ipc" ) &
+  _sockpid=$!
+  _rc=0
+  STUB_PW_FAIL=1 AIB_RUSTDESK_PW_TRIES=2 AIB_RUSTDESK_READY_TIMEOUT=20 run_setup >"$tmp/rd-setup-fail.log" 2>&1 || _rc=$?
+  wait "$_sockpid" 2>/dev/null || true
+  if [[ "$_rc" -ne 0 && -f "$fr/secret" && ! -e "$fr/done" && "$(cat "$fr/pwn")" == 2 ]] \
+     && grep -q 'RustDesk 服务就绪' "$tmp/rd-setup-fail.log" && grep -q '设置固定密码失败 (2 次)' "$tmp/rd-setup-fail.log" \
+     && grep -qF 'Failed to connect for ***' "$tmp/rd-setup-fail.log" && ! grep -q 'S3cret' "$tmp/rd-setup-fail.log"; then
+    pass "aib-rustdesk-setup: waits until IPC appears; real password failure retried, keeps secret, password masked in log"
+  else
+    fail "aib-rustdesk-setup failure path (rc=$_rc): $(cat "$tmp/rd-setup-fail.log")"
+  fi
+  # 3) 前两次 IPC 报 No such file or directory, 第三次 Done! → 同一次运行内成功; 不调 --get-id, 日志无 ID / 密码
+  rm -f "$fr/pwn"
+  if STUB_PW_FAIL_FIRST=2 run_setup >"$tmp/rd-setup.log" 2>&1 && [[ ! -e "$fr/secret" && -s "$fr/done" ]] \
+     && [[ "$(cat "$fr/pw")" == 'S3cret#rd' && "$(cat "$fr/pwn")" == 3 ]] && [[ "$(cat "$fr/opt/direct-server")" == Y ]] \
+     && [[ "$(cat "$fr/opt/direct-access-port")" == 21118 ]] \
+     && [[ "$(cat "$fr/opt/custom-rendezvous-server")" == 127.0.0.1 && "$(cat "$fr/opt/relay-server")" == 127.0.0.1 ]] \
+     && [[ "$(cat "$fr/opt/api-server")" == http://127.0.0.1 ]] \
      && [[ "$(cat "$fr/opt/verification-method")" == use-permanent-password ]] && [[ "$(cat "$fr/opt/approve-mode")" == password ]] \
-     && ! grep -q 'S3cret' "$tmp/rd-setup.log" && grep -q '123456789' "$tmp/rd-setup.log"; then
-    pass "aib-rustdesk-setup: options applied + verified, password set via CLI, secret deleted, stamp written"
+     && [[ ! -e "$fr/get-id-called" ]] && ! grep -q 'S3cret' "$tmp/rd-setup.log" \
+     && ! grep -q '123456789' "$tmp/rd-setup.log" "$fr/done" && ! grep -qi 'ID [0-9]' "$tmp/rd-setup.log" \
+     && ! grep -q -- '--get-id' <(grep -v '^#' "$su") \
+     && grep -q '只允许局域网 IP 直连' "$tmp/rd-setup.log" && ! grep -q '设置固定密码失败' "$tmp/rd-setup.log"; then
+    pass "aib-rustdesk-setup: transient IPC errors retried in-run; LAN-only options applied + verified; no --get-id, no ID/password in log"
   else
     fail "aib-rustdesk-setup: $(cat "$tmp/rd-setup.log")"
   fi
@@ -1403,11 +1452,16 @@ t="$rr/t2"
 if EDITION=desktop REMOTE_DESKTOP=rustdesk RUSTDESK_SERVER=rd.example.com:21116 AIB_TARGET_ROOT="$t" AIB_SKIP_PKG=1 bash software/38-rustdesk.sh >"$tmp/rd-srv2.log" 2>&1 \
    && grep -qx 'custom-rendezvous-server rd.example.com:21116' "$t/etc/aib/rustdesk.options" \
    && grep -qx 'relay-server rd.example.com:21116' "$t/etc/aib/rustdesk.options" \
+   && ! grep -q '127.0.0.1' "$t/etc/aib/rustdesk.options" \
+   && EDITION=desktop REMOTE_DESKTOP=rustdesk RUSTDESK_ALLOW_ID=1 AIB_TARGET_ROOT="$rr/t5" AIB_SKIP_PKG=1 bash software/38-rustdesk.sh >"$tmp/rd-id.log" 2>&1 \
+   && grep -qx 'direct-server Y' "$rr/t5/etc/aib/rustdesk.options" \
+   && ! grep -q 'rendezvous\|relay\|api-server' "$rr/t5/etc/aib/rustdesk.options" "$rr/t5/root/.config/rustdesk/RustDesk2.toml" \
+   && grep -q '保留公共 ID 服务器' "$tmp/rd-id.log" \
    && [[ "$(stat -c %a "$t/root/rustdesk-password")" == 600 && "$(wc -c < "$t/root/rustdesk-password")" -eq 13 ]] \
    && ( # shellcheck disable=SC1091
         . "$t/etc/aib/rustdesk.secret"; [[ "$RUSTDESK_PASSWORD" == "$(cat "$t/root/rustdesk-password")" ]] ) \
    && ! EDITION=desktop REMOTE_DESKTOP=rustdesk RUSTDESK_SERVER='x;rm' AIB_TARGET_ROOT="$rr/t3" AIB_SKIP_PKG=1 bash software/38-rustdesk.sh >/dev/null 2>&1; then
-  pass "38-rustdesk: --rustdesk-server options, random password when no plaintext, rejects bad server"
+  pass "38-rustdesk: --rustdesk-server options, RUSTDESK_ALLOW_ID=1 keeps public ID, random password when no plaintext, rejects bad server"
 else
   fail "38-rustdesk server / random password: $(tail -3 "$tmp/rd-srv2.log")"
 fi
@@ -2822,6 +2876,64 @@ if command -v shellcheck >/dev/null; then
 else
   echo "(shellcheck not installed, skipped)"
 fi
+
+echo "== 全离线装机后删除 /opt/offline (--keep-offline-bundle 保留) =="
+oc="$(mktemp -d)"
+_lc() { # out.yaml → late-commands (一行一条)
+  python3 -c 'import sys,yaml; [print(c) for c in yaml.safe_load(open(sys.argv[1]))["autoinstall"]["late-commands"]]' "$1"; }
+_ok=1
+python3 tools/render-user-data.py --template autoinstall/user-data.tmpl --out "$oc/d.yaml" --password-hash "\$6\$x\$y" \
+  --full-offline --provision --edition desktop >/dev/null || _ok=0
+python3 tools/render-user-data.py --template autoinstall/user-data.tmpl --out "$oc/k.yaml" --password-hash "\$6\$x\$y" \
+  --full-offline --provision --edition desktop --keep-offline-bundle >/dev/null || _ok=0
+python3 tools/render-user-data.py --template autoinstall/user-data.tmpl --out "$oc/n.yaml" --password-hash "\$6\$x\$y" \
+  --provision >/dev/null || _ok=0
+_lc "$oc/d.yaml" > "$oc/d.lc"; _lc "$oc/k.yaml" > "$oc/k.lc"; _lc "$oc/n.yaml" > "$oc/n.lc"
+i_run="$(grep -n 'run-all.sh' "$oc/d.lc" | cut -d: -f1)"
+i_res="$(grep -n 'restore-online-apt.sh' "$oc/d.lc" | cut -d: -f1)"
+i_rm="$(grep -n 'rm -rf /opt/offline' "$oc/d.lc" | cut -d: -f1)"
+# 删除必须在 run-all (software/ 全部脚本) 和 restore-online-apt 之后, 且之后再没有命令用 /opt/offline
+if [[ "$_ok" -eq 1 && -n "$i_run" && -n "$i_res" && -n "$i_rm" && "$i_rm" -gt "$i_res" && "$i_res" -gt "$i_run" ]] \
+   && ! tail -n +"$((i_rm + 1))" "$oc/d.lc" | grep -q '/opt/offline' \
+   && grep -q 'restore-online-apt.sh' "$oc/k.lc" && ! grep -q 'rm -rf /opt/offline' "$oc/k.lc" \
+   && ! grep -q 'rm -rf /opt/offline' "$oc/n.lc"; then
+  pass "late-commands: rm /opt/offline after run-all + restore-online-apt; --keep-offline-bundle / non-offline keep it"
+else
+  fail "offline bundle cleanup order (run=$i_run restore=$i_res rm=$i_rm)"
+fi
+# 真跑一次删除命令 (路径换成临时目录): 删掉整个捆绑, 记录大小
+mkdir -p "$oc/root/opt/offline/apt" "$oc/root/var/log/autoinstall"
+head -c 4096 /dev/zero > "$oc/root/opt/offline/apt/x.deb"
+_cmd="$(sed -n "${i_rm}p" "$oc/d.lc" | sed "s|^curtin in-target --target=/target -- ||; s|/opt/offline|$oc/root/opt/offline|g; s|/var/log/autoinstall|$oc/root/var/log/autoinstall|g")"
+if sh -c "$_cmd" && [[ ! -e "$oc/root/opt/offline" ]] \
+   && grep -q '^removed .*/opt/offline: [0-9.]*[KMG]' "$oc/root/var/log/autoinstall/offline-bundle-removed.txt"; then
+  pass "offline bundle cleanup command removes the bundle and logs its size"
+else
+  fail "offline bundle cleanup command: $_cmd"
+fi
+# 运行时依赖: 装好的东西不能引用 /opt/offline (只有 run-all/lib-offline 的默认值); 离线来源都是 拷贝 / 解压 / apt 安装
+# shellcheck disable=SC2016  # 字面量匹配脚本源码
+_rt="$(grep -n '/opt/offline\|offline_root)' software/*.sh | grep -v '^software/lib-offline.sh:' | grep -v '^software/run-all.sh:' \
+       | grep -v 'dir="\$(offline_root)/' | grep -v 'prefix.tar.gz' | grep -v 'java-package.txt' | grep -v 'PDIR="\$(offline_root)/jenkins-plugins"' || true)"
+# shellcheck disable=SC2016
+if [[ -z "$_rt" ]] && ! grep -n 'ln -s[fn]* .*offline' software/*.sh | grep -q . \
+   && grep -q 'install -m 0644 -o jenkins -g jenkins "\$f" "\$PLUGIN_DIR' software/30-jenkins.sh \
+   && grep -q 'tar --no-same-owner --no-overwrite-dir -xzf "\$tgz" -C /usr/local' software/lib-offline.sh \
+   && grep -q 'rm -f "\$APT_ETC/sources.list.d/00-offline-bundle.list"' autoinstall/restore-online-apt.sh; then
+  pass "no runtime dependency on /opt/offline (jenkins plugins copied, npm tree extracted, offline apt source removed)"
+else
+  fail "possible runtime use of /opt/offline: $_rt"
+fi
+# shellcheck disable=SC2016
+if grep -qF 'RENDER_ARGS+=(--keep-offline-bundle)' build-iso.sh && grep -q -- '--keep-offline-bundle) KEEP_OFFLINE_BUNDLE=1' build-iso.sh \
+   && bash build-iso.sh --help | grep -q -- '--keep-offline-bundle' && grep -q -- '--keep-offline-bundle' README.md \
+   && bash build-iso.sh --help | grep -q -- '--rustdesk-allow-id' && grep -q -- '--rustdesk-allow-id' README.md \
+   && grep -q '只支持局域网 `<机器IP>:21118` 直连' README.md && grep -q 'sudo rustdesk --get-id' README.md; then
+  pass "build-iso --keep-offline-bundle / --rustdesk-allow-id wired + help + README"
+else
+  fail "--keep-offline-bundle / --rustdesk-allow-id wiring / docs"
+fi
+rm -rf "$oc"
 
 rm -rf "$tmp" "$SKIP_TEST" "$fake"
 if [[ "$FAIL" -ne 0 ]]; then

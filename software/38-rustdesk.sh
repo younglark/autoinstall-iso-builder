@@ -8,11 +8,16 @@
 #                              direct-server=Y                 局域网 IP 直连 (端口 21118)
 #                              verification-method=use-permanent-password  只用固定密码
 #                              approve-mode=password           不弹「接受连接」确认框
-#                              custom-rendezvous-server / relay-server     仅 --rustdesk-server 时
+#                              direct-access-port=21118
+#                              custom-rendezvous-server / relay-server     --rustdesk-server 时指向自建服务器;
+#                                默认 (只允许局域网 IP 直连) 与 api-server 一起指向 127.0.0.1: 不连 RustDesk
+#                                公共 ID / 中继服务器, 外网无法按 ID 连入; --rustdesk-allow-id 恢复公共 ID
+#                            不记录 RustDesk ID (要看: sudo rustdesk --get-id)
 #                            固定密码 = --rustdesk-password, 默认 = --password 明文; 只给了 --password-hash 时
 #                            随机生成写入 /root/rustdesk-password (root 0600)。
 #   PIN_RUSTDESK             版本, 默认见 tools/rustdesk-release.sh (RUSTDESK_DEFAULT_VERSION)
 #   RUSTDESK_SERVER          自建 hbbs/hbbr 主机 (可空)
+#   RUSTDESK_ALLOW_ID        1 = 保留 RustDesk 公共 ID 服务器 (默认 0: 只允许局域网 IP 直连)
 # RustDesk 1.5 的固定密码是加盐哈希存储, 只能通过运行中的服务 (IPC) 设置, chroot 里做不到, 所以放到首次开机。
 # 明文只在 /etc/aib/rustdesk.secret (root 0600), 设置成功后删除; 不进 provision.env / 日志。
 # Wayland 由 36-x11vnc-xorg.sh 关闭 (RustDesk 在 Wayland 下连不上登录界面)。
@@ -38,7 +43,9 @@ SKIP_PKG="${AIB_SKIP_PKG:-0}"
 REMOTE_DESKTOP="${REMOTE_DESKTOP:-none}"
 PIN_RUSTDESK="${PIN_RUSTDESK:-$RUSTDESK_DEFAULT_VERSION}"
 RUSTDESK_SERVER="${RUSTDESK_SERVER:-}"
+RUSTDESK_ALLOW_ID="${RUSTDESK_ALLOW_ID:-0}"
 RUSTDESK_PORT=21118
+RUSTDESK_LAN_ONLY_HOST=127.0.0.1
 SECRET_FILE="$HERE/rustdesk.secret"
 RANDOM_PW_FILE="/root/rustdesk-password"
 ARCH="${RUSTDESK_ARCH:-$(dpkg --print-architecture 2>/dev/null || echo amd64)}"
@@ -139,11 +146,18 @@ echo "wrote /etc/aib/rustdesk.secret (root 0600; 首次开机设好固定密码�
 {
   echo "# 由 autoinstall-iso-builder software/38-rustdesk.sh 生成; aib-rustdesk-setup.service 首次开机应用"
   echo "direct-server Y"
+  echo "direct-access-port $RUSTDESK_PORT"
   echo "verification-method use-permanent-password"
   echo "approve-mode password"
   if [ -n "$RUSTDESK_SERVER" ]; then
     echo "custom-rendezvous-server $RUSTDESK_SERVER"
     echo "relay-server $RUSTDESK_SERVER"
+  elif [ "$RUSTDESK_ALLOW_ID" != "1" ]; then
+    # 只留局域网 IP 直连: ID 服务器 / 中继 / API 全指向本机回环 (本机没有 hbbs/hbbr, 连接立即被拒),
+    # 设备不会注册到 rs-ny.rustdesk.com, 外网无法按 ID 找到它; 直连监听 (direct-server) 不受影响。
+    echo "custom-rendezvous-server $RUSTDESK_LAN_ONLY_HOST"
+    echo "relay-server $RUSTDESK_LAN_ONLY_HOST"
+    echo "api-server http://$RUSTDESK_LAN_ONLY_HOST"
   fi
 } > "$R/etc/aib/rustdesk.options"
 chmod 0644 "$R/etc/aib/rustdesk.options"
@@ -168,10 +182,25 @@ cat > "$R/usr/local/sbin/aib-rustdesk-setup" <<'SETUP'
 #!/bin/bash
 # aib-rustdesk-setup — 首次开机: 通过运行中的 RustDesk 服务设置固定密码与选项 (成功后不再运行)
 # 由 aib-rustdesk-setup.service 启动; 由 autoinstall-iso-builder software/38-rustdesk.sh 生成。
+#
+# 先等 RustDesk 真正就绪 (rustdesk.service active + rustdesk --service 进程 + 配置目录 + 主 IPC socket),
+# 再走 IPC 设置。没就绪就调 CLI 会出两种假象 (RustDesk 1.5 源码 src/core_main.rs / src/ipc.rs):
+#   --password  连不上主 IPC → "No such file or directory" / "No --server process found"
+#   --get-id    IPC 不通时退回本地 Config::get_id(), 读到 / 生成的 ID 与服务最终用的不同
+# 所以这里不调用 --get-id, 也不在日志或文件里记录 RustDesk ID (要看 ID: sudo rustdesk --get-id)。
+# 日志里不出现明文密码。
 set -u
 SECRET="${AIB_RUSTDESK_SECRET:-/etc/aib/rustdesk.secret}"
 OPTIONS="${AIB_RUSTDESK_OPTIONS:-/etc/aib/rustdesk.options}"
 STAMP="${AIB_RUSTDESK_STAMP:-/var/lib/aib/rustdesk-setup.done}"
+UNIT="${AIB_RUSTDESK_UNIT:-rustdesk.service}"
+CONF_DIR="${AIB_RUSTDESK_CONF_DIR:-/root/.config/rustdesk}"
+# 主 IPC: hbb_common Config::ipc_path("") = /tmp/RustDesk-<euid>/ipc (root 服务 → /tmp/RustDesk-0/ipc)
+IPC_SOCK="${AIB_RUSTDESK_IPC:-/tmp/RustDesk-0/ipc}"
+PROC_PAT="${AIB_RUSTDESK_PROC:-rustdesk --service}"
+READY_TIMEOUT="${AIB_RUSTDESK_READY_TIMEOUT:-180}"
+POLL="${AIB_RUSTDESK_POLL:-2}"
+PW_TRIES="${AIB_RUSTDESK_PW_TRIES:-5}"
 PORT="${RUSTDESK_PORT:-21118}"
 RD="${RUSTDESK_BIN:-rustdesk}"
 log() { echo "aib-rustdesk-setup: $*"; }
@@ -183,14 +212,26 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: 
   ufw status 2>/dev/null | grep -q "^${PORT}/tcp" || ufw allow "${PORT}/tcp" comment rustdesk >/dev/null 2>&1 || true
 fi
 
-# 等服务的 IPC 起来 (rustdesk --option 读回非空的 verification-method / 或能拿到 ID)
-id=""
-for _ in $(seq 1 40); do
-  id="$(timeout 15 "$RD" --get-id 2>/dev/null | tail -n 1 | tr -d '[:space:]')"
-  [ -n "$id" ] && break
-  sleep 3
+# ---- 等就绪 (带超时); 缺哪一项就在日志里写哪一项
+not_ready() {
+  local miss=""
+  systemctl is-active --quiet "$UNIT" 2>/dev/null || miss="$miss $UNIT 未 active;"
+  pgrep -f -- "$PROC_PAT" >/dev/null 2>&1 || miss="$miss 没有 '$PROC_PAT' 进程;"
+  [ -d "$CONF_DIR" ] || miss="$miss 没有配置目录 $CONF_DIR;"
+  [ -S "$IPC_SOCK" ] || miss="$miss 没有 IPC socket $IPC_SOCK;"
+  printf '%s' "$miss"
+}
+waited=0
+miss="$(not_ready)"
+while [ -n "$miss" ] && [ "$waited" -lt "$READY_TIMEOUT" ]; do
+  sleep "$POLL"; waited=$((waited + POLL))
+  miss="$(not_ready)"
 done
-[ -n "$id" ] || { log "RustDesk 服务没有响应 (systemctl status rustdesk); 稍后重试"; exit 1; }
+if [ -n "$miss" ]; then
+  log "等待 RustDesk 就绪超时 (${READY_TIMEOUT}s):$miss 稍后重试 (systemctl status $UNIT)"
+  exit 1
+fi
+log "RustDesk 服务就绪 (等待 ${waited}s)"
 
 fail=0
 if [ -f "$OPTIONS" ]; then
@@ -214,12 +255,20 @@ if [ -f "$SECRET" ]; then
   if [ -z "$RUSTDESK_PASSWORD" ]; then
     log "$SECRET 里没有密码"; fail=1
   else
-    out="$(timeout 30 "$RD" --password "$RUSTDESK_PASSWORD" 2>&1)"
-    if printf '%s\n' "$out" | grep -q 'Done!'; then
+    ok=0; last=""
+    for i in $(seq 1 "$PW_TRIES"); do
+      out="$(timeout 30 "$RD" --password "$RUSTDESK_PASSWORD" 2>&1)"
+      if printf '%s\n' "$out" | grep -q 'Done!'; then ok=1; break; fi
+      # 输出里万一回显了密码, 先打码再进日志
+      last="$(printf '%s\n' "$out" | tail -n 1)"
+      last="${last//"$RUSTDESK_PASSWORD"/***}"
+      [ "$i" -lt "$PW_TRIES" ] && sleep "$POLL"
+    done
+    if [ "$ok" -eq 1 ]; then
       rm -f "$SECRET"
       log "固定密码已设置 (明文已删除)"
     else
-      log "设置固定密码失败: $(printf '%s\n' "$out" | tail -n 1)"; fail=1
+      log "设置固定密码失败 (${PW_TRIES} 次): $last"; fail=1
     fi
   fi
   unset RUSTDESK_PASSWORD
@@ -228,7 +277,11 @@ fi
 [ "$fail" -eq 0 ] || exit 1
 mkdir -p "$(dirname "$STAMP")"
 date '+%F %T' > "$STAMP"
-log "完成: 局域网 IP 直连端口 ${PORT}/tcp, RustDesk ID $id"
+if grep -qx 'custom-rendezvous-server 127.0.0.1' "$OPTIONS" 2>/dev/null; then
+  log "完成: 只允许局域网 IP 直连 <本机IP>:${PORT} (不连 RustDesk 公共 ID / 中继服务器)"
+else
+  log "完成: 局域网 IP 直连端口 ${PORT}/tcp"
+fi
 SETUP
 chmod 0755 "$R/usr/local/sbin/aib-rustdesk-setup"
 
@@ -263,4 +316,7 @@ if [ "$SKIP_PKG" != "1" ]; then
   echo "RustDesk $(dpkg-query -W -f='${Version}' rustdesk 2>/dev/null || echo '?') ok"
 fi
 
-echo "rustdesk ok: 局域网 IP 直连 ${RUSTDESK_PORT}/tcp, 固定密码 (首次开机设置)${RUSTDESK_SERVER:+, 自建服务器 $RUSTDESK_SERVER}"
+if [ -n "$RUSTDESK_SERVER" ]; then _rd_mode="自建服务器 $RUSTDESK_SERVER"
+elif [ "$RUSTDESK_ALLOW_ID" = "1" ]; then _rd_mode="保留公共 ID 服务器"
+else _rd_mode="只允许局域网 IP 直连, 不连公共 ID / 中继服务器"; fi
+echo "rustdesk ok: 局域网 IP 直连 ${RUSTDESK_PORT}/tcp, 固定密码 (首次开机设置), $_rd_mode"

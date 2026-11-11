@@ -78,6 +78,8 @@ X11VNC=0            # 内部: REMOTE_DESKTOP=x11vnc
 VNC_PASSWORD=""
 RUSTDESK_PASSWORD=""
 RUSTDESK_SERVER=""
+RUSTDESK_ALLOW_ID=0    # 1 = RustDesk 保留公共 ID 服务器 (默认只允许局域网 IP 直连)
+KEEP_OFFLINE_BUNDLE=0  # 1 = 装机后保留 /opt/offline (默认删除)
 PIN_RUSTDESK="${PIN_RUSTDESK:-}"   # 空 = tools/rustdesk-release.sh 的 RUSTDESK_DEFAULT_VERSION
 NO_FLCLASH=0
 # Grok Bot 桌面版 (39-grok-bot.sh, 仅 Desktop): 默认装 feed 当前版本; --grok-bot-version / --grok-bot-url + --grok-bot-sha256 钉扎
@@ -136,6 +138,8 @@ usage() {
   --offline-bundle DIR  fetch-offline-bundle.sh 产出目录 (含 apt/ npm/ manifest.json)
   --fetch-offline       构建前自动调用 tools/fetch-offline-bundle.sh (需 docker)
   --force-fetch         配合 --fetch-offline: 忽略缓存指纹, 强制重建离线捆绑
+  --keep-offline-bundle 全离线装机后保留 /opt/offline (约 2-3 GB)。默认在 software/ 和
+                        restore-online-apt.sh 都跑完后删除 (装好的软件运行时不依赖它)
   --debs DIR            把目录下所有 .deb 打进 ISO 的 /pool 并离线安装 (旧局部离线)
   --no-provision        不执行 software/ 下的软件预装脚本
   --strict              任一软件装失败就中止安装 (默认: 记日志继续)
@@ -186,7 +190,10 @@ usage() {
   --rustdesk-password P RustDesk 固定密码 (≥6 位)。默认 = --password 明文 (含默认密码);
                         只给了 --password-hash 时装机生成随机密码写入 /root/rustdesk-password
   --rustdesk-server H   自建 RustDesk 服务器 (hbbs/hbbr) 主机, 可带端口; 写入 custom-rendezvous-server /
-                        relay-server。默认不设 (局域网 IP 直连不需要服务器; 按 ID 连走 RustDesk 公共服务器)
+                        relay-server, 可经自建服务器按 ID 连。默认不设
+  --rustdesk-allow-id   RustDesk 保留公共 ID 服务器 (rs-ny.rustdesk.com), 可跨网络按 ID 连。默认关闭:
+                        只允许局域网 <机器IP>:21118 直连, ID / 中继 / API 服务器指向 127.0.0.1,
+                        不向公共服务器注册, 外网无法按 ID 连入
   --pin-rustdesk VER    RustDesk 版本 (如 1.5.1), 默认见 tools/rustdesk-release.sh (PIN_RUSTDESK)
   --wayland             仅 desktop: 保留 Wayland, 不改合盖 / 空闲挂起设置。不能与 --remote-desktop x11vnc
                         同用; 与 RustDesk 同用时告警 (Wayland 下连不了登录界面, 会话里每次要手动授权共享屏幕)
@@ -289,6 +296,8 @@ while [[ $# -gt 0 ]]; do
     --remote-desktop) REMOTE_DESKTOP="$2"; shift 2 ;;
     --rustdesk-password) RUSTDESK_PASSWORD="$2"; shift 2 ;;
     --rustdesk-server) RUSTDESK_SERVER="$2"; shift 2 ;;
+    --rustdesk-allow-id) RUSTDESK_ALLOW_ID=1; shift ;;
+    --keep-offline-bundle) KEEP_OFFLINE_BUNDLE=1; shift ;;
     --pin-rustdesk)   PIN_RUSTDESK="$2"; shift 2 ;;
     --vnc-password)   VNC_PASSWORD="$2"; shift 2 ;;
     --iso-sha256)     ISO_SHA256="$2"; shift 2 ;;
@@ -635,6 +644,14 @@ else
     warn "--rustdesk-server 只用于 Desktop 的 --remote-desktop rustdesk (当前 edition=$EDITION remote-desktop=$REMOTE_DESKTOP), 忽略"
     RUSTDESK_SERVER=""
   fi
+  if [[ "$RUSTDESK_ALLOW_ID" -eq 1 ]]; then
+    warn "--rustdesk-allow-id 只用于 Desktop 的 --remote-desktop rustdesk (当前 edition=$EDITION remote-desktop=$REMOTE_DESKTOP), 忽略"
+    RUSTDESK_ALLOW_ID=0
+  fi
+fi
+if [[ "$RUSTDESK_ALLOW_ID" -eq 1 && -n "$RUSTDESK_SERVER" ]]; then
+  warn "--rustdesk-allow-id 与 --rustdesk-server 同用: 按 ID 连走自建服务器 $RUSTDESK_SERVER, 不连公共服务器"
+  RUSTDESK_ALLOW_ID=0
 fi
 if [[ "$DISABLE_WAYLAND" -eq 1 ]] && should_skip_script 36-x11vnc-xorg; then
   if [[ "$X11VNC" -eq 1 ]]; then
@@ -647,7 +664,10 @@ if [[ "$REMOTE_DESKTOP" == "rustdesk" ]]; then
   if should_skip_script 38-rustdesk; then
     warn "--skip 跳过了 38-rustdesk: 不装 RustDesk"
   else
-    log "远程桌面: RustDesk $PIN_RUSTDESK (局域网 IP 直连 21118/tcp, 只用固定密码)${RUSTDESK_PW_SOURCE:+ rustdesk-password=$RUSTDESK_PW_SOURCE}${RUSTDESK_SERVER:+ server=$RUSTDESK_SERVER}; 改用 x11vnc / 不装: --remote-desktop x11vnc|none"
+    if [[ -n "$RUSTDESK_SERVER" ]]; then _rd_id="按 ID 连走自建服务器 $RUSTDESK_SERVER"
+    elif [[ "$RUSTDESK_ALLOW_ID" -eq 1 ]]; then _rd_id="保留公共 ID 服务器 (--rustdesk-allow-id)"
+    else _rd_id="只允许局域网 IP 直连, 不连公共 ID / 中继服务器; 恢复: --rustdesk-allow-id"; fi
+    log "远程桌面: RustDesk $PIN_RUSTDESK (局域网 IP 直连 21118/tcp, 只用固定密码, $_rd_id)${RUSTDESK_PW_SOURCE:+ rustdesk-password=$RUSTDESK_PW_SOURCE}${RUSTDESK_SERVER:+ server=$RUSTDESK_SERVER}; 改用 x11vnc / 不装: --remote-desktop x11vnc|none"
     if [[ "$WAYLAND" -eq 1 ]] || should_skip_script 36-x11vnc-xorg; then
       warn "RustDesk + Wayland: 连不了 GDM 登录界面 / 锁屏后的重新登录, 会话里每次连接都要在本机手动同意共享屏幕; 要无人值守请去掉 --wayland"
     fi
@@ -727,6 +747,11 @@ if [[ -n "$OFFLINE_BUNDLE" ]]; then
   OFFLINE=1
   FULL_OFFLINE=1
   log "全离线捆绑: $OFFLINE_BUNDLE ($(du -sh "$OFFLINE_BUNDLE" | cut -f1))"
+  if [[ "$KEEP_OFFLINE_BUNDLE" -eq 1 ]]; then
+    log "装机后保留 /opt/offline (--keep-offline-bundle)"
+  else
+    log "装机后删除 /opt/offline (software/ 与 restore-online-apt.sh 跑完之后); 保留: --keep-offline-bundle"
+  fi
   if [[ "$PROVISION" -eq 1 ]]; then
     REL_FOR_V=""
     if [[ -n "$ISO_RELEASE" ]]; then
@@ -821,6 +846,7 @@ RENDER_ARGS=(
 [[ "$FULL_OFFLINE" -eq 1 ]] && RENDER_ARGS+=(--full-offline)
 [[ "$WITH_POOL" -eq 1 ]] && RENDER_ARGS+=(--with-pool)
 [[ "$PROVISION" -eq 1 ]] && RENDER_ARGS+=(--provision)
+[[ "$KEEP_OFFLINE_BUNDLE" -eq 1 ]] && RENDER_ARGS+=(--keep-offline-bundle)
 RENDER_ARGS+=(--network "$NETWORK_MODE")
 RENDER_ARGS+=(--edition "$EDITION")
 if [[ "$EDITION" == "desktop" ]]; then
@@ -921,6 +947,7 @@ if [[ "$PROVISION" -eq 1 ]]; then
     printf 'REMOTE_DESKTOP=%q\n' "$REMOTE_DESKTOP"
     printf 'PIN_RUSTDESK=%q\n' "$PIN_RUSTDESK"
     printf 'RUSTDESK_SERVER=%q\n' "$RUSTDESK_SERVER"
+    printf 'RUSTDESK_ALLOW_ID=%q\n' "$RUSTDESK_ALLOW_ID"
     printf 'PIN_NVIDIA_DRIVER=%q\n' "$PIN_NVIDIA_DRIVER"
     printf 'NVIDIA_KERNEL_FLAVOUR=%q\n' "$NVIDIA_KERNEL_FLAVOUR"
     printf 'PIN_GROK_BOT=%q\n' "$PIN_GROK_BOT"

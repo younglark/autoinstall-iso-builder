@@ -194,6 +194,14 @@ def build_dhcp_late_commands(edition: str = "server") -> list[str]:
     ]
 
 
+OFFLINE_BUNDLE_CLEANUP_CMD = (
+    "curtin in-target --target=/target -- sh -c "
+    "'mkdir -p /var/log/autoinstall; "
+    "echo \"removed /opt/offline: $(du -sh /opt/offline 2>/dev/null | cut -f1)\" "
+    "> /var/log/autoinstall/offline-bundle-removed.txt; rm -rf /opt/offline'"
+)
+
+
 def build_late_commands(
     *,
     with_pool: bool,
@@ -203,6 +211,7 @@ def build_late_commands(
     edition: str = "server",
     username: str = "ops",
     auth_keys: list[str] | None = None,
+    keep_offline_bundle: bool = False,
 ):
     cmds = []
 
@@ -231,10 +240,15 @@ def build_late_commands(
         ]
 
     if full_offline:
-        # 恢复安装器写入的官方源, 便于以后联网升级; 保留 /opt/offline 供重装
+        # 恢复安装器写入的官方源, 便于以后联网升级
         cmds.append(
             "curtin in-target --target=/target -- bash /opt/offline/restore-online-apt.sh"
         )
+        if not keep_offline_bundle:
+            # 用到离线捆绑的步骤 (enable-offline-apt / software/ / restore-online-apt) 都已跑完;
+            # 装好的软件运行时不读 /opt/offline (apt 本地源已撤、Jenkins 插件 / npm 树 / 二进制都已拷走),
+            # 删掉省 2-3 GB。--keep-offline-bundle 保留。
+            cmds.append(OFFLINE_BUNDLE_CLEANUP_CMD)
 
     if network == "dhcp":
         cmds += build_dhcp_late_commands(edition)
@@ -294,6 +308,8 @@ def main() -> int:
     ap.add_argument("--full-offline", action="store_true",
                     help="全离线: 使用 /cdrom/offline 捆绑, packages 改 late 安装")
     ap.add_argument("--with-pool", action="store_true")
+    ap.add_argument("--keep-offline-bundle", action="store_true",
+                    help="全离线: 装机后保留 /opt/offline (默认 restore-online-apt 之后删除)")
     ap.add_argument("--provision", action="store_true")
     ap.add_argument(
         "--network",
@@ -400,6 +416,7 @@ def main() -> int:
             edition=edition,
             username=args.username,
             auth_keys=auth_keys,
+            keep_offline_bundle=bool(args.keep_offline_bundle),
         ),
     }
 

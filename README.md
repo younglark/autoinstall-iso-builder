@@ -121,7 +121,8 @@ Desktop **默认**关闭 Wayland 并预装 [RustDesk](https://github.com/rustdes
 | （默认，Desktop） | 往 `/etc/gdm3/custom.conf` 的 `[daemon]` 写 `WaylandEnable=false`（幂等，其它键保留），GDM 登录界面、锁屏和用户会话全部走 Xorg；预装 RustDesk（离线从捆绑装），开机即可连，不用先登录；关掉合盖/空闲挂起 |
 | `--remote-desktop M` | `rustdesk`（默认）/ `x11vnc`（VNC，5900，不加密）/ `none`（不装远程桌面，仍关 Wayland）。Server 上告警并忽略 |
 | `--rustdesk-password P` | RustDesk 固定密码（≥6 位）。默认 = `--password` 明文（都没给就是默认密码 `ubuntu1990`，构建时告警）；只给了 `--password-hash` 时装机生成随机密码写入 `/root/rustdesk-password`（root 0600） |
-| `--rustdesk-server H` | 自建 RustDesk 服务器（hbbs/hbbr）主机，可带端口，写入 `custom-rendezvous-server` 和 `relay-server`。默认不设：局域网 IP 直连不需要服务器，按 ID 连时走 RustDesk 公共服务器 |
+| `--rustdesk-server H` | 自建 RustDesk 服务器（hbbs/hbbr）主机，可带端口，写入 `custom-rendezvous-server` 和 `relay-server`，可经自建服务器按 ID 连。默认不设 |
+| `--rustdesk-allow-id` | 恢复 RustDesk 公共 ID 服务器（可跨网络按 ID 连）。**默认关闭：只支持局域网 `<机器IP>:21118` 直连**，ID / 中继 / API 服务器都指向 `127.0.0.1`，不向公共服务器注册，外网无法按 ID 连入 |
 | `--pin-rustdesk VER` | RustDesk 版本，默认 `1.5.1`（真机验证过）。非默认版本用 GitHub Release API 给的官方 sha256 校验 |
 | `--wayland` | 保留 Wayland，不改合盖/空闲挂起。RustDesk 照装但告警：Wayland 下**连不了登录界面**，会话里每次连接都要在本机点同意共享屏幕。不能和 `--remote-desktop x11vnc` 同用 |
 | `--vnc-password P` | 只用于 `--remote-desktop x11vnc`：VNC 密码（≥6 位）。默认 = `--password` 明文；只给了 `--password-hash` 时装机生成随机密码写入 `/root/x11vnc-password`。其它情况告警并忽略 |
@@ -145,27 +146,32 @@ Desktop **默认**关闭 Wayland 并预装 [RustDesk](https://github.com/rustdes
 
 #### RustDesk（默认）
 
-**怎么连**：在另一台电脑上装 RustDesk 客户端，ID 输入框里填 `<机器IP>:21118`（**带上端口**，否则客户端会把它当 ID 去公共服务器查），点连接，输固定密码。登录界面、锁屏、会话都能连（RustDesk 自己跟随 GDM 的 Xorg）。要按 ID 连（跨网络）就填机器的 RustDesk ID（`sudo rustdesk --get-id`），这时会经过 RustDesk 公共服务器或 `--rustdesk-server`。
+**怎么连**：**默认只支持局域网 IP 直连**。在另一台电脑上装 RustDesk 客户端，ID 输入框里填 `<机器IP>:21118`（**带上端口**），点连接，输固定密码。登录界面、锁屏、会话都能连（RustDesk 自己跟随 GDM 的 Xorg）。
+
+默认**不能按 ID 连**：`custom-rendezvous-server` / `relay-server` / `api-server` 都指向本机 `127.0.0.1`（本机没有 hbbs/hbbr，连接立即被拒），机器不会注册到 RustDesk 公共服务器（`rs-ny.rustdesk.com`），外网拿到 ID 也连不进来。要跨网络按 ID 连：构建时加 `--rustdesk-allow-id`（公共服务器）或 `--rustdesk-server H`（自建服务器）。装机脚本不记录 RustDesk ID；需要时用 `sudo rustdesk --get-id` 查看。
+
+依据（RustDesk 1.5.1 源码）：`Config::get_rendezvous_servers()` 在 `custom-rendezvous-server` 非空时只返回它，否则才用内置的 `rs-ny.rustdesk.com`（`libs/hbb_common/src/config.rs`）；中继地址由 rendezvous 服务器下发或取 `relay-server`；API 地址取 `api-server`，空时由 `custom-rendezvous-server` 推出（`src/common.rs` `get_api_server`）；直连监听 `direct_server()` 只看 `direct-server` / `direct-access-port`，与 rendezvous 无关（`src/rendezvous_mediator.rs`）。`stop-service=Y` 会连直连监听一起关掉，不能用。官方没有「只允许直连」的开关。
 
 **装机时做了什么**
 
 - 从官方 GitHub Release 装 `rustdesk-<版>-x86_64.deb`（arm64 是 `aarch64`），sha256 与写死在 `tools/rustdesk-release.sh` 里的官方值比对；启用官方的 `rustdesk.service`（root 运行 `rustdesk --service`）。拉 GitHub 慢的话可以设 `RUSTDESK_DL_BASE` 指向同结构的镜像（sha256 仍按官方值校验），或者用全离线捆绑。
 - RustDesk 1.5 的固定密码是加盐哈希存储的，只能通过运行中的服务设置，chroot 里做不到。所以装机时只把明文放进 `/etc/aib/rustdesk.secret`（root 0600），选项写进 `/etc/aib/rustdesk.options`，并预置 `/root/.config/rustdesk/RustDesk2.toml` 的 `[options]`；**首次开机**由一次性服务 `aib-rustdesk-setup.service`（`After=rustdesk.service`）调用 RustDesk 自己的 CLI：
-  - `rustdesk --option direct-server Y`：局域网 IP 直连，端口 21118；
+  - `rustdesk --option direct-server Y` + `direct-access-port 21118`：局域网 IP 直连；
   - `rustdesk --option verification-method use-permanent-password`：只认固定密码（不用临时密码）；
   - `rustdesk --option approve-mode password`：不弹「接受连接」确认框，无人值守也能连；
-  - 给了 `--rustdesk-server` 时还有 `custom-rendezvous-server` / `relay-server`；
+  - 默认 `custom-rendezvous-server 127.0.0.1` / `relay-server 127.0.0.1` / `api-server http://127.0.0.1`（只允许局域网直连，见上）；给了 `--rustdesk-server` 时这两项改成自建服务器；`--rustdesk-allow-id` 时不写（用公共服务器）；
   - `rustdesk --password …`：设固定密码。
 
-  每个选项都读回确认；密码返回 `Done!` 后删除明文，写 `/var/lib/aib/rustdesk-setup.done`，以后不再运行；失败就 30 秒后重试。
+  设置之前先等 RustDesk 就绪（最多 180 秒）：`rustdesk.service` active、有 `rustdesk --service` 进程、配置目录 `/root/.config/rustdesk` 存在、主 IPC socket `/tmp/RustDesk-0/ipc` 已建立。服务没起来时调 CLI 会出现「设置固定密码失败: No such file or directory」这类假失败，`--get-id` 也会读到本地临时 ID，所以这里不调用 `--get-id`。每个选项都读回确认；密码最多试 5 次，返回 `Done!` 后删除明文，写 `/var/lib/aib/rustdesk-setup.done`，以后不再运行；还失败就 30 秒后由 systemd 重试。日志里不记录 ID 和明文密码。
 - 明文密码不进 `provision.env` 和日志；构建时只放进 ISO 里的 `/provision/rustdesk.secret`（0600）。设置那一刻密码会出现在 `rustdesk --password` 的命令行参数里（RustDesk CLI 只支持这种方式），首次开机那一瞬间本机其它进程理论上能用 `ps` 看到。
 - 防火墙：只在 ufw **已启用**时放行 `21118/tcp`（装机时和首次开机各检查一次），不会主动打开 ufw。
 
 **安全提醒**
 
 - 21118 直连端口在局域网内谁都能连，只靠固定密码保护；不要映射到公网。外网请走 VPN 或自建服务器（`--rustdesk-server`）。
+- 默认模式下 RustDesk 仍会做 IPv6 STUN 探测（DNS 查询 `stun.l.google.com` 等，只为获知本机公网 IPv6，不注册 ID、不开放入站）；这是 RustDesk 内置行为，没有配置项能关。
 - 默认密码是公开的，装完立即改：`sudo rustdesk --password '<新密码>'`。
-- 排查：`systemctl status rustdesk aib-rustdesk-setup`、`journalctl -u aib-rustdesk-setup`、`sudo rustdesk --option direct-server`（应输出 `Y`）。
+- 排查：`systemctl status rustdesk aib-rustdesk-setup`、`journalctl -u aib-rustdesk-setup`、`sudo rustdesk --option direct-server`（应输出 `Y`）、`sudo rustdesk --option custom-rendezvous-server`（默认应输出 `127.0.0.1`）。
 
 #### x11vnc（`--remote-desktop x11vnc`）
 
@@ -585,6 +591,7 @@ cat /var/log/autoinstall/20-docker.log
 | `--offline` | apt `fallback: offline-install`（`updates` 仍为 Subiquity 合法值 `security`；无 `none`） |
 | `--force-fetch` | 配合 `--fetch-offline`：忽略捆绑 fingerprint，强制重建离线包 |
 | `--offline-bundle DIR` | 使用已抓取的离线捆绑目录；构建前会 `validate-offline-bundle` |
+| `--keep-offline-bundle` | 全离线装机后保留 `/opt/offline`（约 2-3 GB）。默认在 `software/` 和 `restore-online-apt.sh` 都跑完后删除 |
 | `--debs DIR` | 把目录下 `.deb` 打进 `/pool` 并离线安装 |
 | `--storage-layout` | `direct`（默认）/ `lvm` / `zfs`。作为选盘页的**预选布局**；默认仍要你在 UI 确认后才继续 |
 | `--auto-disk` | **危险**。跳过硬盘选择，按 `match size: largest` 自动抹最大盘。默认关闭；仅给 QEMU/CI 无人值守。物理机请保持默认。开启后 `shutdown: poweroff`（关机不重启），避免 U 盘未拔时循环抹盘 |
@@ -618,6 +625,7 @@ cat /var/log/autoinstall/20-docker.log
 | `--remote-desktop M` | 仅 desktop：`rustdesk`（默认，IP 直连 21118，固定密码）/ `x11vnc`（VNC 5900，不加密）/ `none` |
 | `--rustdesk-password P` | RustDesk 固定密码（≥6 位），默认 = `--password` 明文；只有哈希时装机随机生成 → `/root/rustdesk-password` |
 | `--rustdesk-server H` | 自建 RustDesk 服务器主机（可带端口），默认不设 |
+| `--rustdesk-allow-id` | RustDesk 恢复公共 ID 服务器；默认只允许局域网 `<IP>:21118` 直连 |
 | `--pin-rustdesk VER` | RustDesk 版本，默认 `1.5.1`（环境变量 `PIN_RUSTDESK`） |
 | `--vnc-password P` | x11vnc 密码（≥6 位，VNC 只用前 8 位），仅 `--remote-desktop x11vnc`；默认 = `--password` 明文；只有哈希时装机随机生成 → `/root/x11vnc-password` |
 | `--menu-regex` | 要注入的菜单标题正则。默认 server `Try or Install`；desktop `^(Try or Install Ubuntu\|Ubuntu \(safe graphics\))$` |
@@ -697,6 +705,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 | 装机 late-commands | 拷到 `/opt/offline`，临时只启用 `deb [trusted=yes] file:/opt/offline/apt ./`，再跑 `software/`（`OFFLINE=1`） |
 | `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装；FlClash 从 `flclash/`、RustDesk 从 `rustdesk/`、Grok Bot 从 `grok-bot/` 安装（依赖来自本地 apt 池）；Jenkins 插件从 `jenkins-plugins/` 拷贝 |
 | `restore-online-apt.sh` | 卸掉离线 pin、恢复安装器写入的 Ubuntu 源（即 `--mirror`，默认清华 https，含 `-security`）后，把捆绑内 **全部** `apt-sources/` 种子写回（Docker CE / GitHub CLI / NVIDIA toolkit / Jenkins / NodeSource / Microsoft Edge；与在线脚本同一批 URL/密钥）。装机时可能仍无网，此处不做 `apt update`；联网后即可收安全更新。纯在线构建不会调用本脚本 |
+| 删除 `/opt/offline` | `restore-online-apt.sh` 之后的 late-command 删掉整个 `/opt/offline`（约 2-3 GB），大小记在 `/var/log/autoinstall/offline-bundle-removed.txt`。装好的软件运行时都不读它：apt 本地源已被 `restore-online-apt.sh` 撤掉，npm 全局树解压到 `/usr/local`，Node 解压到 `/opt/node-v*`，Jenkins 插件拷进 `JENKINS_HOME`，Gitea / Unity CLI / Godot 二进制和 FlClash / RustDesk / Grok Bot 的 deb 都已安装到系统目录。要保留（比如想在本机重跑 `software/`）：`--keep-offline-bundle` |
 
 体积与缓存：
 
