@@ -1734,10 +1734,59 @@ if (
 ) >"$gt/rec.log" 2>&1 \
    && grep -q 'apt_install_grokbot "$deb"' software/39-grok-bot.sh && grep -q 'apt_install_grokbot "$GROK_BOT_DEB_PATH"' software/39-grok-bot.sh \
    && grep -q 'grokbot_available_recommends' software/39-grok-bot.sh \
-   && grep -q 'GROKBOT_RECS\[@\]' tools/fetch-offline-bundle.sh && grep -q 'RECMISS' tools/validate-offline-bundle.sh; then
+   && grep -q 'grokbot_seed_recommends' tools/fetch-offline-bundle.sh && grep -q 'GROKBOT_RECS\[@\]' tools/fetch-offline-bundle.sh && grep -q 'RECMISS' tools/validate-offline-bundle.sh; then
   pass "grok-bot Recommends (libappindicator3-1): parsed, installed with the deb, bundled in the apt closure, validate warns if missing"
 else
   fail "grok-bot Recommends: $(tail -5 "$gt/rec.log")"
+fi
+# FlClash 的 libayatana-appindicator3-1 Provides 且 Conflicts libappindicator3-1:
+# 种子函数 / 已装检测必须跳过真包 (真机 --force-fetch 曾因此失败)。需要 docker + 外网 (Ubuntu 源)。
+if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+  mkdir -p "$gt/rpkg/DEBIAN"
+  printf 'Package: grok-bot\nVersion: 0.79.4\nArchitecture: amd64\nMaintainer: t <t@t>\nRecommends: libappindicator3-1 (>= 0.4)\nDescription: t\n' > "$gt/rpkg/DEBIAN/control"
+  dpkg-deb --build "$gt/rpkg" "$gt/rec2.deb" >/dev/null
+  cat > "$gt/conf.sh" <<'CF'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq >/dev/null
+apt-get install -y -qq --no-install-recommends dpkg-dev >/dev/null
+# shellcheck disable=SC1091
+. /r.sh
+if apt-get install -y --download-only --no-install-recommends -o Dir::Cache::archives=/tmp/x \
+     libayatana-appindicator3-1 libappindicator3-1 >/tmp/c.apt 2>&1; then
+  echo "CONFLICT_GONE"; exit 1
+fi
+grep -q 'Conflicts: libappindicator3-1' /tmp/c.apt
+echo CONFLICT_OK
+# 无计划种子时仍收真包
+[[ "$(grokbot_seed_recommends /rec2.deb 2>/dev/null)" == "libappindicator3-1" ]]
+echo BARE_SEED_OK
+# FlClash 已把 ayatana 放进种子 → 不收真包
+out="$(grokbot_seed_recommends /rec2.deb libayatana-appindicator3-1 libgtk-3-0 2>/tmp/sk.err || true)"
+grep -q '已由种子 libayatana-appindicator3-1 提供' /tmp/sk.err
+[[ -z "$out" ]]
+echo PLANNED_SKIP_OK
+# 先装 FlClash 的托盘库, 钩子侧的 available_recommends 也要跳过
+apt-get install -y -qq --no-install-recommends libayatana-appindicator3-1 >/dev/null
+out="$(grokbot_available_recommends /rec2.deb 2>/tmp/av.err || true)"
+grep -q '已由已装的包提供' /tmp/av.err
+[[ -z "$out" ]]
+echo INSTALLED_SKIP_OK
+CF
+  if docker run --rm --network host \
+       -v "$PWD/tools/grok-bot-release.sh:/r.sh:ro" -v "$gt/rec2.deb:/rec2.deb:ro" -v "$gt/conf.sh:/conf.sh:ro" \
+       ubuntu:24.04 bash /conf.sh >"$gt/conf.log" 2>&1; then
+    if grep -qx CONFLICT_OK "$gt/conf.log" && grep -qx BARE_SEED_OK "$gt/conf.log" \
+       && grep -qx PLANNED_SKIP_OK "$gt/conf.log" && grep -qx INSTALLED_SKIP_OK "$gt/conf.log"; then
+      pass "grok-bot Recommends vs FlClash libayatana-appindicator3-1: conflict still exists; seed + installed Provides skip the real package"
+    else
+      fail "grok-bot / FlClash indicator conflict checks: $(tail -8 "$gt/conf.log")"
+    fi
+  else
+    fail "grok-bot / FlClash indicator conflict container: $(tail -15 "$gt/conf.log")"
+  fi
+else
+  echo "(docker unavailable, grok-bot / FlClash indicator conflict test skipped)"
 fi
 # fetch --edition: server 默认不抓 Grok Bot; 指纹不同; Desktop 抓的超集捆绑 server 也直接复用 (不联网: 只走到指纹判断)
 # shellcheck disable=SC2016
