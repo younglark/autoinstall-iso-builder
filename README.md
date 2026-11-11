@@ -39,8 +39,9 @@
 | `25-nvidia-container-toolkit.sh` | NVIDIA Container Toolkit | 官方仓库；`nvidia-ctk` 合并 Docker runtime（保留 daemon.json 日志轮转）；**不装 GPU 驱动** |
 | `30-jenkins.sh` | Jenkins LTS | 优先 JDK 21（不够退 17），jenkins 用户加入 docker 组；**零配置**：跳过安装向导、装机时建好管理员、预装 Pipeline / Git / Gitea / Docker Pipeline / Docker Cloud / Rebuild / AnsiColor / Parameterized Trigger 等插件（含全部依赖），监听 **0.0.0.0:8080**，Jenkins URL 设为 `http://<主机名>.local:8080/` |
 | `35-microsoft-edge.sh` | Microsoft Edge 稳定版 | **仅 Desktop + amd64 默认安装**（Server / 非 amd64 自动跳过，`--skip 35` 也可跳过）。官方 apt 源 `packages.microsoft.com/repos/edge`；设为默认浏览器（`update-alternatives` + 系统/用户 `mimeapps.list`）；GNOME 收藏夹用 Edge 替换 Firefox（Firefox **保留**）；策略关掉首次运行提示，**不**关闭自动更新 |
-| `36-x11vnc-xorg.sh` | 关 Wayland + x11vnc（**Desktop 默认开启**） | 仅 Desktop（Server 跳过）。GDM 登录界面、锁屏、会话都走 Xorg，并预装 x11vnc，**开机即可连**（登录界面、锁屏、登录后的会话）。`--wayland` 保留 Wayland 且不装 x11vnc；`--skip 36` 也可跳过。详见下文「远程桌面」 |
+| `36-x11vnc-xorg.sh` | 关 Wayland（**Desktop 默认**）+ 可选 x11vnc | 仅 Desktop（Server 跳过）。GDM 登录界面、锁屏、会话都走 Xorg；装了远程桌面时关掉合盖/空闲挂起。`--remote-desktop x11vnc` 时在这里装 x11vnc。`--wayland` 保留 Wayland；`--skip 36` 也可跳过。详见下文「远程桌面」 |
 | `37-flclash.sh` | FlClash（ClashMeta 图形客户端） | **仅 Desktop 默认安装**（Server / 非 amd64·arm64 自动跳过；`--no-flclash` 或 `--skip 37` 也可跳过）。官方 GitHub Release 的 linux `.deb`（同级 `SHA256SUMS` 校验），**始终安装最新稳定版**。**只装应用**：不写订阅、不设系统代理、不启用 TUN、不装开机自启。详见下文 |
+| `38-rustdesk.sh` | RustDesk（**Desktop 默认远程桌面**） | 仅 Desktop + amd64/arm64。官方 GitHub Release 的 `.deb`（钉扎 1.5.1，sha256 校验，`--pin-rustdesk` 可改）；开启局域网 **IP 直连**（`21118/tcp`）、只用**固定密码**（默认 = `--password`），开机即可从登录界面、锁屏、会话连。`--remote-desktop x11vnc\|none` 换掉或不装；`--skip 38` 也可跳过。详见下文「远程桌面」 |
 | `40-nodejs.sh` | Node.js 24 | NodeSource 优先，官方 tarball 兜底 |
 | `45-gitea.sh` | Gitea（最新稳定版，可 `--pin-gitea`） | 官方 linux-amd64 二进制（sha256 校验）→ `/usr/local/bin/gitea`；系统用户 `git`；SQLite；**装机阶段写好配置并创建管理员**，开机 `gitea.service` 自启。监听 **0.0.0.0:3000**（不与 Jenkins 8080 冲突），`ROOT_URL` 为 `http://<主机名>.local:3000/`，开放注册，LFS 开，`OFFLINE_MODE`。SSH 克隆走系统 OpenSSH：`git@host:user/repo.git` |
 | `50-grok.sh` | xAI Grok Build | `@xai-official/grok`，**官方包**，不是社区的 `@vibe-kit/grok-cli` |
@@ -73,62 +74,89 @@ sudo apt remove FlClash
 
 若曾在应用内开启系统代理或 TUN，请先在应用里关掉再卸载。全离线时 deb 与 apt 依赖（`libayatana-appindicator3-1`、`libsecret-1-0` 及其闭包）都在捆绑里，装机不访问 GitHub。
 
-### 远程桌面：关闭 Wayland + x11vnc（Desktop 默认开启）
+### 远程桌面：关闭 Wayland + RustDesk（Desktop 默认开启）
 
-Desktop **默认**关闭 Wayland 并预装 x11vnc，不用加任何参数；Server 不受影响（不装 x11vnc，不改 GDM）。由 `software/36-x11vnc-xorg.sh` 落地，所以 Desktop 默认路径不能和 `--no-provision` 同用（加了 `--wayland` 就可以）。
+Desktop **默认**关闭 Wayland 并预装 [RustDesk](https://github.com/rustdesk/rustdesk)，开机就能在局域网里按 IP 直连，不用加任何参数；Server 不受影响（不装远程桌面，不改 GDM）。关 Wayland 由 `software/36-x11vnc-xorg.sh` 落地，RustDesk 由 `software/38-rustdesk.sh` 落地，所以 Desktop 默认路径不能和 `--no-provision` 同用（加了 `--wayland` 就可以，此时不装远程桌面）。
+
+和 x11vnc 比，RustDesk 用视频编码（VP9 / AV1，有硬编时 H.264 / H.265）传画面，拖窗口、滚网页明显更流畅，还有剪贴板、文件传输和声音。x11vnc 留作可选。
 
 | 默认 / 参数 | 效果 |
 |---|---|
-| （默认，Desktop） | 往 `/etc/gdm3/custom.conf` 的 `[daemon]` 写 `WaylandEnable=false`（幂等，其它键保留），GDM 登录界面、锁屏和用户会话全部走 Xorg；预装 x11vnc（离线从捆绑装），开机即可连，不用先登录；关掉合盖/空闲挂起 |
-| `--wayland` | 保留 Wayland，**不装** x11vnc，也不改合盖/空闲挂起设置。Server 上告警并忽略 |
-| `--vnc-password P` | VNC 密码（≥6 位）。默认 = `--password` 明文（都没给就是默认密码 `ubuntu1990`，构建时告警）；只给了 `--password-hash` 时装机生成随机密码写入 `/root/x11vnc-password`（root 0600）。和 `--wayland` 同用时告警并忽略 |
-| `--skip 36` | 跳过这个钩子：效果同 `--wayland`（保留 Wayland、不装 x11vnc） |
+| （默认，Desktop） | 往 `/etc/gdm3/custom.conf` 的 `[daemon]` 写 `WaylandEnable=false`（幂等，其它键保留），GDM 登录界面、锁屏和用户会话全部走 Xorg；预装 RustDesk（离线从捆绑装），开机即可连，不用先登录；关掉合盖/空闲挂起 |
+| `--remote-desktop M` | `rustdesk`（默认）/ `x11vnc`（VNC，5900，不加密）/ `none`（不装远程桌面，仍关 Wayland）。Server 上告警并忽略 |
+| `--rustdesk-password P` | RustDesk 固定密码（≥6 位）。默认 = `--password` 明文（都没给就是默认密码 `ubuntu1990`，构建时告警）；只给了 `--password-hash` 时装机生成随机密码写入 `/root/rustdesk-password`（root 0600） |
+| `--rustdesk-server H` | 自建 RustDesk 服务器（hbbs/hbbr）主机，可带端口，写入 `custom-rendezvous-server` 和 `relay-server`。默认不设：局域网 IP 直连不需要服务器，按 ID 连时走 RustDesk 公共服务器 |
+| `--pin-rustdesk VER` | RustDesk 版本，默认 `1.5.1`（真机验证过）。非默认版本用 GitHub Release API 给的官方 sha256 校验 |
+| `--wayland` | 保留 Wayland，不改合盖/空闲挂起。RustDesk 照装但告警：Wayland 下**连不了登录界面**，会话里每次连接都要在本机点同意共享屏幕。不能和 `--remote-desktop x11vnc` 同用 |
+| `--vnc-password P` | 只用于 `--remote-desktop x11vnc`：VNC 密码（≥6 位）。默认 = `--password` 明文；只给了 `--password-hash` 时装机生成随机密码写入 `/root/x11vnc-password`。其它情况告警并忽略 |
+| `--skip 36` / `--skip 38` | 跳过关 Wayland / 跳过 RustDesk |
 
-旧参数 `--disable-wayland` 和 `--x11vnc` **已移除**，再传会直接报错并提示改用默认行为或 `--wayland`。
-
-构建时会醒目告警：VNC 流量不加密、局域网内可直接连 5900 端口；若 VNC 密码回落到公开的默认值 `ubuntu1990`，装完务必修改。
+旧参数 `--disable-wayland` 和 `--x11vnc` **已移除**，再传会直接报错并提示改用 `--wayland` / `--remote-desktop x11vnc`。
 
 ```bash
-# Desktop 默认: 关 Wayland + x11vnc, 单独指定 VNC 密码
-./build-iso.sh --iso ubuntu-24.04.5.1-desktop-amd64.iso --out out/desk-vnc.iso \
-  --password 'Ch@ngeMe' --vnc-password 'Vnc#2026'
-# 保留 Wayland, 不装 x11vnc
+# Desktop 默认: 关 Wayland + RustDesk, 单独指定 RustDesk 密码
 ./build-iso.sh --iso ubuntu-24.04.5.1-desktop-amd64.iso --out out/desk.iso \
-  --password 'Ch@ngeMe' --wayland
+  --password 'Ch@ngeMe' --rustdesk-password 'Rd#2026x'
+# 改用 x11vnc
+./build-iso.sh --iso ubuntu-24.04.5.1-desktop-amd64.iso --out out/desk-vnc.iso \
+  --password 'Ch@ngeMe' --remote-desktop x11vnc --vnc-password 'Vnc#2026'
+# 保留 Wayland, 不装远程桌面
+./build-iso.sh --iso ubuntu-24.04.5.1-desktop-amd64.iso --out out/desk-wl.iso \
+  --password 'Ch@ngeMe' --wayland --remote-desktop none
 ```
 
-全离线时，Desktop 默认要求捆绑里有 `x11vnc` + `xauth`（构建时校验）。抓包脚本早已默认把它们放进捆绑、fingerprint 没有变化，近期抓的捆绑可以直接用；只有在 x11vnc 加入种子之前抓的老捆绑会校验失败，用 `--fetch-offline --force-fetch` 重建即可。
+全离线时，Desktop 默认要求捆绑里有 `rustdesk/`（钉扎版本的 deb + sha256），并且 `rustdesk` 包和它的 apt 依赖（`libxdo3`、`gstreamer1.0-pipewire` 等）都在本地 apt 池里（构建时校验）。加入 RustDesk 后 fingerprint 变了，老捆绑要用 `--fetch-offline --force-fetch` 重建（apt deb 会从缓存复用）。`--remote-desktop x11vnc` 时要求捆绑里有 `x11vnc` + `xauth`。
 
-**开机就能连是怎么做到的**
+#### RustDesk（默认）
 
-- systemd 服务 `x11vnc.service`（`After=display-manager.service`，`Restart=always`，开机自启）运行 `/usr/local/sbin/aib-x11vnc-follow`。
-- 关掉 Wayland 以后，GDM 登录界面是一个 Xorg（`:0`，vt1），登录后用户会话是另一个 Xorg（`:1`，vt2），GNOME 锁屏就在用户会话的 X 里。所以 x11vnc 不能钉死在 `:0`：启动器每 2 秒看一次**当前活动 VT**（`/sys/class/tty/tty0/active`）上的 Xorg，从它的命令行取 `-auth`（`/run/user/<uid>/gdm/Xauthority`），用 `xauth list` 拿到显示号；变了就重启 x11vnc（`-display :N -auth … -forever -shared -noxdamage -repeat -rfbauth /etc/x11vnc.pass -rfbport 5900`）。
-- 效果：开机停在登录界面能连上并远程输密码登录；登录后自动跟到会话（客户端断开重连一下即可）；锁屏时连上看到的就是锁屏，远程输密码解锁；注销后回到登录界面也能连。
-- 为了「随时能连」：logind drop-in `/etc/systemd/logind.conf.d/90-autoinstall-x11vnc.conf` 设 `HandleLidSwitch=ignore`（合盖不挂起）；GDM 登录界面（`/etc/dconf/db/gdm.d/`）和用户默认值（gschema override）都关掉空闲自动挂起。**锁屏和熄屏保持不变**（VNC 一连上屏幕就会亮）。
-- 密码：构建时明文只放进 ISO 里 `/provision/x11vnc.secret`（0600），装机时用 `x11vnc -storepasswd` 写成 `/etc/x11vnc.pass`（root 0600）后删除，不进 `provision.env` 和日志。VNC 协议**只校验前 8 个字符**。
-- 防火墙：只在 ufw **已启用**时放行 `5900/tcp`（装机时和服务启动时各检查一次），不会主动打开 ufw。
+**怎么连**：在另一台电脑上装 RustDesk 客户端，ID 输入框里填 `<机器IP>:21118`（**带上端口**，否则客户端会把它当 ID 去公共服务器查），点连接，输固定密码。登录界面、锁屏、会话都能连（RustDesk 自己跟随 GDM 的 Xorg）。要按 ID 连（跨网络）就填机器的 RustDesk ID（`sudo rustdesk --get-id`），这时会经过 RustDesk 公共服务器或 `--rustdesk-server`。
 
-**怎么连**
+**装机时做了什么**
 
-- macOS：Finder「前往 → 连接服务器」输入 `vnc://<机器IP>:5900`（自带屏幕共享，偏慢）；推荐 [TigerVNC](https://tigervnc.org/) 或 RealVNC Viewer，地址 `<机器IP>:5900`。
-- Windows：TigerVNC / RealVNC Viewer / TightVNC，地址 `<机器IP>:5900`（或 `<机器IP>::5900`），输入 VNC 密码。
-- 卡的话把客户端画质调低、分辨率调小；拖窗口、看视频不会很流畅（x11vnc 没有视频编码）。
+- 从官方 GitHub Release 装 `rustdesk-<版>-x86_64.deb`（arm64 是 `aarch64`），sha256 与写死在 `tools/rustdesk-release.sh` 里的官方值比对；启用官方的 `rustdesk.service`（root 运行 `rustdesk --service`）。拉 GitHub 慢的话可以设 `RUSTDESK_DL_BASE` 指向同结构的镜像（sha256 仍按官方值校验），或者用全离线捆绑。
+- RustDesk 1.5 的固定密码是加盐哈希存储的，只能通过运行中的服务设置，chroot 里做不到。所以装机时只把明文放进 `/etc/aib/rustdesk.secret`（root 0600），选项写进 `/etc/aib/rustdesk.options`，并预置 `/root/.config/rustdesk/RustDesk2.toml` 的 `[options]`；**首次开机**由一次性服务 `aib-rustdesk-setup.service`（`After=rustdesk.service`）调用 RustDesk 自己的 CLI：
+  - `rustdesk --option direct-server Y`：局域网 IP 直连，端口 21118；
+  - `rustdesk --option verification-method use-permanent-password`：只认固定密码（不用临时密码）；
+  - `rustdesk --option approve-mode password`：不弹「接受连接」确认框，无人值守也能连；
+  - 给了 `--rustdesk-server` 时还有 `custom-rendezvous-server` / `relay-server`；
+  - `rustdesk --password …`：设固定密码。
+
+  每个选项都读回确认；密码返回 `Done!` 后删除明文，写 `/var/lib/aib/rustdesk-setup.done`，以后不再运行；失败就 30 秒后重试。
+- 明文密码不进 `provision.env` 和日志；构建时只放进 ISO 里的 `/provision/rustdesk.secret`（0600）。设置那一刻密码会出现在 `rustdesk --password` 的命令行参数里（RustDesk CLI 只支持这种方式），首次开机那一瞬间本机其它进程理论上能用 `ps` 看到。
+- 防火墙：只在 ufw **已启用**时放行 `21118/tcp`（装机时和首次开机各检查一次），不会主动打开 ufw。
 
 **安全提醒**
 
-- VNC 流量**不加密**，只在可信局域网用；不要把 5900 映射到公网。外网请走 VPN，或 SSH 隧道：`ssh -L 5900:localhost:5900 <用户>@<机器IP>`，再连 `localhost:5900`。
-- 默认密码是公开的，装完立即改：`sudo x11vnc -storepasswd /etc/x11vnc.pass && sudo systemctl restart x11vnc`。
-- 排查：`systemctl status x11vnc`、`journalctl -u x11vnc`、`/var/log/x11vnc.log`。
+- 21118 直连端口在局域网内谁都能连，只靠固定密码保护；不要映射到公网。外网请走 VPN 或自建服务器（`--rustdesk-server`）。
+- 默认密码是公开的，装完立即改：`sudo rustdesk --password '<新密码>'`。
+- 排查：`systemctl status rustdesk aib-rustdesk-setup`、`journalctl -u aib-rustdesk-setup`、`sudo rustdesk --option direct-server`（应输出 `Y`）。
+
+#### x11vnc（`--remote-desktop x11vnc`）
+
+构建时会醒目告警：VNC 流量不加密、局域网内可直接连 5900 端口；若 VNC 密码回落到公开的默认值 `ubuntu1990`，装完务必修改。
+
+- systemd 服务 `x11vnc.service`（`After=display-manager.service`，`Restart=always`，开机自启）运行 `/usr/local/sbin/aib-x11vnc-follow`。
+- 关掉 Wayland 以后，GDM 登录界面是一个 Xorg（`:0`，vt1），登录后用户会话是另一个 Xorg（`:1`，vt2），GNOME 锁屏就在用户会话的 X 里。所以 x11vnc 不能钉死在 `:0`：启动器每 2 秒看一次**当前活动 VT**（`/sys/class/tty/tty0/active`）上的 Xorg，从它的命令行取 `-auth` 和显示号；变了就重启 x11vnc。
+- 24.04 的 Xorg 是 rootless 的（登录界面属 `gdm`，会话属登录用户），root 跑的 x11vnc 挂不上它的共享内存（MIT-SHM）。所以启动器用 `setpriv` 以 **auth 文件属主**的身份跑 x11vnc（`-display :N -auth … -rfbauth /run/aib-x11vnc/pass-<用户> -rfbport 5900 -forever -shared -repeat -xkb`），密码文件给每个用户复制一份（0400），日志在 `/run/aib-x11vnc/x11vnc-<用户>.log`。不再加 `-noshm` / `-nowf` / `-noxdamage`，画面更新快很多。
+- 效果：开机停在登录界面能连上并远程输密码登录；登录后自动跟到会话（客户端断开重连一下即可）；锁屏时连上看到的就是锁屏，远程输密码解锁；注销后回到登录界面也能连。
+- 密码：构建时明文只放进 ISO 里 `/provision/x11vnc.secret`（0600），装机时用 `x11vnc -storepasswd` 写成 `/etc/x11vnc.pass`（root 0600）后删除，不进 `provision.env` 和日志。VNC 协议**只校验前 8 个字符**。
+- 防火墙：只在 ufw **已启用**时放行 `5900/tcp`（装机时和服务启动时各检查一次），不会主动打开 ufw。
+- 怎么连：macOS 用 Finder「前往 → 连接服务器」输入 `vnc://<机器IP>:5900`（自带屏幕共享，偏慢），推荐 [TigerVNC](https://tigervnc.org/) 或 RealVNC Viewer；Windows 用 TigerVNC / RealVNC Viewer / TightVNC，地址 `<机器IP>:5900`。x11vnc 没有视频编码，拖窗口、看视频不会很流畅。
+- 安全：VNC 流量**不加密**，只在可信局域网用；外网走 VPN 或 SSH 隧道 `ssh -L 5900:localhost:5900 <用户>@<机器IP>`。默认密码装完立即改：`sudo x11vnc -storepasswd /etc/x11vnc.pass && sudo systemctl restart x11vnc`。排查：`systemctl status x11vnc`、`journalctl -u x11vnc`、`/run/aib-x11vnc/x11vnc-*.log`。
+
+#### 合盖 / 空闲不挂起（RustDesk 和 x11vnc 都有）
+
+为了「随时能连」：logind drop-in `/etc/systemd/logind.conf.d/90-autoinstall-x11vnc.conf` 设 `HandleLidSwitch=ignore`（合盖不挂起）；GDM 登录界面（`/etc/dconf/db/gdm.d/`）和用户默认值（gschema override）都关掉空闲自动挂起。**锁屏和熄屏保持不变**（一连上屏幕就会亮）。文件名沿用原来的 x11vnc 命名。`--remote-desktop none` 或 `--wayland` 时不改。
 
 **以后想换回 Wayland**
 
 ```bash
-sudo systemctl disable --now x11vnc            # x11vnc 只能接 Xorg, 先停掉
+sudo systemctl disable --now x11vnc            # 用了 x11vnc 的话: 它只能接 Xorg, 先停掉
 sudo sed -i 's/^WaylandEnable=false/WaylandEnable=true/' /etc/gdm3/custom.conf   # 或直接删掉这一行
 sudo systemctl restart gdm3                     # 会注销当前图形会话
 ```
 
-合盖/空闲不挂起的设置不会自动撤销；需要的话删掉 `/etc/systemd/logind.conf.d/90-autoinstall-x11vnc.conf`、`/etc/dconf/db/gdm.d/90-autoinstall-no-suspend`（再 `sudo dconf update`）和 `/usr/share/glib-2.0/schemas/90_autoinstall-x11vnc-no-suspend.gschema.override`（再 `sudo glib-compile-schemas /usr/share/glib-2.0/schemas`）。
+RustDesk 在 Wayland 下连不了登录界面，会话里每次都要手动同意共享屏幕。合盖/空闲不挂起的设置不会自动撤销；需要的话删掉 `/etc/systemd/logind.conf.d/90-autoinstall-x11vnc.conf`、`/etc/dconf/db/gdm.d/90-autoinstall-no-suspend`（再 `sudo dconf update`）和 `/usr/share/glib-2.0/schemas/90_autoinstall-x11vnc-no-suspend.gschema.override`（再 `sudo glib-compile-schemas /usr/share/glib-2.0/schemas`）。
 
 **限制**：关 Wayland 后多屏分别缩放、触控板手势会差一点；NVIDIA 显卡在 Xorg 下通常更稳。x11vnc 接的是本地屏幕（同一个会话），没有声音转发。
 
@@ -233,7 +261,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 
 ### 容量与依赖提醒
 
-- 目标盘预留 **≥ 25 GB**（Docker 镜像 + Jenkins workspace 很吃空间）；这套预装本身约占 1.2–1.5 GB（另加 Godot 解压约 140 MB、Gitea 二进制约 115 MB、FlClash deb 约 40 MB，数据目录随后增长）。
+- 目标盘预留 **≥ 25 GB**（Docker 镜像 + Jenkins workspace 很吃空间）；这套预装本身约占 1.2–1.5 GB（另加 Godot 解压约 140 MB、Gitea 二进制约 115 MB、FlClash deb 约 40 MB、RustDesk deb 约 25 MB，数据目录随后增长）。
 - OpenMausBot 是 Electron 应用，npm 包会拉下较大体积的运行时；服务器上只用 `openmausbot serve`，不需要 X11。
 - 首次开机后要跑一次 `apt-get update`——`99-cleanup.sh` 为了缩体积清掉了 `/var/lib/apt/lists`。
 
@@ -241,7 +269,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 
 加：在 `software/` 放一个 `85-你的东西.sh`，按现有脚本的约定（`set -euo pipefail`、结尾自带校验命令、失败即非零退出）即可，无需改主脚本。
 
-减：`--skip "30 70"` 跳过 Jenkins 和 OpenMausBot；`--skip "30-jenkins 70-openmausbot"` 等价。Desktop 上不装 FlClash 用 `--no-flclash`（或 `--skip 37`）。整套不要就 `--no-provision`（Desktop 上要同时加 `--wayland`，因为默认的关 Wayland + x11vnc 由 `36` 钩子落地）。
+减：`--skip "30 70"` 跳过 Jenkins 和 OpenMausBot；`--skip "30-jenkins 70-openmausbot"` 等价。Desktop 上不装 FlClash 用 `--no-flclash`（或 `--skip 37`）。整套不要就 `--no-provision`（Desktop 上要同时加 `--wayland`，因为默认的关 Wayland + RustDesk 由 `36` / `38` 钩子落地；此时不装远程桌面）。
 
 ---
 
@@ -543,8 +571,12 @@ cat /var/log/autoinstall/20-docker.log
 | `--edition` | `auto`（默认）/ `server` / `desktop`。`auto` 读 ISO 的 `casper/install-sources.yaml`（`variant: desktop/server`），退回 `.disk/info`；显式指定优先 |
 | `--desktop-source` | 仅 desktop：`minimal`（默认，`ubuntu-desktop-minimal`）/ `standard`（`ubuntu-desktop`）/ 任意 source id；会对照 ISO 的 install-sources.yaml 校验 |
 | `--realname` | `identity.realname`（登录界面显示名）；desktop 默认等于 `--username` |
-| `--wayland` | 仅 desktop：保留 Wayland，不装 x11vnc，不改合盖/空闲挂起。**不加时 Desktop 默认**关 Wayland 并预装 x11vnc（开机即可从登录界面、锁屏、会话 VNC 连接，5900，局域网，不加密）。旧的 `--disable-wayland` / `--x11vnc` 已移除，传了会报错 |
-| `--vnc-password P` | x11vnc 密码（≥6 位，VNC 只用前 8 位），默认 = `--password` 明文；只有哈希时装机随机生成 → `/root/x11vnc-password`；与 `--wayland` 同用时忽略 |
+| `--wayland` | 仅 desktop：保留 Wayland，不改合盖/空闲挂起；不能与 `--remote-desktop x11vnc` 同用，与 RustDesk 同用时告警。**不加时 Desktop 默认**关 Wayland。旧的 `--disable-wayland` / `--x11vnc` 已移除，传了会报错 |
+| `--remote-desktop M` | 仅 desktop：`rustdesk`（默认，IP 直连 21118，固定密码）/ `x11vnc`（VNC 5900，不加密）/ `none` |
+| `--rustdesk-password P` | RustDesk 固定密码（≥6 位），默认 = `--password` 明文；只有哈希时装机随机生成 → `/root/rustdesk-password` |
+| `--rustdesk-server H` | 自建 RustDesk 服务器主机（可带端口），默认不设 |
+| `--pin-rustdesk VER` | RustDesk 版本，默认 `1.5.1`（环境变量 `PIN_RUSTDESK`） |
+| `--vnc-password P` | x11vnc 密码（≥6 位，VNC 只用前 8 位），仅 `--remote-desktop x11vnc`；默认 = `--password` 明文；只有哈希时装机随机生成 → `/root/x11vnc-password` |
 | `--menu-regex` | 要注入的菜单标题正则。默认 server `Try or Install`；desktop `^(Try or Install Ubuntu\|Ubuntu \(safe graphics\))$` |
 
 
@@ -617,10 +649,10 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 | 阶段 | 行为 |
 |---|---|
-| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource + Microsoft Edge + x11vnc + Avahi（`avahi-daemon` / `libnss-mdns`）+ FlClash 的 apt 依赖），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）与 FlClash linux `.deb`（`flclash/`，约 40 MB，官方 GitHub `SHA256SUMS` 校验）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
+| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource + Microsoft Edge + x11vnc + Avahi（`avahi-daemon` / `libnss-mdns`）+ FlClash / RustDesk 的 apt 依赖），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）与 FlClash linux `.deb`（`flclash/`，约 40 MB，官方 GitHub `SHA256SUMS` 校验）、RustDesk `.deb`（`rustdesk/`，约 25 MB，钉扎版本 + 官方 sha256）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
 | ISO | 写入 `/offline/{apt,apt-sources,npm,node,unity-cli,godot,gitea,jenkins-plugins,manifest.json}` |
 | 装机 late-commands | 拷到 `/opt/offline`，临时只启用 `deb [trusted=yes] file:/opt/offline/apt ./`，再跑 `software/`（`OFFLINE=1`） |
-| `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装；FlClash 从 `flclash/` 安装（依赖来自本地 apt 池）；Jenkins 插件从 `jenkins-plugins/` 拷贝 |
+| `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装；FlClash 从 `flclash/`、RustDesk 从 `rustdesk/` 安装（依赖来自本地 apt 池）；Jenkins 插件从 `jenkins-plugins/` 拷贝 |
 | `restore-online-apt.sh` | 卸掉离线 pin、恢复安装器写入的 Ubuntu 源（即 `--mirror`，默认清华 https，含 `-security`）后，把捆绑内 **全部** `apt-sources/` 种子写回（Docker CE / GitHub CLI / NVIDIA toolkit / Jenkins / NodeSource / Microsoft Edge；与在线脚本同一批 URL/密钥）。装机时可能仍无网，此处不做 `apt update`；联网后即可收安全更新。纯在线构建不会调用本脚本 |
 
 体积与缓存：
@@ -728,6 +760,6 @@ xorriso -indev ubuntu.iso -outdev out.iso \
 
 - 口令是哈希，不是明文；哈希本身也别提交到公开仓库。若用 `--password` 构建，Gitea / Jenkins 管理员明文会短暂出现在 ISO 的 `/provision/gitea-admin.secret` / `jenkins-admin.secret`（0600），装机后从目标机删除；拿到 ISO 的人在安装前仍可能读到，请勿把此类 ISO 公开分发。
 - 没有任何 API key / 私钥进镜像。SSH **公钥**可通过 `--ssh-authorized-keys` 注入，属于公开信息；私钥绝不注入。
-- 目标机磁盘 ≥ 25 GB，且装机时能访问 cli.github.com / docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / packages.microsoft.com（Desktop 上的 Microsoft Edge） / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）、`github.com/godotengine/godot` 或 `downloads.godotengine.org`（Godot 4.7.2），`github.com/chen08209/FlClash`（Desktop 上的 FlClash linux `.deb` 与 `SHA256SUMS`），以及 `dl.gitea.com`（Gitea 二进制与 sha256）与 `updates.jenkins.io` 及其下载镜像（Jenkins 插件）。全离线捆绑可免除这些外网依赖。
+- 目标机磁盘 ≥ 25 GB，且装机时能访问 cli.github.com / docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / packages.microsoft.com（Desktop 上的 Microsoft Edge） / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）、`github.com/godotengine/godot` 或 `downloads.godotengine.org`（Godot 4.7.2），`github.com/chen08209/FlClash`（Desktop 上的 FlClash linux `.deb` 与 `SHA256SUMS`）、`github.com/rustdesk/rustdesk`（Desktop 上的 RustDesk `.deb`；非默认版本还要 `api.github.com` 查 sha256），以及 `dl.gitea.com`（Gitea 二进制与 sha256）与 `updates.jenkins.io` 及其下载镜像（Jenkins 插件）。全离线捆绑可免除这些外网依赖。
 
 这条线一旦破，后面所有「镜像管理」都失去意义。

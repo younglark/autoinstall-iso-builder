@@ -18,7 +18,7 @@ jobs:
 
       - name: ShellCheck
         run: |
-          shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh tools/ubuntu-mirror.sh tools/validate-offline-bundle.sh tools/apt-deb-reuse.sh tools/flclash-release.sh test/local-check.sh test/container-x11vnc-reuse.sh \
+          shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh tools/ubuntu-mirror.sh tools/validate-offline-bundle.sh tools/apt-deb-reuse.sh tools/flclash-release.sh tools/rustdesk-release.sh test/local-check.sh test/container-x11vnc-reuse.sh \
             docker/entrypoint.sh scripts/aib.sh test/make-fake-iso.sh test/wrapper-dry-run.sh
           # SC2054: qemu -drive file=...,if=... commas are inside one argv, not array separators
           shellcheck -e SC2054,SC2001 -x test/qemu-smoke.sh

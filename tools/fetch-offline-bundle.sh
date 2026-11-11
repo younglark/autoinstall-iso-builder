@@ -13,6 +13,7 @@
 #     godot/               # Godot 4.7.2 Linux x86_64 zip + sha512（不含 export templates）
 #     gitea/               # Gitea linux-amd64 二进制 + version/sha256 (官方 dl.gitea.com 校验和)
 #     flclash/             # FlClash linux .deb + version/sha256 (官方 GitHub Release SHA256SUMS)
+#     rustdesk/            # RustDesk linux .deb (钉扎版本) + version/sha256 (官方 GitHub Release digest)
 #     package-list.txt
 #
 # 依赖: docker (推荐), 宿主机 node/npm (打 npm 包)。无 docker 时退出并提示。
@@ -28,7 +29,7 @@
 #     把「文件名、大小相同且哈希与 Packages 索引一致」的放进 apt 的 archives 目录 (apt 跳过下载前
 #     还会按索引里最强的哈希再校验一次),
 #     apt 只下载缺的。新下的 deb 回写缓存。缓存默认只增不删 (--prune-apt-cache 清掉本次不用的)。
-#   * Unity CLI / Gitea / Godot / FlClash / Jenkins 插件 / Node tarball: 版本不变且校验和一致时复用旧捆绑里的文件。
+#   * Unity CLI / Gitea / Godot / FlClash / RustDesk / Jenkins 插件 / Node tarball: 版本不变且校验和一致时复用旧捆绑里的文件。
 #   指纹只描述捆绑内容/参数, 与缓存无关。
 # =============================================================================
 set -Eeuo pipefail
@@ -50,6 +51,7 @@ PIN_OPENCODE="${PIN_OPENCODE:-latest}"
 PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 PIN_GITEA="${PIN_GITEA:-latest}"
+PIN_RUSTDESK="${PIN_RUSTDESK:-}"   # 空 = tools/rustdesk-release.sh 的 RUSTDESK_DEFAULT_VERSION
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger}"
 # Jenkins 插件解析器 (纯 Python 标准库; 与 software/30-jenkins.sh 在线路径同一份)
 RESOLVER="$SCRIPT_DIR/resolve-jenkins-plugins.py"
@@ -78,6 +80,7 @@ usage() {
   --pin-openmausbot VER 默认 latest
   --pin-unity-cli VER   Unity CLI 版本 (默认拉 latest/latest-beta)
   --pin-gitea VER       Gitea 版本 (默认 latest, 由 dl.gitea.com/gitea/version.json 解析)
+  --pin-rustdesk VER    RustDesk 版本 (默认 tools/rustdesk-release.sh 的 RUSTDESK_DEFAULT_VERSION)
   --jenkins-plugins "a b"
                         预装 Jenkins 插件 (按捆绑里同一 Jenkins 版本的 update center 解析全部必需依赖)
                         默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger
@@ -114,6 +117,7 @@ while [[ $# -gt 0 ]]; do
     --pin-openmausbot) PIN_OPENMAUSBOT="$2"; shift 2 ;;
     --pin-unity-cli) PIN_UNITY_CLI="$2"; shift 2 ;;
     --pin-gitea) PIN_GITEA="$2"; shift 2 ;;
+    --pin-rustdesk) PIN_RUSTDESK="$2"; shift 2 ;;
     --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
     --ubuntu-mirror) UBUNTU_MIRROR="$2"; shift 2 ;;
     --skip-npm) SKIP_NPM=1; shift ;;
@@ -150,6 +154,10 @@ UBUNTU_MIRROR="$(aib_normalize_mirror "$UBUNTU_MIRROR")"
   || die "非法 --pin-gitea: $PIN_GITEA"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/flclash-release.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/rustdesk-release.sh"
+[[ -n "$PIN_RUSTDESK" ]] || PIN_RUSTDESK="$RUSTDESK_DEFAULT_VERSION"
+rustdesk_valid_version "$PIN_RUSTDESK" || die "非法 --pin-rustdesk: $PIN_RUSTDESK"
 JENKINS_PLUGINS="$(printf '%s' "$JENKINS_PLUGINS" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
 [[ -n "$JENKINS_PLUGINS" ]] || die "--jenkins-plugins 不能为空"
 for _jp in $JENKINS_PLUGINS; do
@@ -190,7 +198,7 @@ case "$APT_RUNNER" in
 esac
 
 # 计算期望指纹; 已有捆绑指纹一致才复用 (否则提示 --force)
-expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$RESOLVER_SHA" <<'FP'
+expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$RESOLVER_SHA" "$PIN_RUSTDESK" <<'FP'
 import hashlib, json, sys
 payload = {
   "schema": 3,
@@ -205,6 +213,7 @@ payload = {
     "godot": "4.7.2",
     "gitea": sys.argv[9],
     "flclash": "latest",
+    "rustdesk": sys.argv[12],
   },
   "extra_packages": [p for p in sys.argv[8].split(",") if p],
   "jenkins_plugins": sorted(set(sys.argv[10].split())),
@@ -213,7 +222,7 @@ payload = {
     "git", "ripgrep", "openssh-server", "gh",
     "docker-ce", "nvidia-container-toolkit", "jenkins", "nodejs",
     "microsoft-edge-stable", "x11vnc", "xauth",
-    "unity-cli", "godot", "gitea", "flclash", "apt-sources",
+    "unity-cli", "godot", "gitea", "flclash", "rustdesk", "apt-sources",
     "fontconfig", "libharfbuzz0b", "python3-bcrypt", "jenkins-plugins",
     # avahi-daemon / libnss-mdns (Server 上 Gitea / Jenkins 的 <hostname>.local) 故意不进指纹:
     # Desktop 自带, 旧捆绑仍可复用; Server 用旧捆绑时 validate --require-mdns 报缺包 → --force-fetch
@@ -456,6 +465,28 @@ if [ -n "$FLCLASH_DEB" ]; then
   done)
 fi
 
+# RustDesk 官方 deb (宿主机已校验): 同 FlClash, Depends 并入种子 (libxdo3, gstreamer1.0-pipewire, …)
+RUSTDESK_DEB=""
+RUSTDESK_IN="${FETCH_RUSTDESK_DIR:-/rustdesk-in}"
+if [ -z "${FETCH_MINIMAL_SEEDS:-}" ] && [ -d "$RUSTDESK_IN" ]; then
+  for _f in "$RUSTDESK_IN"/rustdesk-*.deb; do
+    [ -f "$_f" ] || continue
+    RUSTDESK_DEB="$_f"
+    break
+  done
+fi
+if [ -n "$RUSTDESK_DEB" ]; then
+  echo "RustDesk local deb: $RUSTDESK_DEB ($(dpkg-deb -f "$RUSTDESK_DEB" Package) $(dpkg-deb -f "$RUSTDESK_DEB" Version))"
+  while IFS= read -r _d; do
+    [ -n "$_d" ] || continue
+    SEEDS+=("$_d")
+  done < <(dpkg-deb -f "$RUSTDESK_DEB" Depends 2>/dev/null | tr ',' '\n' | while IFS= read -r dep; do
+    first="${dep%%|*}"
+    first="$(printf '%s' "$first" | sed 's/([^)]*)//g; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "$first" ] && printf '%s\n' "$first"
+  done)
+fi
+
 echo "seed packages (${#SEEDS[@]}): ${SEEDS[*]}"
 
 # ---- deb 复用: 先按空 archives 解析出本次需要的全部文件 (名 + 大小 + 索引哈希) ----
@@ -543,6 +574,14 @@ if [ -n "$FLCLASH_DEB" ]; then
     exit 1
   }
   cp -a "$FLCLASH_DEB" "$ARCHIVES/$(basename "$FLCLASH_DEB")"
+fi
+if [ -n "$RUSTDESK_DEB" ]; then
+  echo "apt download-only for local RustDesk deb (resolve Depends against $RELEASE)"
+  apt-get install -y --download-only --no-install-recommends -o Dir::Cache::archives="$ARCHIVES" "$RUSTDESK_DEB" || {
+    echo "ERROR: 无法解析/下载 RustDesk 的 apt 依赖: $RUSTDESK_DEB" >&2
+    exit 1
+  }
+  cp -a "$RUSTDESK_DEB" "$ARCHIVES/$(basename "$RUSTDESK_DEB")"
 fi
 
 # 统计 + 回写缓存
@@ -656,6 +695,25 @@ else
   FLCLASH_DEB_NAME=""
 fi
 
+# --------------- RustDesk deb (host; 官方 GitHub Release, 钉扎版本 + sha256) ---------------
+if [[ "$ARCH" == "amd64" || "$ARCH" == "arm64" ]]; then
+  log "RustDesk $PIN_RUSTDESK (linux-$ARCH)"
+  rustdesk_resolve "$PIN_RUSTDESK" "$ARCH" || die "无法解析 RustDesk $PIN_RUSTDESK"
+  mkdir -p "$WORK/rustdesk-in"
+  # 优先复用旧捆绑里校验和一致的 deb (约 25MB)
+  if [[ -f "$OUT/rustdesk/$RUSTDESK_DEB_NAME" ]] && rustdesk_verify_deb "$OUT/rustdesk/$RUSTDESK_DEB_NAME" "$RUSTDESK_SHA256" 2>/dev/null; then
+    cp -p "$OUT/rustdesk/$RUSTDESK_DEB_NAME" "$WORK/rustdesk-in/$RUSTDESK_DEB_NAME"
+    ok "复用旧捆绑 rustdesk/$RUSTDESK_DEB_NAME (sha256 一致)"
+  fi
+  rustdesk_download_to "$WORK/rustdesk-in" || die "下载/校验 RustDesk 失败: $RUSTDESK_DEB_URL"
+  ok "RustDesk $RUSTDESK_VERSION ($RUSTDESK_DEB_NAME, $(du -h "$WORK/rustdesk-in/$RUSTDESK_DEB_NAME" | cut -f1))"
+else
+  warn "RustDesk 官方 linux deb 不支持 arch=$ARCH, 跳过"
+  RUSTDESK_VERSION=""
+  RUSTDESK_SHA256=""
+  RUSTDESK_DEB_NAME=""
+fi
+
 log "在 $IMG 中解析并下载 apt 依赖闭包"
 mkdir -p "$WORK/out"
 if [[ "$APT_RUNNER" == "direct" ]]; then
@@ -666,6 +724,7 @@ if [[ "$APT_RUNNER" == "direct" ]]; then
     FETCH_APT_CACHE="$APT_CACHE" FETCH_PREV_APT="$_prev_apt" FETCH_PREV_NODE="$_prev_node" \
     FETCH_PRUNE_APT_CACHE="$PRUNE_APT_CACHE" \
     FETCH_FLCLASH_DIR="$WORK/flclash-in" \
+    FETCH_RUSTDESK_DIR="$WORK/rustdesk-in" \
     bash "$WORK/fetch-debs.sh" "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES"
 else
   REUSE_ARGS=()
@@ -676,6 +735,9 @@ else
   [[ -d "$OUT/node" ]] && REUSE_ARGS+=(-v "$(cd -- "$OUT/node" && pwd):/prev-node:ro" -e FETCH_PREV_NODE=/prev-node)
   if [[ -d "$WORK/flclash-in" ]] && compgen -G "$WORK/flclash-in"/FlClash-*-linux-*.deb >/dev/null; then
     REUSE_ARGS+=(-v "$(cd -- "$WORK/flclash-in" && pwd):/flclash-in:ro" -e FETCH_FLCLASH_DIR=/flclash-in)
+  fi
+  if [[ -d "$WORK/rustdesk-in" ]] && compgen -G "$WORK/rustdesk-in"/rustdesk-*.deb >/dev/null; then
+    REUSE_ARGS+=(-v "$(cd -- "$WORK/rustdesk-in" && pwd):/rustdesk-in:ro" -e FETCH_RUSTDESK_DIR=/rustdesk-in)
   fi
   docker run --rm --network host \
     --dns 8.8.8.8 --dns 1.1.1.1 \
@@ -718,7 +780,7 @@ reuse_prev() { # sub name dest algo(sha256|sha512) hex
 }
 
 # 同步到 OUT (保留可复用)
-rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/flclash" "$OUT/jenkins-plugins" "$OUT/jenkins-version.txt" "$OUT/package-list.txt" "$OUT/java-package.txt"
+rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/flclash" "$OUT/rustdesk" "$OUT/jenkins-plugins" "$OUT/jenkins-version.txt" "$OUT/package-list.txt" "$OUT/java-package.txt"
 mkdir -p "$OUT"
 cp -a "$WORK/out/." "$OUT/"
 if [[ -n "${FLCLASH_DEB_NAME:-}" && -f "$WORK/flclash-in/$FLCLASH_DEB_NAME" ]]; then
@@ -728,6 +790,13 @@ if [[ -n "${FLCLASH_DEB_NAME:-}" && -f "$WORK/flclash-in/$FLCLASH_DEB_NAME" ]]; 
   printf '%s\n' "$FLCLASH_VERSION" > "$OUT/flclash/version"
   printf '%s\n' "$FLCLASH_SHA256" > "$OUT/flclash/sha256"
   printf '%s\n' "$FLCLASH_DEB_NAME" > "$OUT/flclash/deb.name"
+fi
+if [[ -n "${RUSTDESK_DEB_NAME:-}" && -f "$WORK/rustdesk-in/$RUSTDESK_DEB_NAME" ]]; then
+  mkdir -p "$OUT/rustdesk"
+  cp -p "$WORK/rustdesk-in/$RUSTDESK_DEB_NAME" "$OUT/rustdesk/$RUSTDESK_DEB_NAME"
+  printf '%s\n' "$RUSTDESK_VERSION" > "$OUT/rustdesk/version"
+  printf '%s\n' "$RUSTDESK_SHA256" > "$OUT/rustdesk/sha256"
+  printf '%s\n' "$RUSTDESK_DEB_NAME" > "$OUT/rustdesk/deb.name"
 fi
 
 # --------------- Jenkins 插件 (宿主机 python3; update center sha256 校验) ---------------
@@ -927,6 +996,15 @@ if fc.exists():
       "filename": (fc/"deb.name").read_text().strip() if (fc/"deb.name").exists() else None,
       "present": any(fc.glob("FlClash-*-linux-*.deb")),
     }
+rustdesk_meta = {}
+rd = out/"rustdesk"
+if rd.exists():
+    rustdesk_meta = {
+      "version": (rd/"version").read_text().strip() if (rd/"version").exists() else None,
+      "sha256": (rd/"sha256").read_text().strip() if (rd/"sha256").exists() else None,
+      "filename": (rd/"deb.name").read_text().strip() if (rd/"deb.name").exists() else None,
+      "present": any(rd.glob("rustdesk-*.deb")),
+    }
 jenkins_plugins_meta = None
 jp = out/"jenkins-plugins"
 if jp.is_dir():
@@ -962,6 +1040,7 @@ manifest = {
     "godot": "4.7.2",
     "gitea": "${PIN_GITEA}",
     "flclash": "latest",
+    "rustdesk": "${PIN_RUSTDESK}",
   },
   "extra_packages": [p.strip() for p in "${PACKAGES}".split(",") if p.strip()],
   "apt_deb_count": len(debs),
@@ -974,6 +1053,7 @@ manifest = {
   "godot": godot_meta or None,
   "gitea": gitea_meta or None,
   "flclash": flclash_meta or None,
+  "rustdesk": rustdesk_meta or None,
   "jenkins_plugins": jenkins_plugins_meta,
   "apt_sources": apt_sources_meta,
 }

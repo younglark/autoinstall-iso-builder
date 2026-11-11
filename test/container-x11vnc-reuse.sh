@@ -98,7 +98,8 @@ grep -qx 'WaylandEnable=false' /etc/gdm3/custom.conf || { echo "FAIL gdm"; exit 
 grep -q 'systemctl enable x11vnc.service' /tmp/shim/calls || { echo "FAIL enable"; exit 1; }
 echo "OK install"
 
-grep -q -- '-noshm' /usr/local/sbin/aib-x11vnc-follow || { echo "FAIL follower lacks -noshm"; exit 1; }
+grep -q 'setpriv --reuid="$owner"' /usr/local/sbin/aib-x11vnc-follow || { echo "FAIL follower lacks setpriv"; exit 1; }
+grep -qE -- '-noshm|-nowf|-noxdamage' /usr/local/sbin/aib-x11vnc-follow && { echo "FAIL follower still has -noshm/-nowf/-noxdamage"; exit 1; }
 
 # 伪造 GDM: 登录界面 :0 与用户会话 :1, 进程名都叫 Xorg (follower 按 Xorg 进程找 -auth)。
 # 与真机一致: Xorg 用 -displayfd 起 (命令行没有 :N), Xauthority 只有不带显示号的条目
@@ -116,13 +117,19 @@ mkdir -p /tmp/xbin /run/user/120/gdm /run/user/1000/gdm
 cp "$(command -v Xvfb)" /tmp/xbin/Xorg
 mk_gdm_xauth /run/user/120/gdm/Xauthority
 mk_gdm_xauth /run/user/1000/gdm/Xauthority
+# 与真机一致: auth 文件属 gdm (登录界面) / 登录用户 (会话); follower 以属主身份跑 x11vnc
+id gdm >/dev/null 2>&1 || useradd -r -u 120 -M -s /usr/sbin/nologin gdm
+id ubuntu >/dev/null 2>&1 || useradd -u 1000 -m ubuntu
+chown gdm /run/user/120/gdm/Xauthority; chown ubuntu /run/user/1000/gdm/Xauthority
 [ "$(xauth -f /run/user/1000/gdm/Xauthority list | wc -l)" = 2 ] \
   && ! xauth -f /run/user/1000/gdm/Xauthority list | grep -q ':[0-9]' || { echo "FAIL xauth fixture"; exit 1; }
-/tmp/xbin/Xorg -displayfd 3 -auth /run/user/120/gdm/Xauthority -nolisten tcp -screen 0 800x600x24 3>/tmp/dfd0 >/dev/null 2>&1 &
+# 和真机 24.04 一样 rootless: 登录界面的 X 属 gdm, 会话的 X 属登录用户 (x11vnc 必须同一用户才能用 MIT-SHM)
+mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+setpriv --reuid=gdm --regid="$(id -g gdm)" --init-groups /tmp/xbin/Xorg -displayfd 3 -auth /run/user/120/gdm/Xauthority -nolisten tcp -screen 0 800x600x24 3>/tmp/dfd0 >/dev/null 2>&1 &
 X0=$!
 sleep 2
 [ "$(tr -dc 0-9 < /tmp/dfd0)" = 0 ] || { echo "FAIL greeter displayfd != 0"; exit 1; }
-X11VNC_POLL=1 X11VNC_LOG=/tmp/x11vnc.log /usr/local/sbin/aib-x11vnc-follow > /tmp/follow.log 2>&1 &
+X11VNC_POLL=1 X11VNC_RUNDIR=/tmp/aibx /usr/local/sbin/aib-x11vnc-follow > /tmp/follow.log 2>&1 &
 FP=$!
 on_display() { # 等待 x11vnc 进程接到指定 display
   for _ in $(seq 1 20); do
@@ -132,25 +139,28 @@ on_display() { # 等待 x11vnc 进程接到指定 display
   return 1
 }
 listening() { grep -qi ':170C ' /proc/net/tcp /proc/net/tcp6 2>/dev/null; }  # 5900
-on_display :0 || { echo "FAIL not on :0"; cat /tmp/follow.log /tmp/x11vnc.log; exit 1; }
+on_display :0 || { echo "FAIL not on :0"; cat /tmp/follow.log /tmp/aibx/*.log; exit 1; }
 for _ in $(seq 1 10); do listening && break; sleep 1; done
-listening || { echo "FAIL :0 not listening"; tail /tmp/x11vnc.log; exit 1; }
-echo "OK greeter :0"
+listening || { echo "FAIL :0 not listening"; tail /tmp/aibx/*.log; exit 1; }
+[ "$(ps -o user= -p "$(pgrep -x x11vnc | head -1)")" = gdm ] || { echo "FAIL greeter x11vnc not running as gdm"; ps -o user,args -C x11vnc; exit 1; }
+echo "OK greeter :0 (x11vnc as gdm)"
 # 用户登录: 起 :1, 登录界面退出
-/tmp/xbin/Xorg -displayfd 3 -auth /run/user/1000/gdm/Xauthority -nolisten tcp -screen 0 800x600x24 3>/tmp/dfd1 >/dev/null 2>&1 &
+setpriv --reuid=ubuntu --regid="$(id -g ubuntu)" --init-groups /tmp/xbin/Xorg -displayfd 3 -auth /run/user/1000/gdm/Xauthority -nolisten tcp -screen 0 800x600x24 3>/tmp/dfd1 >/dev/null 2>&1 &
 sleep 1
 [ "$(tr -dc 0-9 < /tmp/dfd1)" = 1 ] || { echo "FAIL session displayfd != 1"; exit 1; }
 kill "$X0"
-on_display :1 || { echo "FAIL not on :1"; cat /tmp/follow.log; tail /tmp/x11vnc.log; exit 1; }
+on_display :1 || { echo "FAIL not on :1"; cat /tmp/follow.log; tail /tmp/aibx/*.log; exit 1; }
 for _ in $(seq 1 10); do listening && break; sleep 1; done
-listening || { echo "FAIL :1 not listening"; tail /tmp/x11vnc.log; exit 1; }
-echo "OK session :1"
+listening || { echo "FAIL :1 not listening"; tail /tmp/aibx/*.log; exit 1; }
+[ "$(ps -o user= -p "$(pgrep -x x11vnc | head -1)")" = ubuntu ] || { echo "FAIL session x11vnc not running as ubuntu"; ps -o user,args -C x11vnc; exit 1; }
+echo "OK session :1 (x11vnc as ubuntu)"
 grep -c 'x11vnc -> display' /tmp/follow.log
 kill "$FP"; wait "$FP" 2>/dev/null || true
 pgrep -x x11vnc >/dev/null && { echo "FAIL x11vnc left running"; exit 1; }
 echo "OK stop"
 IN
-if docker run --rm --network none \
+# SYS_PTRACE: follower 以 root 读 gdm / 用户的 Xorg 的 /proc/<pid>/fd (真机 systemd 下 root 本来就有)
+if docker run --rm --network none --cap-add SYS_PTRACE \
      -v "$work/out2/apt:/opt/offline/apt:ro" -v "$ROOT:/src:ro" -v "$work/offline-test.sh:/t.sh:ro" \
      "$IMG" bash /t.sh > "$work/o.log" 2>&1; then
   cat "$work/o.log"

@@ -789,7 +789,8 @@ if EDITION=desktop X11VNC=1 AIB_TARGET_ROOT="$xr2" AIB_SKIP_PKG=1 bash "$xr2/pro
      && grep -qx 'WaylandEnable=false' "$xr2/etc/gdm3/custom.conf" \
      && grep -q '^After=display-manager.service' "$u" && grep -q '^WantedBy=graphical.target' "$u" \
      && grep -q '^ExecStart=/usr/local/sbin/aib-x11vnc-follow' "$u" && grep -q '^Restart=always' "$u" \
-     && [[ -x "$f" ]] && grep -q -- '-rfbauth "$PASSFILE"' "$f" && grep -q -- '-forever -shared -noshm -noxdamage' "$f" \
+     && [[ -x "$f" ]] && grep -q -- '-rfbauth "$upass"' "$f" && grep -q -- '-forever -shared -repeat -xkb' "$f" \
+     && ! grep -qE -- '-noshm|-nowf|-noxdamage' "$f" && grep -q 'setpriv --reuid="$owner"' "$f" \
      && grep -q '/sys/class/tty/tty0/active' "$f" && grep -q 'xauth -f' "$f" \
      && grep -qx 'HandleLidSwitch=ignore' "$xr2/etc/systemd/logind.conf.d/90-autoinstall-x11vnc.conf" \
      && grep -q "sleep-inactive-ac-type='nothing'" "$xr2/etc/dconf/db/gdm.d/90-autoinstall-no-suspend" \
@@ -802,6 +803,67 @@ if EDITION=desktop X11VNC=1 AIB_TARGET_ROOT="$xr2" AIB_SKIP_PKG=1 bash "$xr2/pro
   fi
   if command -v shellcheck >/dev/null; then
     if shellcheck "$f"; then pass "aib-x11vnc-follow shellcheck"; else fail "aib-x11vnc-follow shellcheck"; fi
+  fi
+  # 回归: rootless Xorg (登录界面属 gdm, 会话属登录用户) → x11vnc 以 auth 文件属主身份跑 (setpriv),
+  # 密码按用户复制到 rundir (0400), 不再加 -noshm / -nowf / -noxdamage
+  st="$tmp/x11stub"; mkdir -p "$st/bin" "$st/run"
+  real_stat="$(command -v stat)"; real_install="$(command -v install)"; real_id="$(command -v id)"
+  cat > "$st/bin/stat" <<STUB
+#!/bin/sh
+if [ "\$1" = "-c" ] && [ "\$2" = "%U" ]; then
+  [ -n "\${STUB_OWNER:-}" ] || exit 1
+  echo "\$STUB_OWNER"; exit 0
+fi
+exec "$real_stat" "\$@"
+STUB
+  cat > "$st/bin/install" <<STUB
+#!/bin/sh
+echo "install \$*" >> "$st/calls"
+args=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in -o) shift 2 ;; *) args="\$args '\$1'"; shift ;; esac
+done
+eval "exec \"$real_install\" \$args"
+STUB
+  cat > "$st/bin/chown" <<STUB
+#!/bin/sh
+echo "chown \$*" >> "$st/calls"
+STUB
+  cat > "$st/bin/id" <<STUB
+#!/bin/sh
+if [ "\$1" = "-g" ] && [ "\$2" = "gdm" ]; then echo 120; exit 0; fi
+exec "$real_id" "\$@"
+STUB
+  cat > "$st/bin/setpriv" <<STUB
+#!/bin/sh
+printf '%s\n' "\$@" > "$st/setpriv.args"
+STUB
+  chmod +x "$st/bin/"*
+  printf 'pw' > "$st/x11vnc.pass"; : > "$st/auth"
+  run_launch() { # owner(空=stat 失败)
+    rm -f "$st/setpriv.args" "$st/calls"
+    # shellcheck disable=SC2016  # $1 / $child 在子 bash 里展开
+    PATH="$st/bin:$PATH" STUB_OWNER="$1" X11VNC_PASSFILE="$st/x11vnc.pass" X11VNC_RUNDIR="$st/run" AIB_X11VNC_FOLLOW_LIB=1 \
+      bash -c '. "$1"; launch_x11vnc :0 "$2" >/dev/null; wait "$child"' _ "$f" "$st/auth" 2>"$st/err" || true
+  }
+  run_launch gdm
+  if [[ -f "$st/setpriv.args" ]] && grep -qx -- '--reuid=gdm' "$st/setpriv.args" && grep -qx -- '--regid=120' "$st/setpriv.args" \
+     && grep -qx -- '--init-groups' "$st/setpriv.args" && grep -qx -- '--reset-env' "$st/setpriv.args" \
+     && grep -qx -- 'x11vnc' "$st/setpriv.args" && grep -qx -- "$st/run/pass-gdm" "$st/setpriv.args" \
+     && grep -qx -- "$st/run/x11vnc-gdm.log" "$st/setpriv.args" && grep -qx -- ':0' "$st/setpriv.args" \
+     && ! grep -qxE -- '-noshm|-nowf|-noxdamage' "$st/setpriv.args" \
+     && grep -q -- "-m 0400 -o gdm $st/x11vnc.pass $st/run/pass-gdm" "$st/calls" \
+     && grep -q "chown gdm $st/run/x11vnc-gdm.log" "$st/calls" \
+     && [[ "$(stat -c %a "$st/run/pass-gdm")" == 400 && "$(cat "$st/run/pass-gdm")" == pw ]]; then
+    pass "aib-x11vnc-follow: 登录界面 (gdm 属主) → setpriv --reuid=gdm, 每用户 0400 密码副本, 无 -noshm/-nowf"
+  else
+    fail "aib-x11vnc-follow gdm owner launch: $(cat "$st/setpriv.args" "$st/calls" "$st/err" 2>/dev/null | tr '\n' ' ')"
+  fi
+  run_launch ""
+  if [[ -f "$st/setpriv.args" ]] && grep -qx -- '--reuid=root' "$st/setpriv.args" && grep -qx -- "$st/run/pass-root" "$st/setpriv.args"; then
+    pass "aib-x11vnc-follow: auth 属主取不到时退回 root"
+  else
+    fail "aib-x11vnc-follow root fallback: $(cat "$st/setpriv.args" "$st/err" 2>/dev/null | tr '\n' ' ')"
   fi
   # 回归: GDM 用 -displayfd 起 Xorg (命令行没有 :N), Xauthority 条目不带显示号 → 必须靠监听的 socket 认出显示号
   xd_fn="$tmp/x_display_of.sh"
@@ -872,85 +934,141 @@ else
 fi
 rm -rf "$xr" "$xr2" "$xr3"
 
-echo "== build-iso remote desktop: Desktop 默认 x11vnc / --wayland (fake ISO) =="
+echo "== build-iso remote desktop: Desktop 默认 RustDesk / x11vnc / none / --wayland (fake ISO) =="
 if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
   xb="$(mktemp -d)"
   bash test/make-fake-iso.sh desktop "$xb/d.iso" >/dev/null 2>&1
   bash test/make-fake-iso.sh server "$xb/s.iso" >/dev/null 2>&1
   _xenv() { xorriso -osirrox on -indev "$1" -extract /provision "$2" >/dev/null 2>&1; }
-  # Desktop 默认: 关 Wayland + x11vnc, 密码 = --password (secret 文件), 明文不进日志/provision.env, 安全告警
+  # Desktop 默认: 关 Wayland + RustDesk, 密码 = --password (secret 文件), 明文不进日志/provision.env, 不投递 x11vnc
   if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o1.iso" --password 'Pl@in99x' >"$xb/o1.log" 2>&1 && _xenv "$xb/o1.iso" "$xb/p1" \
-     && grep -qx 'X11VNC=1' "$xb/p1/provision.env" && grep -qx 'DISABLE_WAYLAND=1' "$xb/p1/provision.env" \
-     && [[ -f "$xb/p1/36-x11vnc-xorg.sh" ]] \
-     && grep -q 'VNC 流量不加密' "$xb/o1.log" && grep -q '5900' "$xb/o1.log" \
-     && ! grep -q 'x11vnc 使用默认密码' "$xb/o1.log" \
+     && grep -qx 'REMOTE_DESKTOP=rustdesk' "$xb/p1/provision.env" && grep -qx 'X11VNC=0' "$xb/p1/provision.env" \
+     && grep -qx 'DISABLE_WAYLAND=1' "$xb/p1/provision.env" && grep -qx 'PIN_RUSTDESK=1.5.1' "$xb/p1/provision.env" \
+     && grep -qx "RUSTDESK_SERVER=''" "$xb/p1/provision.env" \
+     && [[ -f "$xb/p1/36-x11vnc-xorg.sh" && -f "$xb/p1/38-rustdesk.sh" && -f "$xb/p1/rustdesk-release.sh" ]] \
+     && [[ ! -e "$xb/p1/x11vnc.secret" ]] && ! grep -q 'VNC 流量不加密' "$xb/o1.log" \
+     && grep -q '21118' "$xb/o1.log" && grep -q 'RustDesk 安全提示' "$xb/o1.log" \
+     && ! grep -q 'RustDesk 使用默认密码' "$xb/o1.log" && ! grep -q 'RustDesk + Wayland' "$xb/o1.log" \
      && ( # shellcheck disable=SC1091
-          . "$xb/p1/x11vnc.secret"; [[ "$VNC_PASSWORD" == 'Pl@in99x' ]] ) \
+          . "$xb/p1/rustdesk.secret"; [[ "$RUSTDESK_PASSWORD" == 'Pl@in99x' ]] ) \
      && ! grep -q 'Pl@in99x' "$xb/o1.log" "$xb/p1/provision.env"; then
-    pass "desktop default: wayland off + x11vnc, password via secret file, not logged, security warning"
+    pass "desktop default: wayland off + RustDesk, password via secret file, not logged, no x11vnc"
   else
-    fail "desktop default x11vnc build: $(tail -3 "$xb/o1.log")"
+    fail "desktop default rustdesk build: $(tail -3 "$xb/o1.log")"
   fi
-  # 默认凭据 → 默认密码告警; --vnc-password 覆盖
+  # 默认凭据 → 默认密码告警; --rustdesk-password / --rustdesk-server / --pin-rustdesk 覆盖
   if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o2.iso" >"$xb/o2.log" 2>&1 \
-     && grep -q 'x11vnc 使用默认密码' "$xb/o2.log" && ! grep -q 'ubuntu1990' "$xb/o2.log" \
-     && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o3.iso" --vnc-password 'vncpass1' >"$xb/o3.log" 2>&1 && _xenv "$xb/o3.iso" "$xb/p3" \
+     && grep -q 'RustDesk 使用默认密码' "$xb/o2.log" && ! grep -q 'ubuntu1990' "$xb/o2.log" \
+     && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o3.iso" --rustdesk-password 'rdpass1x' --rustdesk-server 'RD.Example.com:21116' --pin-rustdesk 1.5.0 >"$xb/o3.log" 2>&1 && _xenv "$xb/o3.iso" "$xb/p3" \
      && ( # shellcheck disable=SC1091
-          . "$xb/p3/x11vnc.secret"; [[ "$VNC_PASSWORD" == 'vncpass1' ]] ) && ! grep -q 'vncpass1' "$xb/o3.log"; then
-    pass "x11vnc default-password warning + --vnc-password override"
+          . "$xb/p3/rustdesk.secret"; [[ "$RUSTDESK_PASSWORD" == 'rdpass1x' ]] ) && ! grep -q 'rdpass1x' "$xb/o3.log" \
+     && grep -qx 'RUSTDESK_SERVER=rd.example.com:21116' "$xb/p3/provision.env" && grep -qx 'PIN_RUSTDESK=1.5.0' "$xb/p3/provision.env"; then
+    pass "rustdesk default-password warning + --rustdesk-password / --rustdesk-server / --pin-rustdesk"
   else
-    fail "x11vnc password defaults"
+    fail "rustdesk password / server defaults: $(tail -3 "$xb/o2.log" "$xb/o3.log")"
   fi
   # 只有哈希 → 无 secret, 提示随机密码
   if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o4.iso" --password-hash "$(openssl passwd -6 x)" >"$xb/o4.log" 2>&1 && _xenv "$xb/o4.iso" "$xb/p4" \
-     && [[ ! -e "$xb/p4/x11vnc.secret" ]] && grep -q '/root/x11vnc-password' "$xb/o4.log"; then
-    pass "x11vnc hash-only: random password notice"
+     && [[ ! -e "$xb/p4/rustdesk.secret" ]] && grep -q '/root/rustdesk-password' "$xb/o4.log"; then
+    pass "rustdesk hash-only: random password notice"
   else
-    fail "x11vnc hash-only"
+    fail "rustdesk hash-only"
   fi
-  # --wayland: 保留 Wayland, 不装 x11vnc; --vnc-password 告警并忽略 (不进 ISO)
+  # --remote-desktop x11vnc: 关 Wayland + x11vnc, 密码 = --password; RustDesk 不投递
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o9.iso" --password 'Pl@in99x' --remote-desktop x11vnc >"$xb/o9.log" 2>&1 && _xenv "$xb/o9.iso" "$xb/p9" \
+     && grep -qx 'X11VNC=1' "$xb/p9/provision.env" && grep -qx 'REMOTE_DESKTOP=x11vnc' "$xb/p9/provision.env" \
+     && grep -qx 'DISABLE_WAYLAND=1' "$xb/p9/provision.env" \
+     && grep -q 'VNC 流量不加密' "$xb/o9.log" && grep -q '5900' "$xb/o9.log" && ! grep -q 'RustDesk 安全提示' "$xb/o9.log" \
+     && [[ ! -e "$xb/p9/rustdesk.secret" ]] \
+     && ( # shellcheck disable=SC1091
+          . "$xb/p9/x11vnc.secret"; [[ "$VNC_PASSWORD" == 'Pl@in99x' ]] ) \
+     && ! grep -q 'Pl@in99x' "$xb/o9.log" "$xb/p9/provision.env"; then
+    pass "--remote-desktop x11vnc: wayland off + x11vnc, password via secret file, no rustdesk"
+  else
+    fail "--remote-desktop x11vnc: $(tail -3 "$xb/o9.log")"
+  fi
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o10.iso" --remote-desktop x11vnc >"$xb/o10.log" 2>&1 \
+     && grep -q 'x11vnc 使用默认密码' "$xb/o10.log" && ! grep -q 'ubuntu1990' "$xb/o10.log" \
+     && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o11.iso" --remote-desktop x11vnc --vnc-password 'vncpass1' >"$xb/o11.log" 2>&1 && _xenv "$xb/o11.iso" "$xb/p11" \
+     && ( # shellcheck disable=SC1091
+          . "$xb/p11/x11vnc.secret"; [[ "$VNC_PASSWORD" == 'vncpass1' ]] ) && ! grep -q 'vncpass1' "$xb/o11.log" \
+     && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o12.iso" --remote-desktop x11vnc --password-hash "$(openssl passwd -6 x)" >"$xb/o12.log" 2>&1 && _xenv "$xb/o12.iso" "$xb/p12" \
+     && [[ ! -e "$xb/p12/x11vnc.secret" ]] && grep -q '/root/x11vnc-password' "$xb/o12.log"; then
+    pass "x11vnc default-password warning + --vnc-password override + hash-only random"
+  else
+    fail "x11vnc password defaults"
+  fi
+  # --vnc-password 默认 (RustDesk) 时告警并忽略
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o13.iso" --password 'Pl@in99x' --vnc-password 'vncpass2' >"$xb/o13.log" 2>&1 && _xenv "$xb/o13.iso" "$xb/p13" \
+     && [[ ! -e "$xb/p13/x11vnc.secret" ]] && grep -q -- '--vnc-password 只用于 --remote-desktop x11vnc' "$xb/o13.log" && ! grep -q 'vncpass2' "$xb/o13.log"; then
+    pass "--vnc-password ignored unless --remote-desktop x11vnc"
+  else
+    fail "--vnc-password with rustdesk: $(tail -3 "$xb/o13.log")"
+  fi
+  # --remote-desktop none: 仍关 Wayland, 不装远程桌面, 不投递任何密码
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o14.iso" --password 'Pl@in99x' --remote-desktop none --rustdesk-password 'rdpass1x' >"$xb/o14.log" 2>&1 && _xenv "$xb/o14.iso" "$xb/p14" \
+     && grep -qx 'REMOTE_DESKTOP=none' "$xb/p14/provision.env" && grep -qx 'X11VNC=0' "$xb/p14/provision.env" \
+     && grep -qx 'DISABLE_WAYLAND=1' "$xb/p14/provision.env" \
+     && [[ ! -e "$xb/p14/rustdesk.secret" && ! -e "$xb/p14/x11vnc.secret" ]] \
+     && grep -q -- '--rustdesk-password 只用于' "$xb/o14.log" && ! grep -q 'rdpass1x' "$xb/o14.log"; then
+    pass "--remote-desktop none: wayland off, no remote desktop, no secrets"
+  else
+    fail "--remote-desktop none: $(tail -3 "$xb/o14.log")"
+  fi
+  # --wayland: 保留 Wayland; 默认 RustDesk 照装但告警 (连不了登录界面)
   if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o5.iso" --password 'Pl@in99x' --wayland --vnc-password 'vncpass2' >"$xb/o5.log" 2>&1 && _xenv "$xb/o5.iso" "$xb/p5" \
      && grep -qx 'DISABLE_WAYLAND=0' "$xb/p5/provision.env" && grep -qx 'X11VNC=0' "$xb/p5/provision.env" \
-     && [[ ! -e "$xb/p5/x11vnc.secret" ]] && grep -q -- '--vnc-password 与 --wayland 同用无效' "$xb/o5.log" \
-     && ! grep -q 'VNC 流量不加密' "$xb/o5.log" && ! grep -q 'vncpass2' "$xb/o5.log"; then
-    pass "--wayland: keeps wayland, no x11vnc, --vnc-password ignored"
+     && grep -qx 'REMOTE_DESKTOP=rustdesk' "$xb/p5/provision.env" && grep -q 'RustDesk + Wayland' "$xb/o5.log" \
+     && [[ ! -e "$xb/p5/x11vnc.secret" ]] && ! grep -q 'VNC 流量不加密' "$xb/o5.log" && ! grep -q 'vncpass2' "$xb/o5.log" \
+     && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o5b.iso" --wayland --remote-desktop none --dry-run >"$xb/o5b.log" 2>&1 \
+     && ! grep -q 'RustDesk + Wayland' "$xb/o5b.log"; then
+    pass "--wayland: keeps wayland, RustDesk with warning; --remote-desktop none no warning"
   else
     fail "--wayland: $(tail -3 "$xb/o5.log")"
   fi
-  # --wayland 可与 --no-provision 同用 (钩子空跑)
-  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o7.iso" --password 'Pl@in99x' --wayland --no-provision --dry-run >"$xb/o7.log" 2>&1; then
-    pass "--wayland --no-provision allowed"
+  # --wayland 可与 --no-provision 同用 (远程桌面自动 none); 显式要远程桌面则报错
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o7.iso" --password 'Pl@in99x' --wayland --no-provision --dry-run >"$xb/o7.log" 2>&1 \
+     && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o7b.iso" --wayland --no-provision --remote-desktop none --dry-run >/dev/null 2>&1 \
+     && ! bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o7c.iso" --wayland --no-provision --remote-desktop rustdesk --dry-run >/dev/null 2>&1; then
+    pass "--wayland --no-provision allowed (remote desktop none); explicit --remote-desktop rejected"
   else
     fail "--wayland --no-provision: $(tail -3 "$xb/o7.log")"
   fi
-  # --skip 36: 跳过默认行为 (告警, 不投递 secret)
-  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o8.iso" --password 'Pl@in99x' --skip 36 >"$xb/o8.log" 2>&1 && _xenv "$xb/o8.iso" "$xb/p8" \
-     && grep -q '跳过了 36-x11vnc-xorg' "$xb/o8.log" && [[ ! -e "$xb/p8/x11vnc.secret" ]]; then
-    pass "--skip 36 skips default x11vnc"
+  # --skip 36: 保留 Wayland (告警), RustDesk 照装并提示 Wayland 限制; --skip 38: 不投递 RustDesk 密码
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o8.iso" --password 'Pl@in99x' --skip 36 >"$xb/o8.log" 2>&1 \
+     && grep -q '跳过了 36-x11vnc-xorg' "$xb/o8.log" && grep -q 'RustDesk + Wayland' "$xb/o8.log" \
+     && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o8b.iso" --password 'Pl@in99x' --skip 38 >"$xb/o8b.log" 2>&1 && _xenv "$xb/o8b.iso" "$xb/p8b" \
+     && grep -q '跳过了 38-rustdesk' "$xb/o8b.log" && [[ ! -e "$xb/p8b/rustdesk.secret" ]] \
+     && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o8c.iso" --password 'Pl@in99x' --remote-desktop x11vnc --skip 36 >"$xb/o8c.log" 2>&1 && _xenv "$xb/o8c.iso" "$xb/p8c" \
+     && grep -q '保留 Wayland, 不装 x11vnc' "$xb/o8c.log" && [[ ! -e "$xb/p8c/x11vnc.secret" ]]; then
+    pass "--skip 36 / --skip 38 handling"
   else
-    fail "--skip 36: $(tail -3 "$xb/o8.log")"
+    fail "--skip 36/38: $(tail -3 "$xb/o8.log" "$xb/o8b.log" "$xb/o8c.log")"
   fi
-  # Server: 不受影响; --wayland 告警忽略
+  # Server: 不受影响; --wayland / --remote-desktop 告警忽略
   if bash build-iso.sh --iso "$xb/s.iso" --out "$xb/o6.iso" --password 'Pl@in99x' >"$xb/o6.log" 2>&1 && _xenv "$xb/o6.iso" "$xb/p6" \
      && grep -qx 'X11VNC=0' "$xb/p6/provision.env" && grep -qx 'DISABLE_WAYLAND=0' "$xb/p6/provision.env" \
-     && [[ ! -e "$xb/p6/x11vnc.secret" ]] && ! grep -q 'VNC 流量不加密' "$xb/o6.log" \
-     && bash build-iso.sh --iso "$xb/s.iso" --out "$xb/o6b.iso" --password 'Pl@in99x' --wayland --dry-run >"$xb/o6b.log" 2>&1 \
-     && grep -q -- '--wayland 只用于 Desktop' "$xb/o6b.log"; then
-    pass "server: no x11vnc by default, --wayland ignored with warning"
+     && grep -qx 'REMOTE_DESKTOP=none' "$xb/p6/provision.env" \
+     && [[ ! -e "$xb/p6/x11vnc.secret" && ! -e "$xb/p6/rustdesk.secret" ]] && ! grep -q 'VNC 流量不加密\|RustDesk 安全提示' "$xb/o6.log" \
+     && bash build-iso.sh --iso "$xb/s.iso" --out "$xb/o6b.iso" --password 'Pl@in99x' --wayland --remote-desktop rustdesk --dry-run >"$xb/o6b.log" 2>&1 \
+     && grep -q -- '--wayland 只用于 Desktop' "$xb/o6b.log" && grep -q -- '--remote-desktop 只用于 Desktop' "$xb/o6b.log"; then
+    pass "server: no remote desktop by default, --wayland / --remote-desktop ignored with warning"
   else
-    fail "server x11vnc handling: $(tail -3 "$xb/o6.log" "$xb/o6b.log")"
+    fail "server remote desktop handling: $(tail -3 "$xb/o6.log" "$xb/o6b.log")"
   fi
-  # 旧参数已移除: 报错并提示 --wayland
-  for old in --disable-wayland --x11vnc; do
-    if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/bad.iso" --password x "$old" --dry-run >"$xb/old.log" 2>&1; then
-      fail "should reject removed flag: $old"
-    elif grep -q -- "$old 已移除" "$xb/old.log" && grep -q -- '--wayland' "$xb/old.log"; then
-      pass "rejects removed flag: $old (hint --wayland)"
+  # 旧参数已移除: 报错并提示新用法
+  for old in --disable-wayland:--wayland --x11vnc:'--remote-desktop x11vnc'; do
+    if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/bad.iso" --password x "${old%%:*}" --dry-run >"$xb/old.log" 2>&1; then
+      fail "should reject removed flag: ${old%%:*}"
+    elif grep -q -- "${old%%:*} 已移除" "$xb/old.log" && grep -q -- "${old#*:}" "$xb/old.log"; then
+      pass "rejects removed flag: ${old%%:*} (hint ${old#*:})"
     else
-      fail "removed flag message: $old: $(tail -2 "$xb/old.log")"
+      fail "removed flag message: ${old%%:*}: $(tail -2 "$xb/old.log")"
     fi
   done
-  for bad in "--no-provision" "--vnc-password 12345"; do
+  for bad in "--no-provision" "--remote-desktop x11vnc --vnc-password 12345" "--rustdesk-password 12345" \
+             "--remote-desktop vnc" "--wayland --remote-desktop x11vnc" "--rustdesk-server http://x" \
+             "--rustdesk-server a_b" "--pin-rustdesk latest"; do
     # shellcheck disable=SC2086
     if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/bad.iso" --password x $bad --dry-run >/dev/null 2>&1; then
       fail "desktop should reject: $bad"
@@ -960,7 +1078,136 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
   done
   rm -rf "$xb"
 else
-  echo "(xorriso/openssl missing, x11vnc build test skipped)"
+  echo "(xorriso/openssl missing, remote desktop build test skipped)"
+fi
+
+echo "== rustdesk script (38-rustdesk) + release helper + offline seed =="
+if TMPD="$tmp" bash <<'RDH'
+set -eu
+. tools/rustdesk-release.sh
+rustdesk_resolve 1.5.1 amd64
+[[ "$RUSTDESK_DEB_NAME" == rustdesk-1.5.1-x86_64.deb ]]
+[[ "$RUSTDESK_DEB_URL" == https://github.com/rustdesk/rustdesk/releases/download/1.5.1/rustdesk-1.5.1-x86_64.deb ]]
+[[ "$RUSTDESK_SHA256" == b5d682ad90cb7571ecbdbf26eef58d3c4514e726a74ef6d08ce3f0b114ef0bd9 ]]
+rustdesk_resolve "" arm64
+[[ "$RUSTDESK_DEB_NAME" == rustdesk-1.5.1-aarch64.deb && "$RUSTDESK_VERSION" == "$RUSTDESK_DEFAULT_VERSION" ]]
+! rustdesk_resolve 1.5.1 riscv64 2>/dev/null
+! rustdesk_resolve latest amd64 2>/dev/null
+printf 'x' > "$TMPD/rd-bad.deb"
+! rustdesk_verify_deb "$TMPD/rd-bad.deb" "$RUSTDESK_SHA256" 2>/dev/null
+rustdesk_verify_deb "$TMPD/rd-bad.deb" "$(sha256sum "$TMPD/rd-bad.deb" | cut -d' ' -f1)"
+RDH
+then
+  pass "rustdesk-release: pinned 1.5.1 sha256 (amd64/arm64), rejects bad arch/version/sha"
+else
+  fail "rustdesk-release helper"
+fi
+rr="$(mktemp -d)"; mkdir -p "$rr/prov"
+cp software/38-rustdesk.sh software/lib-offline.sh tools/rustdesk-release.sh "$rr/prov/"
+( umask 077; printf 'RUSTDESK_PASSWORD=%q\n' 'S3cret#rd' > "$rr/prov/rustdesk.secret" )
+if EDITION=server REMOTE_DESKTOP=rustdesk AIB_TARGET_ROOT="$rr/t0" AIB_SKIP_PKG=1 bash "$rr/prov/38-rustdesk.sh" >"$tmp/rd-srv.log" 2>&1 \
+   && grep -q 'skip:' "$tmp/rd-srv.log" && [[ ! -e "$rr/prov/rustdesk.secret" && ! -e "$rr/t0" ]] \
+   && EDITION=desktop REMOTE_DESKTOP=x11vnc AIB_TARGET_ROOT="$rr/t0" AIB_SKIP_PKG=1 bash software/38-rustdesk.sh >"$tmp/rd-x.log" 2>&1 \
+   && grep -q 'skip:' "$tmp/rd-x.log" \
+   && EDITION=desktop REMOTE_DESKTOP=rustdesk RUSTDESK_ARCH=riscv64 AIB_TARGET_ROOT="$rr/t0" AIB_SKIP_PKG=1 bash software/38-rustdesk.sh >"$tmp/rd-a.log" 2>&1 \
+   && grep -q 'skip:' "$tmp/rd-a.log" && [[ ! -e "$rr/t0" ]]; then
+  pass "38-rustdesk: skips on server / non-rustdesk / unsupported arch (secret removed)"
+else
+  fail "38-rustdesk skip paths: $(cat "$tmp/rd-srv.log" "$tmp/rd-x.log" "$tmp/rd-a.log" 2>/dev/null | tail -3)"
+fi
+( umask 077; printf 'RUSTDESK_PASSWORD=%q\n' 'S3cret#rd' > "$rr/prov/rustdesk.secret" )
+t="$rr/t1"
+if EDITION=desktop REMOTE_DESKTOP=rustdesk AIB_TARGET_ROOT="$t" AIB_SKIP_PKG=1 bash "$rr/prov/38-rustdesk.sh" >"$tmp/rd-on.log" 2>&1; then
+  u="$t/etc/systemd/system/aib-rustdesk-setup.service"; su="$t/usr/local/sbin/aib-rustdesk-setup"
+  if [[ ! -e "$rr/prov/rustdesk.secret" ]] && ! grep -q 'S3cret' "$tmp/rd-on.log" \
+     && [[ "$(stat -c %a "$t/etc/aib/rustdesk.secret")" == 600 && ! -e "$t/root/rustdesk-password" ]] \
+     && ( # shellcheck disable=SC1091
+          . "$t/etc/aib/rustdesk.secret"; [[ "$RUSTDESK_PASSWORD" == 'S3cret#rd' ]] ) \
+     && grep -qx 'direct-server Y' "$t/etc/aib/rustdesk.options" \
+     && grep -qx 'verification-method use-permanent-password' "$t/etc/aib/rustdesk.options" \
+     && grep -qx 'approve-mode password' "$t/etc/aib/rustdesk.options" \
+     && ! grep -q 'rendezvous\|relay' "$t/etc/aib/rustdesk.options" \
+     && grep -qx '\[options\]' "$t/root/.config/rustdesk/RustDesk2.toml" \
+     && grep -qx "direct-server = 'Y'" "$t/root/.config/rustdesk/RustDesk2.toml" \
+     && ! grep -qi 'password = ' "$t/root/.config/rustdesk/RustDesk2.toml" \
+     && grep -q '^After=rustdesk.service' "$u" && grep -q '^Wants=rustdesk.service' "$u" \
+     && grep -qx 'ConditionPathExists=!/var/lib/aib/rustdesk-setup.done' "$u" && grep -q '^Restart=on-failure' "$u" \
+     && grep -q '^WantedBy=multi-user.target' "$u" && [[ -x "$su" ]] \
+     && ! grep -rq 'S3cret' "$t/etc/systemd" "$t/usr" "$t/etc/aib/rustdesk.options" "$t/root/.config"; then
+    pass "38-rustdesk: secret → /etc/aib (0600), options + RustDesk2.toml preset, first-boot oneshot unit"
+  else
+    fail "38-rustdesk files: $(tail -5 "$tmp/rd-on.log")"
+  fi
+  if command -v shellcheck >/dev/null; then
+    if shellcheck "$su"; then pass "aib-rustdesk-setup shellcheck"; else fail "aib-rustdesk-setup shellcheck"; fi
+  fi
+  # 首次开机脚本: 用假 rustdesk CLI 验证 IPC 设置流程 (选项读回确认, 密码 Done! 后删除明文, 打标记)
+  fr="$rr/fake"; mkdir -p "$fr/opt"
+  cat > "$fr/rustdesk" <<STUB
+#!/bin/bash
+case "\$1" in
+  --get-id) echo 123456789 ;;
+  --option) if [ \$# -eq 3 ]; then printf '%s' "\$3" > "$fr/opt/\$2"; else cat "$fr/opt/\$2" 2>/dev/null; echo; fi ;;
+  --password) if [ -n "\${STUB_PW_FAIL:-}" ]; then echo "Failed to connect"; else printf '%s' "\$2" > "$fr/pw"; echo "Done!"; fi ;;
+esac
+STUB
+  chmod +x "$fr/rustdesk"
+  cp "$t/etc/aib/rustdesk.secret" "$fr/secret"
+  run_setup() { AIB_RUSTDESK_SECRET="$fr/secret" AIB_RUSTDESK_OPTIONS="$t/etc/aib/rustdesk.options" AIB_RUSTDESK_STAMP="$fr/done" RUSTDESK_BIN="$fr/rustdesk" bash "$su"; }
+  if STUB_PW_FAIL=1 run_setup >"$tmp/rd-setup-fail.log" 2>&1; then
+    fail "aib-rustdesk-setup should fail when --password fails"
+  elif [[ -f "$fr/secret" && ! -e "$fr/done" ]] && grep -q '设置固定密码失败' "$tmp/rd-setup-fail.log"; then
+    pass "aib-rustdesk-setup: password failure keeps secret for retry"
+  else
+    fail "aib-rustdesk-setup failure path: $(cat "$tmp/rd-setup-fail.log")"
+  fi
+  if run_setup >"$tmp/rd-setup.log" 2>&1 && [[ ! -e "$fr/secret" && -s "$fr/done" ]] \
+     && [[ "$(cat "$fr/pw")" == 'S3cret#rd' ]] && [[ "$(cat "$fr/opt/direct-server")" == Y ]] \
+     && [[ "$(cat "$fr/opt/verification-method")" == use-permanent-password ]] && [[ "$(cat "$fr/opt/approve-mode")" == password ]] \
+     && ! grep -q 'S3cret' "$tmp/rd-setup.log" && grep -q '123456789' "$tmp/rd-setup.log"; then
+    pass "aib-rustdesk-setup: options applied + verified, password set via CLI, secret deleted, stamp written"
+  else
+    fail "aib-rustdesk-setup: $(cat "$tmp/rd-setup.log")"
+  fi
+else
+  fail "38-rustdesk run: $(tail -5 "$tmp/rd-on.log")"
+fi
+# 自建服务器 + 只有哈希 (随机密码)
+t="$rr/t2"
+if EDITION=desktop REMOTE_DESKTOP=rustdesk RUSTDESK_SERVER=rd.example.com:21116 AIB_TARGET_ROOT="$t" AIB_SKIP_PKG=1 bash software/38-rustdesk.sh >"$tmp/rd-srv2.log" 2>&1 \
+   && grep -qx 'custom-rendezvous-server rd.example.com:21116' "$t/etc/aib/rustdesk.options" \
+   && grep -qx 'relay-server rd.example.com:21116' "$t/etc/aib/rustdesk.options" \
+   && [[ "$(stat -c %a "$t/root/rustdesk-password")" == 600 && "$(wc -c < "$t/root/rustdesk-password")" -eq 13 ]] \
+   && ( # shellcheck disable=SC1091
+        . "$t/etc/aib/rustdesk.secret"; [[ "$RUSTDESK_PASSWORD" == "$(cat "$t/root/rustdesk-password")" ]] ) \
+   && ! EDITION=desktop REMOTE_DESKTOP=rustdesk RUSTDESK_SERVER='x;rm' AIB_TARGET_ROOT="$rr/t3" AIB_SKIP_PKG=1 bash software/38-rustdesk.sh >/dev/null 2>&1; then
+  pass "38-rustdesk: --rustdesk-server options, random password when no plaintext, rejects bad server"
+else
+  fail "38-rustdesk server / random password: $(tail -3 "$tmp/rd-srv2.log")"
+fi
+# 36 钩子: RustDesk 也关合盖 / 空闲挂起, 但不装 x11vnc
+t="$rr/t4"
+if EDITION=desktop DISABLE_WAYLAND=1 REMOTE_DESKTOP=rustdesk AIB_TARGET_ROOT="$t" AIB_SKIP_PKG=1 bash software/36-x11vnc-xorg.sh >/dev/null 2>&1 \
+   && grep -qx 'WaylandEnable=false' "$t/etc/gdm3/custom.conf" \
+   && grep -qx 'HandleLidSwitch=ignore' "$t/etc/systemd/logind.conf.d/90-autoinstall-x11vnc.conf" \
+   && grep -q "sleep-inactive-ac-type='nothing'" "$t/etc/dconf/db/gdm.d/90-autoinstall-no-suspend" \
+   && [[ ! -e "$t/etc/systemd/system/x11vnc.service" && ! -e "$t/usr/local/sbin/aib-x11vnc-follow" ]]; then
+  pass "36-x11vnc-xorg with RustDesk: wayland off + no-suspend, no x11vnc"
+else
+  fail "36-x11vnc-xorg with RustDesk"
+fi
+rm -rf "$rr"
+if grep -q 'rustdesk/' tools/fetch-offline-bundle.sh && grep -q '"rustdesk", "apt-sources"' tools/fetch-offline-bundle.sh \
+   && grep -q '"rustdesk": sys.argv\[12\]' tools/fetch-offline-bundle.sh && grep -q -- '--pin-rustdesk' tools/fetch-offline-bundle.sh \
+   && grep -q 'FETCH_RUSTDESK_DIR' tools/fetch-offline-bundle.sh \
+   && grep -q -- '--require-rustdesk' tools/validate-offline-bundle.sh && grep -q -- '--require-rustdesk' build-iso.sh \
+   && grep -q 'rustdesk-release.sh' build-iso.sh \
+   && grep -q 'rustdesk.secret' software/run-all.sh && grep -q 'rustdesk.secret' software/99-cleanup.sh \
+   && grep -qE '(^|[[:space:]])rustdesk([[:space:]]|$)' software/99-cleanup.sh \
+   && grep -q 'offline_root)/rustdesk' software/38-rustdesk.sh; then
+  pass "rustdesk offline seed + fingerprint + validate + secret cleanup"
+else
+  fail "rustdesk offline seed / cleanup"
 fi
 
 echo "== unity-cli script + offline seed =="
@@ -1487,6 +1734,32 @@ else
   fail "validate --require-mdns logic: $(head -3 "$vb.mdns.log")"
 fi
 rm -f "$vb.mdns.log"
+# --require-rustdesk (Desktop 默认 RustDesk): rustdesk/ 同版本 deb + sha256, 且 rustdesk 在 apt 池; --skip 38 不要求
+if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "timestamper git" --require-rustdesk --pin-rustdesk 1.5.1 >"$vb.rd.log" 2>&1 \
+   && grep -q 'rustdesk/' "$vb.rd.log" \
+   && bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip 38" --jenkins-plugins "timestamper git" --require-rustdesk --pin-rustdesk 1.5.1 >/dev/null 2>&1; then
+  mkdir -p "$vb/rustdesk"; echo deb > "$vb/rustdesk/rustdesk-1.5.1-x86_64.deb"
+  echo rustdesk-1.5.1-x86_64.deb > "$vb/rustdesk/deb.name"; echo 1.5.1 > "$vb/rustdesk/version"
+  sha256sum "$vb/rustdesk/rustdesk-1.5.1-x86_64.deb" | cut -d' ' -f1 > "$vb/rustdesk/sha256"
+  if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "timestamper git" --require-rustdesk --pin-rustdesk 1.5.1 >"$vb.rd.log" 2>&1 \
+     && grep -q 'apt 缺包: rustdesk' "$vb.rd.log"; then
+    printf 'Package: rustdesk\nVersion: 1.5.1\n\n' >> "$vb/apt/Packages"
+    if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "timestamper git" --require-rustdesk --pin-rustdesk 1.5.1 >/dev/null 2>&1 \
+       && ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "timestamper git" --require-rustdesk --pin-rustdesk 1.5.2 >/dev/null 2>&1 \
+       && echo tampered >> "$vb/rustdesk/rustdesk-1.5.1-x86_64.deb" \
+       && ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "timestamper git" --require-rustdesk --pin-rustdesk 1.5.1 >/dev/null 2>&1; then
+      pass "validate --require-rustdesk: dir + version + sha256 + apt pool; --skip 38 not required"
+    else
+      fail "validate --require-rustdesk version/sha checks"
+    fi
+  else
+    fail "validate --require-rustdesk apt pool: $(head -3 "$vb.rd.log")"
+  fi
+  rm -rf "$vb/rustdesk"
+else
+  fail "validate --require-rustdesk missing dir: $(head -3 "$vb.rd.log")"
+fi
+rm -f "$vb.rd.log"
 if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "git gitea" >/dev/null 2>&1; then
   pass "validate rejects plugin list mismatch"
 else
