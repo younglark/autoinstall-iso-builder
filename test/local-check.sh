@@ -379,6 +379,32 @@ else
   fail "restore-online-apt exited non-zero: $(cat "$tmp/restore.out")"
 fi
 
+echo "== restore-online-apt without apt-sources/ (old bundle) still applies --mirror =="
+nroot="$tmp/restore-noseeds"
+mkdir -p "$nroot/offline" "$nroot/etc/apt/sources.list.d" "$nroot/etc/apt/sources.list.d.offline-bak" \
+         "$nroot/etc/apt/apt.conf.d" "$nroot/usr/share/keyrings"
+echo 'deb http://archive.ubuntu.com/ubuntu noble main' > "$nroot/etc/apt/sources.list.offline-bak"
+printf 'Types: deb\nURIs: https://example.invalid/repo\nSuites: x\nComponents: main\n' \
+  > "$nroot/etc/apt/sources.list.d.offline-bak/third.sources"
+echo 'deb [trusted=yes] file:/opt/offline/apt ./' > "$nroot/etc/apt/sources.list.d/00-offline-bundle.list"
+echo 'Acquire::AllowInsecureRepositories "true";' > "$nroot/etc/apt/apt.conf.d/99-offline-bundle"
+cp -a autoinstall/restore-online-apt.sh "$nroot/offline/restore-online-apt.sh"
+cp -a tools/ubuntu-mirror.sh "$nroot/offline/ubuntu-mirror.sh"
+printf '%s\n' "https://mirrors.tuna.tsinghua.edu.cn/ubuntu" > "$nroot/offline/ubuntu-mirror.url"
+if APT_ETC="$nroot/etc/apt" SHARE_KEYRINGS="$nroot/usr/share/keyrings" \
+     bash "$nroot/offline/restore-online-apt.sh" >"$tmp/restore-noseeds.out" 2>&1 \
+   && grep -q 'apt-sources 不存在' "$tmp/restore-noseeds.out" \
+   && grep -q 'final Ubuntu apt mirror: https://mirrors.tuna.tsinghua.edu.cn/ubuntu' "$tmp/restore-noseeds.out" \
+   && grep -q 'https://mirrors.tuna.tsinghua.edu.cn/ubuntu' "$nroot/etc/apt/sources.list" \
+   && ! grep -q 'archive.ubuntu.com' "$nroot/etc/apt/sources.list" \
+   && grep -q 'example.invalid' "$nroot/etc/apt/sources.list.d/third.sources" \
+   && [[ ! -e "$nroot/etc/apt/sources.list.d.offline-bak" ]] \
+   && [[ ! -f "$nroot/etc/apt/sources.list.d/00-offline-bundle.list" && ! -f "$nroot/etc/apt/apt.conf.d/99-offline-bundle" ]]; then
+  pass "restore-online-apt: no apt-sources/ → third-party seeds skipped, Ubuntu sources still rewritten to Tsinghua, offline-bak restored"
+else
+  fail "restore-online-apt without apt-sources/: $(cat "$tmp/restore-noseeds.out"); $(cat "$nroot/etc/apt/sources.list" 2>&1)"
+fi
+
 
 echo "== full-offline render =="
 if python3 tools/render-user-data.py \
