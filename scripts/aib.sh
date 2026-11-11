@@ -207,7 +207,7 @@ done
 if [[ "$(uname -s)" == "Linux" && "$(id -u)" -ne 0 ]]; then
   DOCKER+=(-e "AIB_UID=$(id -u)" -e "AIB_GID=$(id -g)")
 fi
-for v in PIN_NODE_MAJOR PIN_GROK PIN_OPENCODE PIN_OPENMAUSBOT PIN_UNITY_CLI PIN_GITEA UBUNTU_MIRROR UNITY_CLI_CDN_BASE; do
+for v in PIN_NODE_MAJOR PIN_GROK PIN_OPENCODE PIN_OPENMAUSBOT PIN_UNITY_CLI PIN_GITEA PIN_RUSTDESK UBUNTU_MIRROR UNITY_CLI_CDN_BASE RUSTDESK_DL_BASE; do
   [[ -n "${!v:-}" ]] && DOCKER+=(-e "$v=${!v}")
 done
 DOCKER+=("${EXTRA_DOCKER_ARGS[@]+"${EXTRA_DOCKER_ARGS[@]}"}")
@@ -217,7 +217,7 @@ DOCKER+=("${NEW_ARGS[@]+"${NEW_ARGS[@]}"}")
 print_cmd() {
   local line="" a prev=""
   for a in "$@"; do
-    if [[ "$prev" == "--password" || "$prev" == "--gitea-admin-password" || "$prev" == "--jenkins-admin-password" || "$prev" == "--vnc-password" ]]; then a="***"; fi
+    if [[ "$prev" == "--password" || "$prev" == "--gitea-admin-password" || "$prev" == "--jenkins-admin-password" || "$prev" == "--vnc-password" || "$prev" == "--rustdesk-password" ]]; then a="***"; fi
     if [[ "$a" =~ ^[A-Za-z0-9_./:=,@+%-]+$ ]]; then
       line="${line}${a} "
     else

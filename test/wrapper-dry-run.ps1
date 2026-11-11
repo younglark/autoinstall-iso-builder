@@ -56,6 +56,11 @@ try {
   Expect '--wayland 透传' $out '--wayland --vnc-password'
   Expect 'VNC 密码打码' $out "--vnc-password '***'"
   Reject 'VNC 密码不泄露' $out 's3cret'
+  $out = Run-Aib --dry-run build --iso u.iso --out o.iso --remote-desktop rustdesk --rustdesk-password 'rd s3cret' --rustdesk-server rd.example.com
+  Expect '--remote-desktop 透传' $out '--remote-desktop rustdesk --rustdesk-password'
+  Expect 'RustDesk 密码打码' $out "--rustdesk-password '***'"
+  Reject 'RustDesk 密码不泄露' $out 's3cret'
+  Expect '--rustdesk-server 透传' $out '--rustdesk-server rd.example.com'
 
   $out = Run-Aib --dry-run build --iso u.iso --out o.iso --hostname node07 --service-url-host 192.168.1.20
   Expect '--service-url-host 透传' $out '--hostname node07 --service-url-host 192.168.1.20'

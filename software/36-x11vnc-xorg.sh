@@ -1,12 +1,13 @@
 #!/bin/bash
-# 36-x11vnc-xorg.sh — Desktop 默认: 关闭 Wayland (GDM/锁屏/会话全走 Xorg) + 预装 x11vnc 开机即可连
+# 36-x11vnc-xorg.sh — Desktop 默认: 关闭 Wayland (GDM/锁屏/会话全走 Xorg); 可选 x11vnc 远程桌面
 #
-# 由 provision.env 控制 (build-iso.sh: Desktop 默认写 DISABLE_WAYLAND=1 X11VNC=1;
-# --wayland / Server 写两者为 0; 密码来自 --vnc-password / --password):
+# 由 provision.env 控制 (build-iso.sh: Desktop 默认 DISABLE_WAYLAND=1 REMOTE_DESKTOP=rustdesk X11VNC=0;
+# --remote-desktop x11vnc 时 X11VNC=1; --wayland / Server 时 DISABLE_WAYLAND=0; 密码来自 --vnc-password / --password):
 #   DISABLE_WAYLAND=1  /etc/gdm3/custom.conf [daemon] WaylandEnable=false (幂等, 保留其它键)
 #   X11VNC=1           (隐含 DISABLE_WAYLAND=1) 安装 x11vnc + systemd 服务 x11vnc.service:
 #                      开机后在 GDM 登录界面就能连, 登录后自动跟到用户会话, 锁屏也能连。
-#                      另: logind 合盖不挂起, GDM 登录界面/用户会话空闲不自动挂起 (锁屏保留)。
+#   远程桌面 (X11VNC=1 或 REMOTE_DESKTOP=rustdesk, 且 Wayland 已关): logind 合盖不挂起,
+#                      GDM 登录界面/用户会话空闲不自动挂起 (锁屏保留)。RustDesk 本身由 38-rustdesk.sh 安装。
 # 两者都为 0 时什么都不做。仅 Desktop; Server 直接跳过。
 #
 # 测试钩子: AIB_TARGET_ROOT=<dir> 把所有文件写到该前缀下; AIB_SKIP_PKG=1 跳过 apt/systemctl/x11vnc。
@@ -20,6 +21,7 @@ R="${AIB_TARGET_ROOT:-}"
 SKIP_PKG="${AIB_SKIP_PKG:-0}"
 DISABLE_WAYLAND="${DISABLE_WAYLAND:-0}"
 X11VNC="${X11VNC:-0}"
+REMOTE_DESKTOP="${REMOTE_DESKTOP:-}"
 VNC_PORT=5900
 SECRET_FILE="$HERE/x11vnc.secret"
 RANDOM_PW_FILE="/root/x11vnc-password"
@@ -70,13 +72,65 @@ ini_set() {
   rm -f "$tmp"
 }
 
+# ---------------------------------------------------------------- 不挂起 (开机即可用)
+# x11vnc / RustDesk 都要求机器醒着: 合盖 / 空闲不挂起 (锁屏照常)。文件名沿用 x11vnc 时代, 便于升级后识别
+write_no_suspend() {
+  install -d -m 0755 "$R/etc/systemd/logind.conf.d"
+  cat > "$R/etc/systemd/logind.conf.d/90-autoinstall-x11vnc.conf" <<'LOGIND'
+# autoinstall-iso-builder 远程桌面 (x11vnc / RustDesk): 合盖 / 空闲不挂起, 保证随时能连上 (锁屏照常)
+[Login]
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+IdleAction=ignore
+LOGIND
+
+  # GDM 登录界面 (gdm 用户) 的 dconf: system-db:gdm 优先于 greeter 默认值
+  install -d -m 0755 "$R/etc/dconf/db/gdm.d" "$R/etc/dconf/profile"
+  if [ ! -f "$R/etc/dconf/profile/gdm" ]; then
+    printf 'user-db:user\nsystem-db:gdm\nfile-db:/usr/share/gdm/greeter-dconf-defaults\n' > "$R/etc/dconf/profile/gdm"
+  elif ! grep -q '^system-db:gdm' "$R/etc/dconf/profile/gdm"; then
+    sed -i '1a system-db:gdm' "$R/etc/dconf/profile/gdm"
+  fi
+  cat > "$R/etc/dconf/db/gdm.d/90-autoinstall-no-suspend" <<'GDMDB'
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-type='nothing'
+sleep-inactive-battery-type='nothing'
+sleep-inactive-ac-timeout=0
+sleep-inactive-battery-timeout=0
+GDMDB
+  # 普通用户默认值: gschema override (不锁定, 用户仍可在设置里改); 锁屏不动
+  install -d -m 0755 "$R/usr/share/glib-2.0/schemas"
+  cat > "$R/usr/share/glib-2.0/schemas/90_autoinstall-x11vnc-no-suspend.gschema.override" <<'GS'
+[org.gnome.settings-daemon.plugins.power]
+sleep-inactive-ac-type='nothing'
+sleep-inactive-battery-type='nothing'
+sleep-inactive-ac-timeout=0
+sleep-inactive-battery-timeout=0
+GS
+  if [ "$SKIP_PKG" != "1" ]; then
+    if ! { command -v dconf >/dev/null 2>&1 && dconf update; }; then
+      echo "warn: dconf update 失败/不存在 (登录界面空闲挂起可能未关)"
+    fi
+    if command -v glib-compile-schemas >/dev/null 2>&1; then
+      glib-compile-schemas /usr/share/glib-2.0/schemas || true
+    fi
+  fi
+  echo "wrote logind / dconf: 合盖 / 空闲不挂起 (锁屏保留)"
+}
+
 GDM_CONF="$R/etc/gdm3/custom.conf"
 ini_set "$GDM_CONF" daemon WaylandEnable false
 echo "wrote $GDM_CONF: [daemon] WaylandEnable=false (登录界面/锁屏/会话均为 Xorg)"
 
 if [ "$X11VNC" != "1" ]; then
   rm -f "$SECRET_FILE"
-  echo "x11vnc 未启用; 只关闭了 Wayland"
+  if [ "$REMOTE_DESKTOP" = "rustdesk" ]; then
+    write_no_suspend
+    echo "x11vnc 未启用 (远程桌面用 RustDesk, 见 38-rustdesk); 已关闭 Wayland"
+  else
+    echo "x11vnc 未启用; 只关闭了 Wayland"
+  fi
   exit 0
 fi
 
@@ -126,7 +180,9 @@ echo "wrote /etc/x11vnc.pass (root 0600)"
 # 显示号, 变了就重启 x11vnc。x11vnc 自己的 -loop 会用旧 display/auth 重连, 不用它。
 # 显示号不能只靠 xauth list: GDM 用 -displayfd 起 Xorg (命令行里没有 :N), 写进 Xauthority 的条目也不带
 # 显示号 (ubuntu-desktop/unix: 和 #ffff#...#:), 所以先看命令行, 再看 Xorg 监听的 /tmp/.X11-unix/XN socket。
-# GDM 的 Xorg 不允许 x11vnc 用 MIT-SHM (X_ShmAttach BadAccess, x11vnc 直接退出), 所以加 -noshm。
+# 24.04 的 Xorg 是 rootless 的 (登录界面属 gdm, 会话属登录用户): root 跑的 x11vnc 建的 SHM 段 Xorg 挂不上
+# (X_ShmAttach BadAccess)。所以用 setpriv 以 Xorg 的 auth 文件属主身份运行 x11vnc (密码文件按用户复制一份到
+# /run/aib-x11vnc), MIT-SHM 正常可用, 不需要 -noshm; 也不加 -nowf / -noxdamage (默认的线框拖动与 DAMAGE 更快)。
 install -d -m 0755 "$R/usr/local/sbin"
 cat > "$R/usr/local/sbin/aib-x11vnc-follow" <<'FOLLOW'
 #!/bin/bash
@@ -135,7 +191,7 @@ cat > "$R/usr/local/sbin/aib-x11vnc-follow" <<'FOLLOW'
 set -u
 PORT="${X11VNC_PORT:-5900}"
 PASSFILE="${X11VNC_PASSFILE:-/etc/x11vnc.pass}"
-LOG="${X11VNC_LOG:-/var/log/x11vnc.log}"
+RUNDIR="${X11VNC_RUNDIR:-/run/aib-x11vnc}"   # 每个 Xorg 属主一份 0400 密码副本 + 日志 x11vnc-<属主>.log
 INTERVAL="${X11VNC_POLL:-2}"
 
 [ -s "$PASSFILE" ] || { echo "缺少 $PASSFILE (x11vnc -storepasswd 生成)"; exit 1; }
@@ -185,6 +241,21 @@ find_target() {
   [ -n "$pick" ] && printf '%s\n' "$pick"
 }
 
+# 以 auth 文件属主 (gdm 或登录用户; 拿不到就 root) 启动 x11vnc, 后台运行, 设置 child
+launch_x11vnc() {
+  local disp="$1" auth="$2" owner upass ulog
+  owner="$(stat -c %U "$auth" 2>/dev/null)"; [ -n "$owner" ] || owner=root
+  install -d -m 0711 "$RUNDIR"
+  upass="$RUNDIR/pass-$owner"; ulog="$RUNDIR/x11vnc-$owner.log"
+  install -m 0400 -o "$owner" "$PASSFILE" "$upass"
+  : > "$ulog"; chown "$owner" "$ulog"; chmod 0600 "$ulog"
+  echo "$(date '+%F %T') x11vnc -> display $disp (auth $auth, user $owner, log $ulog)"
+  setpriv --reuid="$owner" --regid="$(id -g "$owner")" --init-groups --reset-env -- \
+    x11vnc -display "$disp" -auth "$auth" -rfbauth "$upass" -rfbport "$PORT" \
+    -forever -shared -repeat -xkb -o "$ulog" -q &
+  child=$!
+}
+
 child=""
 current=""
 stop_child() {
@@ -197,6 +268,8 @@ stop_child() {
   child=""
 }
 trap 'stop_child; exit 0' TERM INT
+# 测试钩子: AIB_X11VNC_FOLLOW_LIB=1 只定义函数不进主循环
+[ "${AIB_X11VNC_FOLLOW_LIB:-0}" = "1" ] && return 0 2>/dev/null
 
 while :; do
   target="$(find_target)"
@@ -208,12 +281,7 @@ while :; do
   if [ "$target" != "$current" ] || [ -z "$child" ] || ! kill -0 "$child" 2>/dev/null; then
     stop_child
     current="$target"
-    disp="${target%% *}"
-    auth="${target#* }"
-    echo "$(date '+%F %T') x11vnc -> display $disp (auth $auth)"
-    x11vnc -display "$disp" -auth "$auth" -rfbauth "$PASSFILE" -rfbport "$PORT" \
-      -forever -shared -noshm -noxdamage -repeat -xkb -nowf -o "$LOG" -q &
-    child=$!
+    launch_x11vnc "${target%% *}" "${target#* }"
   fi
   sleep "$INTERVAL"
 done
@@ -239,48 +307,9 @@ WantedBy=graphical.target
 UNIT
 echo "wrote /etc/systemd/system/x11vnc.service"
 
-# ---------------------------------------------------------------- 不挂起 (开机即可用)
-install -d -m 0755 "$R/etc/systemd/logind.conf.d"
-cat > "$R/etc/systemd/logind.conf.d/90-autoinstall-x11vnc.conf" <<'LOGIND'
-# autoinstall-iso-builder x11vnc (Desktop 默认): 合盖 / 空闲不挂起, 保证随时能 VNC 连上 (锁屏照常)
-[Login]
-HandleLidSwitch=ignore
-HandleLidSwitchExternalPower=ignore
-HandleLidSwitchDocked=ignore
-IdleAction=ignore
-LOGIND
-
-# GDM 登录界面 (gdm 用户) 的 dconf: system-db:gdm 优先于 greeter 默认值
-install -d -m 0755 "$R/etc/dconf/db/gdm.d" "$R/etc/dconf/profile"
-if [ ! -f "$R/etc/dconf/profile/gdm" ]; then
-  printf 'user-db:user\nsystem-db:gdm\nfile-db:/usr/share/gdm/greeter-dconf-defaults\n' > "$R/etc/dconf/profile/gdm"
-elif ! grep -q '^system-db:gdm' "$R/etc/dconf/profile/gdm"; then
-  sed -i '1a system-db:gdm' "$R/etc/dconf/profile/gdm"
-fi
-cat > "$R/etc/dconf/db/gdm.d/90-autoinstall-no-suspend" <<'GDMDB'
-[org/gnome/settings-daemon/plugins/power]
-sleep-inactive-ac-type='nothing'
-sleep-inactive-battery-type='nothing'
-sleep-inactive-ac-timeout=0
-sleep-inactive-battery-timeout=0
-GDMDB
-# 普通用户默认值: gschema override (不锁定, 用户仍可在设置里改); 锁屏不动
-install -d -m 0755 "$R/usr/share/glib-2.0/schemas"
-cat > "$R/usr/share/glib-2.0/schemas/90_autoinstall-x11vnc-no-suspend.gschema.override" <<'GS'
-[org.gnome.settings-daemon.plugins.power]
-sleep-inactive-ac-type='nothing'
-sleep-inactive-battery-type='nothing'
-sleep-inactive-ac-timeout=0
-sleep-inactive-battery-timeout=0
-GS
+write_no_suspend
 
 if [ "$SKIP_PKG" != "1" ]; then
-  if ! { command -v dconf >/dev/null 2>&1 && dconf update; }; then
-    echo "warn: dconf update 失败/不存在 (登录界面空闲挂起可能未关)"
-  fi
-  if command -v glib-compile-schemas >/dev/null 2>&1; then
-    glib-compile-schemas /usr/share/glib-2.0/schemas || true
-  fi
   # ufw 已启用才放行 (chroot 内 ufw 可能无法 reload; 启动器开机时还会再检查一次)
   if [ -f /etc/ufw/ufw.conf ] && grep -q '^ENABLED=yes' /etc/ufw/ufw.conf && command -v ufw >/dev/null 2>&1; then
     ufw allow "${VNC_PORT}/tcp" comment x11vnc || echo "warn: ufw allow 失败, 开机后由 x11vnc.service 再试"

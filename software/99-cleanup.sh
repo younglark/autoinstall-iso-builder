@@ -13,7 +13,7 @@ fi
 rm -f /usr/sbin/policy-rc.d
 
 # --- 清理 ---
-rm -f /opt/provision/gitea-admin.secret /opt/provision/jenkins-admin.secret /opt/provision/x11vnc.secret
+rm -f /opt/provision/gitea-admin.secret /opt/provision/jenkins-admin.secret /opt/provision/x11vnc.secret /opt/provision/rustdesk.secret
 rm -f /tmp/nodesource_setup.sh /tmp/node.tar.xz
 apt-get clean
 rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
@@ -60,6 +60,20 @@ _manifest_ver() {
         echo "(not found)"
       fi
       ;;
+    rustdesk)
+      if dpkg-query -W -f='${Status}' rustdesk 2>/dev/null | grep -q 'install ok installed'; then
+        echo "rustdesk $(dpkg-query -W -f='${Version}' rustdesk)"
+      else
+        echo "(not found)"
+      fi
+      ;;
+    x11vnc)
+      if command -v x11vnc >/dev/null 2>&1; then
+        echo "x11vnc $(dpkg-query -W -f='${Version}' x11vnc 2>/dev/null)"
+      else
+        echo "(not found)"
+      fi
+      ;;
     *)
       # shellcheck disable=SC2086
       if command -v $1 >/dev/null 2>&1 || [ "$1" = "docker compose" ]; then
@@ -76,7 +90,7 @@ mkdir -p /var/log/autoinstall
   echo "# provisioned at $(date -u +%FT%TZ)"
   echo "# host: $(cat /etc/hostname 2>/dev/null)"
   echo
-  for c in git gh rg docker "docker compose" nvidia-ctk java node npm grok opencode openmausbot unity godot gitea jenkins microsoft-edge-stable FlClash sshd; do
+  for c in git gh rg docker "docker compose" nvidia-ctk java node npm grok opencode openmausbot unity godot gitea jenkins microsoft-edge-stable FlClash rustdesk x11vnc sshd; do
     printf '%-18s ' "$c"
     _manifest_ver "$c" || echo "(not found)"
   done

@@ -69,11 +69,16 @@ JENKINS_ADMIN_USER=""
 JENKINS_ADMIN_PASSWORD=""
 DEFAULT_JENKINS_PLUGINS="workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger"
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-$DEFAULT_JENKINS_PLUGINS}"
-# 远程桌面 (仅 Desktop, 默认开启): 关 Wayland + 预装 x11vnc 开机即可连; --wayland 保留 Wayland 且不装 x11vnc
+# 远程桌面 (仅 Desktop): 默认关 Wayland + 预装 RustDesk (IP 直连 21118); --remote-desktop x11vnc|none 切换;
+# --wayland 保留 Wayland
 WAYLAND=0
 DISABLE_WAYLAND=0   # 内部: 由 EDITION + WAYLAND 推导后写入 provision.env
-X11VNC=0
+REMOTE_DESKTOP=""   # rustdesk | x11vnc | none; 空 = 按版本取默认 (Desktop rustdesk, Server none)
+X11VNC=0            # 内部: REMOTE_DESKTOP=x11vnc
 VNC_PASSWORD=""
+RUSTDESK_PASSWORD=""
+RUSTDESK_SERVER=""
+PIN_RUSTDESK="${PIN_RUSTDESK:-}"   # 空 = tools/rustdesk-release.sh 的 RUSTDESK_DEFAULT_VERSION
 NO_FLCLASH=0
 # Gitea / Jenkins 对外 URL 主机: 默认 <hostname>.local (mDNS); --service-url-host 覆盖 (IP / FQDN / localhost)
 SERVICE_URL_HOST=""
@@ -151,13 +156,20 @@ usage() {
                         预装的 Jenkins 插件 (自动带全部依赖; 可写 name:version), 空格分隔
                         默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger
   (远程桌面)            Desktop 默认: GDM 关闭 Wayland (/etc/gdm3/custom.conf WaylandEnable=false,
-                        登录界面 / 锁屏 / 会话全走 Xorg) 并预装 x11vnc, 开机即可在登录界面、锁屏和
-                        会话里用 VNC 连上本地桌面 (端口 5900, 局域网; 不加密), 并关闭合盖 / 空闲挂起
-                        (锁屏保留)。--skip 36 也可跳过这一步
-  --wayland             仅 desktop: 保留 Wayland, 不装 x11vnc, 不改合盖 / 空闲挂起设置
-  --vnc-password P      x11vnc 密码 (≥6 位, VNC 只用前 8 个字符)。默认 = --password 明文 (含默认密码);
-                        只给了 --password-hash 时装机生成随机密码写入 /root/x11vnc-password。
-                        与 --wayland 同用时无效
+                        登录界面 / 锁屏 / 会话全走 Xorg) 并预装 RustDesk, 开机即可在登录界面、锁屏和
+                        会话里用 RustDesk 客户端按 IP 直连 (端口 21118/tcp, 局域网), 并关闭合盖 / 空闲挂起
+                        (锁屏保留)。关 Wayland 由 36 钩子落地, RustDesk 由 38 钩子落地
+  --remote-desktop M    仅 desktop: rustdesk (默认) | x11vnc (VNC 5900, 不加密) | none (不装远程桌面)
+  --rustdesk-password P RustDesk 固定密码 (≥6 位)。默认 = --password 明文 (含默认密码);
+                        只给了 --password-hash 时装机生成随机密码写入 /root/rustdesk-password
+  --rustdesk-server H   自建 RustDesk 服务器 (hbbs/hbbr) 主机, 可带端口; 写入 custom-rendezvous-server /
+                        relay-server。默认不设 (局域网 IP 直连不需要服务器; 按 ID 连走 RustDesk 公共服务器)
+  --pin-rustdesk VER    RustDesk 版本 (如 1.5.1), 默认见 tools/rustdesk-release.sh (PIN_RUSTDESK)
+  --wayland             仅 desktop: 保留 Wayland, 不改合盖 / 空闲挂起设置。不能与 --remote-desktop x11vnc
+                        同用; 与 RustDesk 同用时告警 (Wayland 下连不了登录界面, 会话里每次要手动授权共享屏幕)
+  --vnc-password P      x11vnc 密码 (≥6 位, VNC 只用前 8 个字符), 仅 --remote-desktop x11vnc。
+                        默认 = --password 明文 (含默认密码); 只给了 --password-hash 时装机生成随机密码
+                        写入 /root/x11vnc-password
   --iso-sha256 HEX      校验源 ISO 的 SHA256, 不匹配则失败
   --iso-sha256sums FILE 用 SHA256SUMS 文件按 basename 校验源 ISO
   --menu-regex REGEX    要注入的菜单项标题正则。默认 server: "Try or Install";
@@ -240,8 +252,14 @@ while [[ $# -gt 0 ]]; do
     --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
     --service-url-host) SERVICE_URL_HOST="$2"; shift 2 ;;
     --wayland)        WAYLAND=1; shift ;;
-    --disable-wayland|--x11vnc)
-      die "$1 已移除: Desktop 现在默认关闭 Wayland 并预装 x11vnc; 要保留 Wayland 且不装 x11vnc 请用 --wayland" ;;
+    --disable-wayland)
+      die "$1 已移除: Desktop 现在默认关闭 Wayland (远程桌面默认 RustDesk); 要保留 Wayland 请用 --wayland" ;;
+    --x11vnc)
+      die "$1 已移除: Desktop 远程桌面默认 RustDesk; 要用 x11vnc 请改成 --remote-desktop x11vnc (保留 Wayland 用 --wayland)" ;;
+    --remote-desktop) REMOTE_DESKTOP="$2"; shift 2 ;;
+    --rustdesk-password) RUSTDESK_PASSWORD="$2"; shift 2 ;;
+    --rustdesk-server) RUSTDESK_SERVER="$2"; shift 2 ;;
+    --pin-rustdesk)   PIN_RUSTDESK="$2"; shift 2 ;;
     --vnc-password)   VNC_PASSWORD="$2"; shift 2 ;;
     --iso-sha256)     ISO_SHA256="$2"; shift 2 ;;
     --iso-sha256sums) ISO_SHA256SUMS="$2"; shift 2 ;;
@@ -476,19 +494,46 @@ else
 fi
 
 # ---------------------------------------------------------------- 远程桌面 (Desktop 默认开启)
-# Desktop 且没给 --wayland: 关 Wayland + 预装 x11vnc (36-x11vnc-xorg.sh); 否则两者都关, 钩子空跑。
+# Desktop: 默认关 Wayland (36-x11vnc-xorg.sh) + RustDesk (38-rustdesk.sh); --remote-desktop x11vnc 改装 x11vnc (36);
+# --remote-desktop none 不装远程桌面; --wayland 保留 Wayland。Server: 全部关, 钩子空跑。
 VNC_PW_SOURCE=""
+RUSTDESK_PW_SOURCE=""
+REMOTE_DESKTOP_SET=0
+[[ -n "$REMOTE_DESKTOP" ]] && REMOTE_DESKTOP_SET=1
+case "$REMOTE_DESKTOP" in
+  ""|rustdesk|x11vnc|none) ;;
+  *) die "--remote-desktop 必须是 rustdesk | x11vnc | none (got: $REMOTE_DESKTOP)" ;;
+esac
+if [[ -n "$PIN_RUSTDESK" ]]; then
+  [[ "$PIN_RUSTDESK" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+)?$ ]] || die "非法 --pin-rustdesk: $PIN_RUSTDESK (X.Y.Z, 如 1.5.1)"
+else
+  # shellcheck disable=SC1091
+  PIN_RUSTDESK="$(. "$SCRIPT_DIR/tools/rustdesk-release.sh" && printf '%s' "$RUSTDESK_DEFAULT_VERSION")"
+fi
 if [[ "$EDITION" != "desktop" ]]; then
   if [[ "$WAYLAND" -eq 1 ]]; then warn "--wayland 只用于 Desktop; 当前 edition=$EDITION, 忽略"; fi
+  if [[ "$REMOTE_DESKTOP_SET" -eq 1 && "$REMOTE_DESKTOP" != "none" ]]; then
+    warn "--remote-desktop 只用于 Desktop; 当前 edition=$EDITION, 忽略"
+  fi
   DISABLE_WAYLAND=0
-  X11VNC=0
-elif [[ "$WAYLAND" -eq 1 ]]; then
-  DISABLE_WAYLAND=0
-  X11VNC=0
+  REMOTE_DESKTOP=none
 else
-  DISABLE_WAYLAND=1
-  X11VNC=1
+  if [[ "$WAYLAND" -eq 1 ]]; then DISABLE_WAYLAND=0; else DISABLE_WAYLAND=1; fi
+  if [[ "$PROVISION" -ne 1 ]]; then
+    # 关 Wayland / 远程桌面都由 software/ 钩子落地, --no-provision 时都做不了
+    [[ "$WAYLAND" -eq 1 ]] || die "Desktop 默认关 Wayland + 预装 RustDesk, 由 software/36-x11vnc-xorg.sh / 38-rustdesk.sh 落地, 不能与 --no-provision 同用 (要保留 Wayland 且不装远程桌面请加 --wayland)"
+    if [[ "$REMOTE_DESKTOP_SET" -eq 1 && "$REMOTE_DESKTOP" != "none" ]]; then
+      die "--remote-desktop $REMOTE_DESKTOP 由 software/ 钩子安装, 不能与 --no-provision 同用"
+    fi
+    REMOTE_DESKTOP=none
+  fi
+  [[ -n "$REMOTE_DESKTOP" ]] || REMOTE_DESKTOP=rustdesk
+  if [[ "$WAYLAND" -eq 1 && "$REMOTE_DESKTOP" == "x11vnc" ]]; then
+    die "--remote-desktop x11vnc 只能接管 Xorg 显示, 不能与 --wayland 同用 (要保留 Wayland 请改用 --remote-desktop rustdesk 或 none)"
+  fi
 fi
+X11VNC=0
+[[ "$REMOTE_DESKTOP" == "x11vnc" ]] && X11VNC=1
 if [[ "$X11VNC" -eq 1 ]]; then
   if [[ -n "$VNC_PASSWORD" ]]; then
     [[ "$VNC_PASSWORD" != *$'\n'* ]] || die "--vnc-password 不能含换行"
@@ -505,18 +550,64 @@ if [[ "$X11VNC" -eq 1 ]]; then
   fi
 elif [[ -n "$VNC_PASSWORD" ]]; then
   if [[ "$EDITION" == "desktop" ]]; then
-    warn "--vnc-password 与 --wayland 同用无效 (不装 x11vnc), 忽略"
+    warn "--vnc-password 只用于 --remote-desktop x11vnc (当前 $REMOTE_DESKTOP), 忽略"
   else
     warn "--vnc-password 只用于 Desktop 的 x11vnc; 当前 edition=$EDITION, 忽略"
   fi
   VNC_PASSWORD=""
 fi
-if [[ "$X11VNC" -eq 1 ]]; then
-  [[ "$PROVISION" -eq 1 ]] || die "Desktop 默认关 Wayland + 预装 x11vnc, 由 software/36-x11vnc-xorg.sh 落地, 不能与 --no-provision 同用 (要保留 Wayland 且不装 x11vnc 请加 --wayland)"
-  if should_skip_script 36-x11vnc-xorg; then
+if [[ "$REMOTE_DESKTOP" == "rustdesk" ]]; then
+  if [[ -n "$RUSTDESK_PASSWORD" ]]; then
+    [[ "$RUSTDESK_PASSWORD" != *$'\n'* ]] || die "--rustdesk-password 不能含换行"
+    [[ "${#RUSTDESK_PASSWORD}" -ge 6 ]] || die "--rustdesk-password 至少 6 位"
+    RUSTDESK_PW_SOURCE="explicit"
+  elif [[ -n "$PASS_PLAIN" ]]; then
+    RUSTDESK_PASSWORD="$PASS_PLAIN"
+    RUSTDESK_PW_SOURCE="password"
+  else
+    RUSTDESK_PW_SOURCE="random"
+  fi
+  if [[ -n "$RUSTDESK_SERVER" ]]; then
+    RUSTDESK_SERVER="$(printf '%s' "$RUSTDESK_SERVER" | tr '[:upper:]' '[:lower:]')"
+    [[ "$RUSTDESK_SERVER" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$ ]] \
+      || die "--rustdesk-server 非法: '$RUSTDESK_SERVER'。只接受主机名 / IPv4, 可带 :端口 (如 192.168.1.20 或 rd.example.com:21116); 不要带 http://"
+  fi
+else
+  if [[ -n "$RUSTDESK_PASSWORD" ]]; then
+    warn "--rustdesk-password 只用于 Desktop 的 --remote-desktop rustdesk (当前 edition=$EDITION remote-desktop=$REMOTE_DESKTOP), 忽略"
+    RUSTDESK_PASSWORD=""
+  fi
+  if [[ -n "$RUSTDESK_SERVER" ]]; then
+    warn "--rustdesk-server 只用于 Desktop 的 --remote-desktop rustdesk (当前 edition=$EDITION remote-desktop=$REMOTE_DESKTOP), 忽略"
+    RUSTDESK_SERVER=""
+  fi
+fi
+if [[ "$DISABLE_WAYLAND" -eq 1 ]] && should_skip_script 36-x11vnc-xorg; then
+  if [[ "$X11VNC" -eq 1 ]]; then
     warn "--skip 跳过了 36-x11vnc-xorg: 保留 Wayland, 不装 x11vnc"
   else
-    log "远程桌面: 关 Wayland + x11vnc (端口 5900)${VNC_PW_SOURCE:+ vnc-password=$VNC_PW_SOURCE}; 不需要请加 --wayland"
+    warn "--skip 跳过了 36-x11vnc-xorg: 保留 Wayland, 不改合盖 / 空闲挂起"
+  fi
+fi
+if [[ "$REMOTE_DESKTOP" == "rustdesk" ]]; then
+  if should_skip_script 38-rustdesk; then
+    warn "--skip 跳过了 38-rustdesk: 不装 RustDesk"
+  else
+    log "远程桌面: RustDesk $PIN_RUSTDESK (局域网 IP 直连 21118/tcp, 只用固定密码)${RUSTDESK_PW_SOURCE:+ rustdesk-password=$RUSTDESK_PW_SOURCE}${RUSTDESK_SERVER:+ server=$RUSTDESK_SERVER}; 改用 x11vnc / 不装: --remote-desktop x11vnc|none"
+    if [[ "$WAYLAND" -eq 1 ]] || should_skip_script 36-x11vnc-xorg; then
+      warn "RustDesk + Wayland: 连不了 GDM 登录界面 / 锁屏后的重新登录, 会话里每次连接都要在本机手动同意共享屏幕; 要无人值守请去掉 --wayland"
+    fi
+    warn "RustDesk 安全提示: 21118 直连端口在局域网内任何人都能连 (靠固定密码保护); 不要映射到公网 (外网走 VPN / 自建中继)"
+    if [[ "$RUSTDESK_PW_SOURCE" == "password" && "$USED_DEFAULT_PASSWORD" -eq 1 ]]; then
+      warn "RustDesk 使用默认密码 (与用户 $USERNAME_ 相同, 公开的默认值); 装完请改: sudo rustdesk --password '<新密码>'"
+    fi
+  fi
+fi
+if [[ "$X11VNC" -eq 1 ]]; then
+  if should_skip_script 36-x11vnc-xorg; then
+    :
+  else
+    log "远程桌面: 关 Wayland + x11vnc (端口 5900)${VNC_PW_SOURCE:+ vnc-password=$VNC_PW_SOURCE}; 默认 RustDesk 请去掉 --remote-desktop x11vnc"
     warn "x11vnc 安全提示: VNC 流量不加密, 局域网内可直接连 5900 端口; 只在可信网络用, 不要映射到公网 (外网走 VPN / SSH 隧道)"
     if [[ "$VNC_PW_SOURCE" == "password" && "$USED_DEFAULT_PASSWORD" -eq 1 ]]; then
       warn "x11vnc 使用默认密码 (与用户 $USERNAME_ 相同, 公开的默认值); 装完请改: sudo x11vnc -storepasswd /etc/x11vnc.pass && sudo systemctl restart x11vnc"
@@ -552,7 +643,7 @@ if [[ "${FETCH_OFFLINE:-0}" -eq 1 ]]; then
     --pin-opencode "$PIN_OPENCODE" --pin-openmausbot "$PIN_OPENMAUSBOT"
     --ubuntu-mirror "$MIRROR")
   [[ -n "$PIN_UNITY_CLI" ]] && FETCH_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
-  FETCH_ARGS+=(--pin-gitea "$PIN_GITEA" --jenkins-plugins "$JENKINS_PLUGINS")
+  FETCH_ARGS+=(--pin-gitea "$PIN_GITEA" --jenkins-plugins "$JENKINS_PLUGINS" --pin-rustdesk "$PIN_RUSTDESK")
   [[ "${FORCE_FETCH:-0}" -eq 1 ]] && FETCH_ARGS+=(--force)
   bash "$SCRIPT_DIR/tools/fetch-offline-bundle.sh" "${FETCH_ARGS[@]}"
   OFFLINE_BUNDLE="$OB_OUT"
@@ -576,8 +667,10 @@ if [[ -n "$OFFLINE_BUNDLE" ]]; then
     [[ -n "$REL_FOR_V" ]] && VAL_ARGS+=(--release "$REL_FOR_V")
     [[ -n "$PIN_UNITY_CLI" ]] && VAL_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
     VAL_ARGS+=(--pin-gitea "$PIN_GITEA" --jenkins-plugins "$JENKINS_PLUGINS")
-    # Desktop 默认 (未加 --wayland) 装 x11vnc: 捆绑必须带 x11vnc + xauth (validate 自己处理 --skip 36)
+    # --remote-desktop x11vnc: 捆绑必须带 x11vnc + xauth (validate 自己处理 --skip 36)
     [[ "$X11VNC" -eq 1 ]] && VAL_ARGS+=(--require-x11vnc)
+    # Desktop 默认 RustDesk: 捆绑必须带 rustdesk/ (同版本 deb + sha256) 且 apt 池能装 (validate 自己处理 --skip 38)
+    [[ "$REMOTE_DESKTOP" == "rustdesk" ]] && VAL_ARGS+=(--require-rustdesk --pin-rustdesk "$PIN_RUSTDESK")
     # Server 预装 Gitea / Jenkins: <hostname>.local 要 Avahi (Desktop 自带); 2026-11 之前的捆绑没有 → --force-fetch
     [[ "$EDITION" == "server" && "$MDNS_AVAHI" -eq 1 ]] && VAL_ARGS+=(--require-mdns)
     bash "$SCRIPT_DIR/tools/validate-offline-bundle.sh" "${VAL_ARGS[@]}"       || die "离线捆绑校验失败 (见上)。重建: ./tools/fetch-offline-bundle.sh --force ..."
@@ -703,8 +796,8 @@ if [[ "$PROVISION" -eq 1 ]]; then
   chmod 0755 "$WORK/provision/ubuntu-mirror.sh"
   # Jenkins 插件解析器 (30-jenkins.sh 在线路径用; 与 fetch-offline-bundle 同一份)
   cp "$SCRIPT_DIR/tools/resolve-jenkins-plugins.py" "$WORK/provision/"
-  cp "$SCRIPT_DIR/tools/flclash-release.sh" "$WORK/provision/"
-  chmod 0755 "$WORK/provision/flclash-release.sh"
+  cp "$SCRIPT_DIR/tools/flclash-release.sh" "$SCRIPT_DIR/tools/rustdesk-release.sh" "$WORK/provision/"
+  chmod 0755 "$WORK/provision/flclash-release.sh" "$WORK/provision/rustdesk-release.sh"
   # 逐行 %q 写入, 保证 source 安全 (旧写法 EXTRA_APT_PACKAGES=vim, htop 会把 htop 当命令执行)
   {
     echo "# 由 build-iso.sh 生成 (printf %q; 请勿手改未加引号的值)"
@@ -745,6 +838,9 @@ if [[ "$PROVISION" -eq 1 ]]; then
     printf 'MDNS_AVAHI=%q\n' "$MDNS_AVAHI"
     printf 'DISABLE_WAYLAND=%q\n' "$DISABLE_WAYLAND"
     printf 'X11VNC=%q\n' "$X11VNC"
+    printf 'REMOTE_DESKTOP=%q\n' "$REMOTE_DESKTOP"
+    printf 'PIN_RUSTDESK=%q\n' "$PIN_RUSTDESK"
+    printf 'RUSTDESK_SERVER=%q\n' "$RUSTDESK_SERVER"
     printf 'OFFLINE=%q
 ' "$FULL_OFFLINE"
     printf 'OFFLINE_ROOT=%q
@@ -775,6 +871,14 @@ if [[ "$PROVISION" -eq 1 ]]; then
     ok "x11vnc: 密码随 ISO 投递 (装机时写 /etc/x11vnc.pass, 删除明文)"
   elif [[ "$X11VNC" -eq 1 ]] && ! should_skip_script 36-x11vnc-xorg; then
     warn "x11vnc: 无明文密码 (只给了 --password-hash), 装机生成随机密码 → /root/x11vnc-password"
+  fi
+  # RustDesk 固定密码同理: 0600 文件, 38-rustdesk.sh 移到 /etc/aib/rustdesk.secret (root 0600), 首次开机设好后删除
+  if [[ "$REMOTE_DESKTOP" == "rustdesk" && -n "$RUSTDESK_PASSWORD" ]] && ! should_skip_script 38-rustdesk; then
+    ( umask 077; printf 'RUSTDESK_PASSWORD=%q\n' "$RUSTDESK_PASSWORD" > "$WORK/provision/rustdesk.secret" )
+    chmod 0600 "$WORK/provision/rustdesk.secret"
+    ok "RustDesk: 固定密码随 ISO 投递 (首次开机设置后删除明文)"
+  elif [[ "$REMOTE_DESKTOP" == "rustdesk" ]] && ! should_skip_script 38-rustdesk; then
+    warn "RustDesk: 无明文密码 (只给了 --password-hash), 装机生成随机密码 → /root/rustdesk-password"
   fi
   SCRIPT_COUNT=$(find "$WORK/provision" -maxdepth 1 -name '[0-9][0-9]-*.sh' | wc -l)
   ok "已打包 $SCRIPT_COUNT 个软件预装脚本 (node>=$PIN_NODE_MAJOR grok=$PIN_GROK)"

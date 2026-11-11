@@ -3,7 +3,9 @@
 # 用法:
 #   ./tools/validate-offline-bundle.sh --bundle DIR [--release noble|jammy|24.04|22.04]
 #       [--skip "30 70"] [--pin-node N] [--pin-grok V] [--jenkins-plugins "a b"] ...
-#       [--require-x11vnc]   (build-iso Desktop 默认装 x11vnc 时 (未加 --wayland): 捆绑里必须有 x11vnc + xauth)
+#       [--require-x11vnc]   (build-iso --remote-desktop x11vnc 时: 捆绑里必须有 x11vnc + xauth)
+#       [--require-rustdesk] [--pin-rustdesk VER]
+#                            (build-iso Desktop 默认 RustDesk 时: 捆绑里必须有 rustdesk/ 同版本 deb + sha256, apt 池可装)
 #       [--require-mdns]     (build-iso Server 预装 Gitea / Jenkins 时: 捆绑里必须有 avahi-daemon + libnss-mdns)
 set -Eeuo pipefail
 
@@ -19,6 +21,8 @@ PIN_GODOT="${PIN_GODOT:-4.7.2}"
 PIN_GITEA="${PIN_GITEA:-latest}"
 REQUIRE_X11VNC=0
 REQUIRE_MDNS=0
+REQUIRE_RUSTDESK=0
+PIN_RUSTDESK="${PIN_RUSTDESK:-}"
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger}"
 
 die()  { printf '[fail] %s\n' "$*" >&2; exit 1; }
@@ -50,8 +54,10 @@ while [[ $# -gt 0 ]]; do
     --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
     --require-x11vnc) REQUIRE_X11VNC=1; shift ;;
     --require-mdns) REQUIRE_MDNS=1; shift ;;
+    --require-rustdesk) REQUIRE_RUSTDESK=1; shift ;;
+    --pin-rustdesk) PIN_RUSTDESK="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,8p' "$0"; exit 0 ;;
+      sed -n '2,10p' "$0"; exit 0 ;;
     *) die "未知参数: $1" ;;
   esac
 done
@@ -176,6 +182,30 @@ if ! should_skip 37-flclash && [[ -d "$BUNDLE/flclash" ]]; then
       END{ exit found?0:1 }
     ' "$PACKAGES_FILE"; then
       missing+=("FlClash")
+    fi
+  fi
+fi
+# RustDesk (Desktop 默认远程桌面): 钉扎版本的官方 deb + sha256, 且 deb 本身在 apt 池 (依赖闭包随之进池)
+if [[ "$REQUIRE_RUSTDESK" -eq 1 ]] && ! should_skip 38-rustdesk; then
+  RD="$BUNDLE/rustdesk"
+  if [[ ! -d "$RD" ]]; then
+    missing_dirs+=("rustdesk/ (2026-11 之前的捆绑没有)")
+  else
+    _fn="$(tr -d '[:space:]' < "$RD/deb.name" 2>/dev/null || true)"
+    _ver="$(tr -d '[:space:]' < "$RD/version" 2>/dev/null || true)"
+    _want="$(tr -d '[:space:]' < "$RD/sha256" 2>/dev/null || true)"
+    if [[ -z "$_fn" || ! -f "$RD/$_fn" ]]; then
+      missing_dirs+=("rustdesk/deb")
+    elif [[ ! "$_want" =~ ^[0-9a-f]{64}$ ]]; then
+      jp_errs+=("rustdesk/sha256 不是 64 位 hex")
+    elif [[ "$(sha256sum "$RD/$_fn" | awk '{print $1}')" != "$_want" ]]; then
+      jp_errs+=("rustdesk/$_fn sha256 与 rustdesk/sha256 不符")
+    fi
+    if [[ -n "$PIN_RUSTDESK" && "$_ver" != "$PIN_RUSTDESK" ]]; then
+      jp_errs+=("rustdesk/version=${_ver:-?} != --pin-rustdesk $PIN_RUSTDESK")
+    fi
+    if ! awk '/^Package: / && $2=="rustdesk" { f=1; exit } END { exit f?0:1 }' "$PACKAGES_FILE"; then
+      missing+=("rustdesk")
     fi
   fi
 fi
