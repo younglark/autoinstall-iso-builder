@@ -6,7 +6,7 @@
 #      x11vnc xauth (+ 测试用 xvfb procps) 两次, 第二次必须「复用 N, 新下载 0」
 #   2) --network none 的新容器里只用这份离线池安装 x11vnc, 跑 software/36-x11vnc-xorg.sh
 #   3) 两个改名为 Xorg 的 Xvfb (:0 = 登录界面, :1 = 用户会话) 验证 aib-x11vnc-follow
-#      先接 :0, :0 退出后自动改接 :1
+#      先接 :0, :0 退出后自动改接 :1。和真机 GDM 一样用 -displayfd 起、Xauthority 不带显示号
 #
 #   bash test/container-x11vnc-reuse.sh [--mirror URL] [--release noble]
 # =============================================================================
@@ -98,14 +98,30 @@ grep -qx 'WaylandEnable=false' /etc/gdm3/custom.conf || { echo "FAIL gdm"; exit 
 grep -q 'systemctl enable x11vnc.service' /tmp/shim/calls || { echo "FAIL enable"; exit 1; }
 echo "OK install"
 
-# 伪造 GDM: 登录界面 :0 与用户会话 :1, 进程名都叫 Xorg (follower 按 Xorg 进程找 -auth)
+grep -q -- '-noshm' /usr/local/sbin/aib-x11vnc-follow || { echo "FAIL follower lacks -noshm"; exit 1; }
+
+# 伪造 GDM: 登录界面 :0 与用户会话 :1, 进程名都叫 Xorg (follower 按 Xorg 进程找 -auth)。
+# 与真机一致: Xorg 用 -displayfd 起 (命令行没有 :N), Xauthority 只有不带显示号的条目
+# (<host>/unix: 与 #ffff#<host>#:), xauth list 里拿不到显示号。
+mk_gdm_xauth() { # file: FamilyLocal + FamilyWild, number 为空, 随机 cookie
+  local h c; h="$(hostname)"; c="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  be16() { printf '%b' "\\$(printf '%03o' $(( $1 >> 8 )))\\$(printf '%03o' $(( $1 & 255 )))"; }
+  hex2bin() { local s="$1" i; for ((i = 0; i < ${#s}; i += 2)); do printf '%b' "\\$(printf '%03o' "0x${s:i:2}")"; done; }
+  {
+    be16 256;   be16 ${#h}; printf '%s' "$h"; be16 0; be16 18; printf 'MIT-MAGIC-COOKIE-1'; be16 16; hex2bin "$c"
+    be16 65535; be16 ${#h}; printf '%s' "$h"; be16 0; be16 18; printf 'MIT-MAGIC-COOKIE-1'; be16 16; hex2bin "$c"
+  } > "$1"
+}
 mkdir -p /tmp/xbin /run/user/120/gdm /run/user/1000/gdm
 cp "$(command -v Xvfb)" /tmp/xbin/Xorg
-xauth -f /run/user/120/gdm/Xauthority add :0 . "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-xauth -f /run/user/1000/gdm/Xauthority add :1 . "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-/tmp/xbin/Xorg :0 -auth /run/user/120/gdm/Xauthority -nolisten tcp -screen 0 800x600x24 >/dev/null 2>&1 &
+mk_gdm_xauth /run/user/120/gdm/Xauthority
+mk_gdm_xauth /run/user/1000/gdm/Xauthority
+[ "$(xauth -f /run/user/1000/gdm/Xauthority list | wc -l)" = 2 ] \
+  && ! xauth -f /run/user/1000/gdm/Xauthority list | grep -q ':[0-9]' || { echo "FAIL xauth fixture"; exit 1; }
+/tmp/xbin/Xorg -displayfd 3 -auth /run/user/120/gdm/Xauthority -nolisten tcp -screen 0 800x600x24 3>/tmp/dfd0 >/dev/null 2>&1 &
 X0=$!
 sleep 2
+[ "$(tr -dc 0-9 < /tmp/dfd0)" = 0 ] || { echo "FAIL greeter displayfd != 0"; exit 1; }
 X11VNC_POLL=1 X11VNC_LOG=/tmp/x11vnc.log /usr/local/sbin/aib-x11vnc-follow > /tmp/follow.log 2>&1 &
 FP=$!
 on_display() { # 等待 x11vnc 进程接到指定 display
@@ -121,8 +137,9 @@ for _ in $(seq 1 10); do listening && break; sleep 1; done
 listening || { echo "FAIL :0 not listening"; tail /tmp/x11vnc.log; exit 1; }
 echo "OK greeter :0"
 # 用户登录: 起 :1, 登录界面退出
-/tmp/xbin/Xorg :1 -auth /run/user/1000/gdm/Xauthority -nolisten tcp -screen 0 800x600x24 >/dev/null 2>&1 &
+/tmp/xbin/Xorg -displayfd 3 -auth /run/user/1000/gdm/Xauthority -nolisten tcp -screen 0 800x600x24 3>/tmp/dfd1 >/dev/null 2>&1 &
 sleep 1
+[ "$(tr -dc 0-9 < /tmp/dfd1)" = 1 ] || { echo "FAIL session displayfd != 1"; exit 1; }
 kill "$X0"
 on_display :1 || { echo "FAIL not on :1"; cat /tmp/follow.log; tail /tmp/x11vnc.log; exit 1; }
 for _ in $(seq 1 10); do listening && break; sleep 1; done
