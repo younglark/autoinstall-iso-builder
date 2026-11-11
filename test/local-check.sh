@@ -1347,123 +1347,206 @@ else
   fail "38-rustdesk skip paths: $(cat "$tmp/rd-srv.log" "$tmp/rd-x.log" "$tmp/rd-a.log" 2>/dev/null | tail -3)"
 fi
 ( umask 077; printf 'RUSTDESK_PASSWORD=%q\n' 'S3cret#rd' > "$rr/prov/rustdesk.secret" )
-t="$rr/t1"
-if EDITION=desktop REMOTE_DESKTOP=rustdesk AIB_TARGET_ROOT="$t" AIB_SKIP_PKG=1 bash "$rr/prov/38-rustdesk.sh" >"$tmp/rd-on.log" 2>&1; then
+# 目标根: passwd 里有 root / ubuntu (1000) / gdm (120), 家目录都在 (与 Ubuntu Desktop 一致)
+mkroot() {
+  mkdir -p "$1/etc" "$1/root" "$1/home/ubuntu" "$1/var/lib/gdm3"
+  printf '%s\n' 'root:x:0:0:root:/root:/bin/bash' 'ubuntu:x:1000:1000:ubuntu:/home/ubuntu:/bin/bash' \
+    'gdm:x:120:120:Gnome Display Manager:/var/lib/gdm3:/bin/false' > "$1/etc/passwd"
+}
+t="$rr/t1"; mkroot "$t"
+if EDITION=desktop REMOTE_DESKTOP=rustdesk TARGET_USER=ubuntu AIB_TARGET_ROOT="$t" AIB_SKIP_PKG=1 bash "$rr/prov/38-rustdesk.sh" >"$tmp/rd-on.log" 2>&1; then
   u="$t/etc/systemd/system/aib-rustdesk-setup.service"; su="$t/usr/local/sbin/aib-rustdesk-setup"
+  ps_="$t/usr/local/sbin/aib-rustdesk-preseed"; di="$t/etc/systemd/system/rustdesk.service.d/aib-preseed.conf"
+  _toml_ok=1
+  for h in root home/ubuntu var/lib/gdm3; do
+    f="$t/$h/.config/rustdesk/RustDesk2.toml"
+    [[ -f "$f" && "$(stat -c %a "$f")" == 600 && "$(grep -c '^\[options\]' "$f")" == 1 ]] || _toml_ok=0
+    for kv in "direct-server = 'Y'" "direct-access-port = '21118'" "custom-rendezvous-server = '127.0.0.1'" \
+              "relay-server = '127.0.0.1'" "api-server = 'http://127.0.0.1'" \
+              "verification-method = 'use-permanent-password'" "approve-mode = 'password'"; do
+      grep -qxF "$kv" "$f" || _toml_ok=0
+    done
+    ! grep -qi 'password = \|S3cret' "$f" || _toml_ok=0
+  done
   if [[ ! -e "$rr/prov/rustdesk.secret" ]] && ! grep -q 'S3cret' "$tmp/rd-on.log" \
      && [[ "$(stat -c %a "$t/etc/aib/rustdesk.secret")" == 600 && ! -e "$t/root/rustdesk-password" ]] \
      && ( # shellcheck disable=SC1091
           . "$t/etc/aib/rustdesk.secret"; [[ "$RUSTDESK_PASSWORD" == 'S3cret#rd' ]] ) \
      && grep -qx 'direct-server Y' "$t/etc/aib/rustdesk.options" \
-     && grep -qx 'verification-method use-permanent-password' "$t/etc/aib/rustdesk.options" \
-     && grep -qx 'approve-mode password' "$t/etc/aib/rustdesk.options" \
-     && grep -qx 'direct-access-port 21118' "$t/etc/aib/rustdesk.options" \
      && grep -qx 'custom-rendezvous-server 127.0.0.1' "$t/etc/aib/rustdesk.options" \
-     && grep -qx 'relay-server 127.0.0.1' "$t/etc/aib/rustdesk.options" \
      && grep -qx 'api-server http://127.0.0.1' "$t/etc/aib/rustdesk.options" \
      && ! grep -qi 'rustdesk\.com' "$t/etc/aib/rustdesk.options" \
-     && grep -qx '\[options\]' "$t/root/.config/rustdesk/RustDesk2.toml" \
-     && grep -qx "direct-server = 'Y'" "$t/root/.config/rustdesk/RustDesk2.toml" \
-     && grep -qx "direct-access-port = '21118'" "$t/root/.config/rustdesk/RustDesk2.toml" \
-     && grep -qx "custom-rendezvous-server = '127.0.0.1'" "$t/root/.config/rustdesk/RustDesk2.toml" \
-     && grep -qx "relay-server = '127.0.0.1'" "$t/root/.config/rustdesk/RustDesk2.toml" \
-     && grep -qx "api-server = 'http://127.0.0.1'" "$t/root/.config/rustdesk/RustDesk2.toml" \
+     && [[ "$(grep -v '^#' "$t/etc/aib/rustdesk.accounts" | tr '\n' ' ')" == "root ubuntu gdm gdm-greeter " ]] \
+     && [[ "$_toml_ok" == 1 ]] && [[ "$(stat -c %a "$t/var/lib/gdm3/.config/rustdesk")" == 700 ]] \
+     && grep -q '已写入 /var/lib/gdm3/.config/rustdesk/RustDesk2.toml' "$tmp/rd-on.log" \
      && grep -q '只允许局域网 IP 直连' "$tmp/rd-on.log" \
-     && ! grep -qi 'password = ' "$t/root/.config/rustdesk/RustDesk2.toml" \
+     && grep -qx 'ExecStartPre=-/usr/local/sbin/aib-rustdesk-preseed --if-not-done' "$di" && [[ -x "$ps_" ]] \
      && grep -q '^After=rustdesk.service' "$u" && grep -q '^Wants=rustdesk.service' "$u" \
-     && grep -qx 'ConditionPathExists=!/var/lib/aib/rustdesk-setup.done' "$u" && grep -q '^Restart=on-failure' "$u" \
+     && grep -qx 'ConditionPathExists=!/var/lib/aib/rustdesk-setup.done' "$u" \
+     && grep -qx 'ConditionPathExists=!/var/lib/aib/rustdesk-setup.failed' "$u" \
+     && grep -q '^Restart=on-failure' "$u" && grep -qx 'RestartPreventExitStatus=2' "$u" && grep -qx 'StartLimitIntervalSec=0' "$u" \
      && grep -q '^WantedBy=multi-user.target' "$u" && [[ -x "$su" ]] \
-     && ! grep -rq 'S3cret' "$t/etc/systemd" "$t/usr" "$t/etc/aib/rustdesk.options" "$t/root/.config"; then
-    pass "38-rustdesk: secret → /etc/aib (0600), LAN-only options (direct 21118, rendezvous/relay/api → 127.0.0.1) + RustDesk2.toml preset, first-boot oneshot unit"
+     && ! grep -v '^[[:space:]]*#' "$su" | grep -q 'RustDesk-0' \
+     && ! grep -rq 'S3cret' "$t/etc/systemd" "$t/usr" "$t/etc/aib/rustdesk.options" "$t/root/.config" "$t/home" "$t/var"; then
+    pass "38-rustdesk: secret → /etc/aib (0600); LAN-only options preseeded into RustDesk2.toml [options] of root + ubuntu + gdm (0600); ExecStartPre drop-in; bounded oneshot unit"
   else
     fail "38-rustdesk files: $(tail -5 "$tmp/rd-on.log")"
   fi
   if command -v shellcheck >/dev/null; then
-    if shellcheck "$su"; then pass "aib-rustdesk-setup shellcheck"; else fail "aib-rustdesk-setup shellcheck"; fi
+    if shellcheck "$su" "$ps_"; then pass "aib-rustdesk-setup / aib-rustdesk-preseed shellcheck"; else fail "aib-rustdesk-setup / preseed shellcheck"; fi
   fi
-  # 首次开机脚本: 用假 rustdesk / systemctl / pgrep 验证就绪等待 + IPC 设置流程
-  # (选项读回确认, 密码 Done! 后删除明文, 打标记; 不调用 --get-id, 不记录 ID, 不泄露密码)
-  fr="$rr/fake"; mkdir -p "$fr/opt" "$fr/bin" "$fr/conf"
+  # 预置合并: 保留其它键 / 其它表, 替换旧值不重复; 家目录缺失的账号跳过, 之后 (ExecStartPre) 补写; 完成后 --if-not-done 不再动
+  f="$t/home/ubuntu/.config/rustdesk/RustDesk2.toml"
+  printf "%s\n" "rendezvous_server = 'x:21116'" "" "[options]" "av1-test = 'Y'" "custom-rendezvous-server = 'rs-old.example'" \
+    "direct-server = 'N'" "" "[ui]" "theme = 'dark'" > "$f"
+  rm -rf "$t/var/lib/gdm3"
+  AIB_TARGET_ROOT="$t" "$ps_" >"$tmp/rd-pre.log" 2>&1; _rc1=$?
+  mkdir -p "$t/var/lib/gdm3"
+  AIB_TARGET_ROOT="$t" "$ps_" --if-not-done >>"$tmp/rd-pre.log" 2>&1; _rc2=$?
+  mkdir -p "$t/var/lib/aib"; date > "$t/var/lib/aib/rustdesk-setup.done"
+  echo "direct-server = 'N'" >> "$t/root/.config/rustdesk/RustDesk2.toml"
+  AIB_TARGET_ROOT="$t" "$ps_" --if-not-done >>"$tmp/rd-pre.log" 2>&1; _rc3=$?
+  rm -f "$t/var/lib/aib/rustdesk-setup.done"
+  if [[ "$_rc1$_rc2$_rc3" == 000 ]] && grep -qxF "rendezvous_server = 'x:21116'" "$f" && grep -qxF "av1-test = 'Y'" "$f" \
+     && grep -qxF "theme = 'dark'" "$f" && grep -qx '\[ui\]' "$f" && [[ "$(grep -c '^custom-rendezvous-server' "$f")" == 1 ]] \
+     && grep -qxF "custom-rendezvous-server = '127.0.0.1'" "$f" && [[ "$(grep -c '^direct-server' "$f")" == 1 ]] \
+     && grep -qxF "direct-server = 'Y'" "$f" && ! grep -q 'rs-old' "$f" \
+     && [[ "$(sed -n '/^\[ui\]/,$p' "$f" | grep -c 'custom-rendezvous')" == 0 ]] \
+     && grep -q '跳过 gdm: 家目录 /var/lib/gdm3 不存在' "$tmp/rd-pre.log" \
+     && grep -qxF "direct-server = 'Y'" "$t/var/lib/gdm3/.config/rustdesk/RustDesk2.toml" \
+     && grep -qxF "direct-server = 'N'" "$t/root/.config/rustdesk/RustDesk2.toml"; then
+    pass "aib-rustdesk-preseed: merges [options] in place (other keys/tables kept, no duplicates), skips missing home then fills it at service start, no-op after setup done"
+  else
+    fail "aib-rustdesk-preseed merge (rc=$_rc1$_rc2$_rc3): $(cat "$tmp/rd-pre.log") $(cat "$f")"
+  fi
+
+  # 首次开机脚本: 假 rustdesk / systemctl / ps, 按 RustDesk 1.5.1 真实布局造 socket:
+  #   /tmp/RustDesk-service/ipc_service (root 服务) + /tmp/RustDesk-<uid>/ipc (--server 的会话用户), 没有 /tmp/RustDesk-0
+  fr="$rr/fake"; mkdir -p "$fr/opt" "$fr/bin"
   cat > "$fr/rustdesk" <<STUB
 #!/bin/bash
 case "\$1" in
   --get-id) touch "$fr/get-id-called"; echo 123456789 ;;
-  --option) if [ \$# -eq 3 ]; then printf '%s' "\$3" > "$fr/opt/\$2"; else cat "$fr/opt/\$2" 2>/dev/null; echo; fi ;;
+  --option)
+    if [ \$# -eq 3 ]; then [ "\$2" = "\${STUB_OPT_STUCK:-}" ] || printf '%s' "\$3" > "$fr/opt/\$2"
+    else cat "$fr/opt/\$2" 2>/dev/null; echo; fi ;;
   --password)
     n=\$(( \$(cat "$fr/pwn" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "$fr/pwn"
     if [ -n "\${STUB_PW_FAIL:-}" ]; then echo "Failed to connect for \$2"
-    elif [ "\$n" -le "\${STUB_PW_FAIL_FIRST:-0}" ]; then echo "No such file or directory (os error 2)"
+    elif [ "\$n" -le "\${STUB_PW_FAIL_FIRST:-0}" ]; then echo "No --server process found for user main IPC"
     else printf '%s' "\$2" > "$fr/pw"; echo "Done!"; fi ;;
 esac
 STUB
   printf '#!/bin/bash\n[ -e "%s/svc-active" ]\n' "$fr" > "$fr/bin/systemctl"
-  printf '#!/bin/bash\n[ -e "%s/proc-up" ]\n' "$fr" > "$fr/bin/pgrep"
-  chmod +x "$fr/rustdesk" "$fr/bin/systemctl" "$fr/bin/pgrep"
-  mksock() { python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"; }
-  cp "$t/etc/aib/rustdesk.secret" "$fr/secret"
+  printf '#!/bin/bash\ncat "%s/ps.out" 2>/dev/null\n' "$fr" > "$fr/bin/ps"
+  chmod +x "$fr/rustdesk" "$fr/bin/systemctl" "$fr/bin/ps"
+  mksock() { mkdir -p "$(dirname "$1")"; python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"; }
+  # fixture: <活动 --server uid>|none; 每次重置计数 / socket / 选项 (预置已生效 = 选项值已在)
+  fixture() {
+    rm -rf "${fr:?}/tmp" "${fr:?}/run" "${fr:?}/lib" "${fr:?}/opt" "$fr/pwn" "$fr/pw" "$fr/get-id-called"; mkdir -p "$fr/opt" "$fr/lib"
+    cp "$t/etc/aib/rustdesk.secret" "$fr/secret"
+    while read -r k v; do case "$k" in ''|\#*|\!*) ;; *) printf '%s' "$v" > "$fr/opt/$k" ;; esac; done < "$t/etc/aib/rustdesk.options"
+    mksock "$fr/tmp/RustDesk-service/ipc_service"
+    {
+      echo "    0 /usr/share/rustdesk/rustdesk --service"
+      if [ "$1" != none ]; then
+        echo "    0 sudo -E XDG_RUNTIME_DIR=/run/user/$1 -u someone /usr/share/rustdesk/rustdesk --server"
+        echo " $1 /usr/share/rustdesk/rustdesk --server"
+      fi
+    } > "$fr/ps.out"
+    touch "$fr/svc-active"
+  }
   run_setup() { PATH="$fr/bin:$PATH" AIB_RUSTDESK_SECRET="$fr/secret" AIB_RUSTDESK_OPTIONS="$t/etc/aib/rustdesk.options" \
-      AIB_RUSTDESK_STAMP="$fr/done" AIB_RUSTDESK_CONF_DIR="$fr/conf" AIB_RUSTDESK_IPC="$fr/ipc" \
-      AIB_RUSTDESK_POLL=1 RUSTDESK_BIN="$fr/rustdesk" bash "$su"; }
-  # 1) 服务 / 进程 / IPC 都没就绪: 超时退出, 不碰密码 (不会出现「设置固定密码失败」假失败)
-  if AIB_RUSTDESK_READY_TIMEOUT=2 run_setup >"$tmp/rd-setup-nr.log" 2>&1; then
-    fail "aib-rustdesk-setup should wait/fail when RustDesk not ready"
-  elif [[ -f "$fr/secret" && ! -e "$fr/done" && ! -e "$fr/pwn" ]] && grep -q '等待 RustDesk 就绪超时' "$tmp/rd-setup-nr.log" \
-       && grep -q 'IPC socket' "$tmp/rd-setup-nr.log" && grep -q 'rustdesk.service 未 active' "$tmp/rd-setup-nr.log" \
-       && ! grep -q '设置固定密码失败' "$tmp/rd-setup-nr.log"; then
-    pass "aib-rustdesk-setup: waits for service/process/config/IPC (timeout), password untouched"
+      AIB_RUSTDESK_STAMP="$fr/lib/done" AIB_RUSTDESK_FAILED="$fr/lib/failed" AIB_RUSTDESK_BOOTS_FILE="$fr/lib/boots" \
+      AIB_RUSTDESK_RUN_DIR="$fr/run" AIB_RUSTDESK_TMP="$fr/tmp" AIB_RUSTDESK_POLL=1 RUSTDESK_BIN="$fr/rustdesk" bash "$su"; }
+  # 1) 首次开机只有 GDM 登录界面: --server 是 gdm (uid 120), 只有 /tmp/RustDesk-120/ipc → 成功
+  fixture 120; mksock "$fr/tmp/RustDesk-120/ipc"
+  if run_setup >"$tmp/rd-s120.log" 2>&1 && [[ ! -e "$fr/secret" && -s "$fr/lib/done" && ! -e "$fr/tmp/RustDesk-0" ]] \
+     && [[ "$(cat "$fr/pw")" == 'S3cret#rd' && "$(cat "$fr/pwn")" == 1 ]] \
+     && grep -q -- "--server uid=120, IPC $fr/tmp/RustDesk-120/ipc" "$tmp/rd-s120.log" \
+     && [[ ! -e "$fr/get-id-called" ]] && ! grep -q 'S3cret\|123456789' "$tmp/rd-s120.log" \
+     && ! grep -q -- '--get-id' <(grep -v '^[[:space:]]*#' "$su") && grep -q '只允许局域网 IP 直连' "$tmp/rd-s120.log"; then
+    pass "aib-rustdesk-setup: gdm-only first boot (only /tmp/RustDesk-120/ipc, no RustDesk-0) → password set via --server uid 120; no --get-id / ID / password in log"
   else
-    fail "aib-rustdesk-setup not-ready path: $(cat "$tmp/rd-setup-nr.log")"
+    fail "aib-rustdesk-setup gdm-only: $(cat "$tmp/rd-s120.log")"
   fi
-  # 2) 等待中途就绪 (IPC socket 晚 2 秒出现) → 继续
-  touch "$fr/svc-active" "$fr/proc-up"
-  ( sleep 2; mksock "$fr/ipc" ) &
+  # 2) 已登录用户: 只有 /tmp/RustDesk-1000/ipc, socket 晚 2 秒出现, 前两次 --password 报错 → 同一次运行内成功
+  fixture 1000
+  ( sleep 2; mksock "$fr/tmp/RustDesk-1000/ipc" ) &
   _sockpid=$!
-  _rc=0
-  STUB_PW_FAIL=1 AIB_RUSTDESK_PW_TRIES=2 AIB_RUSTDESK_READY_TIMEOUT=20 run_setup >"$tmp/rd-setup-fail.log" 2>&1 || _rc=$?
+  _rc=0; STUB_PW_FAIL_FIRST=2 AIB_RUSTDESK_READY_TIMEOUT=20 run_setup >"$tmp/rd-s1000.log" 2>&1 || _rc=$?
   wait "$_sockpid" 2>/dev/null || true
-  if [[ "$_rc" -ne 0 && -f "$fr/secret" && ! -e "$fr/done" && "$(cat "$fr/pwn")" == 2 ]] \
-     && grep -q 'RustDesk 服务就绪' "$tmp/rd-setup-fail.log" && grep -q '设置固定密码失败 (2 次)' "$tmp/rd-setup-fail.log" \
-     && grep -qF 'Failed to connect for ***' "$tmp/rd-setup-fail.log" && ! grep -q 'S3cret' "$tmp/rd-setup-fail.log"; then
-    pass "aib-rustdesk-setup: waits until IPC appears; real password failure retried, keeps secret, password masked in log"
+  if [[ "$_rc" == 0 && ! -e "$fr/secret" && -s "$fr/lib/done" && "$(cat "$fr/pwn")" == 3 ]] \
+     && grep -q -- "--server uid=1000, IPC $fr/tmp/RustDesk-1000/ipc" "$tmp/rd-s1000.log" \
+     && grep -q 'RustDesk 就绪 (等待 [1-9]' "$tmp/rd-s1000.log" \
+     && grep -q 'rustdesk --password 第 2/5 次未成功: No --server process found' "$tmp/rd-s1000.log"; then
+    pass "aib-rustdesk-setup: logged-in user (only /tmp/RustDesk-1000/ipc) waits for the late socket; transient --password errors retried in-run"
   else
-    fail "aib-rustdesk-setup failure path (rc=$_rc): $(cat "$tmp/rd-setup-fail.log")"
+    fail "aib-rustdesk-setup user 1000 (rc=$_rc): $(cat "$tmp/rd-s1000.log")"
   fi
-  # 3) 前两次 IPC 报 No such file or directory, 第三次 Done! → 同一次运行内成功; 不调 --get-id, 日志无 ID / 密码
-  rm -f "$fr/pwn"
-  if STUB_PW_FAIL_FIRST=2 run_setup >"$tmp/rd-setup.log" 2>&1 && [[ ! -e "$fr/secret" && -s "$fr/done" ]] \
-     && [[ "$(cat "$fr/pw")" == 'S3cret#rd' && "$(cat "$fr/pwn")" == 3 ]] && [[ "$(cat "$fr/opt/direct-server")" == Y ]] \
-     && [[ "$(cat "$fr/opt/direct-access-port")" == 21118 ]] \
-     && [[ "$(cat "$fr/opt/custom-rendezvous-server")" == 127.0.0.1 && "$(cat "$fr/opt/relay-server")" == 127.0.0.1 ]] \
-     && [[ "$(cat "$fr/opt/api-server")" == http://127.0.0.1 ]] \
-     && [[ "$(cat "$fr/opt/verification-method")" == use-permanent-password ]] && [[ "$(cat "$fr/opt/approve-mode")" == password ]] \
-     && [[ ! -e "$fr/get-id-called" ]] && ! grep -q 'S3cret' "$tmp/rd-setup.log" \
-     && ! grep -q '123456789' "$tmp/rd-setup.log" "$fr/done" && ! grep -qi 'ID [0-9]' "$tmp/rd-setup.log" \
-     && ! grep -q -- '--get-id' <(grep -v '^#' "$su") \
-     && grep -q '只允许局域网 IP 直连' "$tmp/rd-setup.log" && ! grep -q '设置固定密码失败' "$tmp/rd-setup.log"; then
-    pass "aib-rustdesk-setup: transient IPC errors retried in-run; LAN-only options applied + verified; no --get-id, no ID/password in log"
+  # 3) 没有 --server (无图形会话) 时, 即使有残留 /tmp/RustDesk-0/ipc 也不算就绪; 不碰密码, 写明原因, exit 1 交给 systemd 重试
+  fixture none; mksock "$fr/tmp/RustDesk-0/ipc"
+  _rc=0; AIB_RUSTDESK_READY_TIMEOUT=2 run_setup >"$tmp/rd-snr.log" 2>&1 || _rc=$?
+  if [[ "$_rc" == 1 && -f "$fr/secret" && ! -e "$fr/lib/done" && ! -e "$fr/pwn" ]] \
+     && grep -q '第 1/6 次运行失败 (第 1/3 次开机): 等待 RustDesk 就绪超时 (2s): 没有 rustdesk --server 进程' "$tmp/rd-snr.log" \
+     && grep -q '30 秒后由 systemd 重试' "$tmp/rd-snr.log"; then
+    pass "aib-rustdesk-setup: no --server (stale RustDesk-0 ignored) → not ready, reason logged, exit 1, password untouched"
   else
-    fail "aib-rustdesk-setup: $(cat "$tmp/rd-setup.log")"
+    fail "aib-rustdesk-setup not-ready (rc=$_rc): $(cat "$tmp/rd-snr.log")"
+  fi
+  # 4) 重试上限: 每次开机 MAX_RUNS 次后 exit 2 (RestartPreventExitStatus); MAX_BOOTS 次开机后彻底放弃: 删明文, 写 failed
+  fixture 1000; mksock "$fr/tmp/RustDesk-1000/ipc"
+  lim() { local r=0; STUB_PW_FAIL=1 AIB_RUSTDESK_PW_TRIES=2 AIB_RUSTDESK_MAX_RUNS=2 AIB_RUSTDESK_MAX_BOOTS=2 run_setup >>"$tmp/rd-slim.log" 2>&1 || r=$?; printf '%s' "$r"; }
+  : > "$tmp/rd-slim.log"
+  _seq="$(lim)$(lim)"; _sec1=$([[ -f "$fr/secret" ]] && echo kept)
+  rm -rf "$fr/run"   # 重启: /run 清空
+  _seq="$_seq$(lim)$(lim)"
+  if [[ "$_seq" == 1212 && "$_sec1" == kept && ! -e "$fr/secret" && ! -e "$fr/lib/done" && "$(cat "$fr/pwn")" == 8 ]] \
+     && grep -q '本次开机重试次数用完, 停止重试' "$tmp/rd-slim.log" \
+     && grep -q '失败且不再重试 (连续 2 次开机): 设置固定密码失败 (2 次): Failed to connect for \*\*\*' "$tmp/rd-slim.log" \
+     && grep -q '设置固定密码失败' "$fr/lib/failed" && ! grep -q 'S3cret' "$tmp/rd-slim.log" "$fr/lib/failed"; then
+    pass "aib-rustdesk-setup: bounded retries (exit 1,2 per boot; give up after N boots: secret deleted, reason in .failed), password masked"
+  else
+    fail "aib-rustdesk-setup retry limit (seq=$_seq): $(cat "$tmp/rd-slim.log")"
+  fi
+  # 5) 选项读回兜底: 缺的补设; 补设无效 → 写明哪个键, 不打完成标记
+  fixture 1000; mksock "$fr/tmp/RustDesk-1000/ipc"; rm -f "$fr/opt/api-server"
+  _ok1=0; run_setup >"$tmp/rd-sopt.log" 2>&1 && _ok1=1
+  fixture 1000; mksock "$fr/tmp/RustDesk-1000/ipc"; rm -f "$fr/opt/relay-server"
+  _rc=0; STUB_OPT_STUCK=relay-server run_setup >>"$tmp/rd-sopt.log" 2>&1 || _rc=$?
+  if [[ "$_ok1" == 1 && "$_rc" == 1 && ! -e "$fr/lib/done" ]] \
+     && grep -q "option api-server 读回 '', 补设为 http://127.0.0.1" "$tmp/rd-sopt.log" \
+     && grep -q "选项未生效: relay-server(读回 '')" "$tmp/rd-sopt.log"; then
+    pass "aib-rustdesk-setup: option readback fallback sets missing keys; stuck key → explicit failure"
+  else
+    fail "aib-rustdesk-setup options readback: $(cat "$tmp/rd-sopt.log")"
   fi
 else
   fail "38-rustdesk run: $(tail -5 "$tmp/rd-on.log")"
 fi
-# 自建服务器 + 只有哈希 (随机密码)
-t="$rr/t2"
-if EDITION=desktop REMOTE_DESKTOP=rustdesk RUSTDESK_SERVER=rd.example.com:21116 AIB_TARGET_ROOT="$t" AIB_SKIP_PKG=1 bash software/38-rustdesk.sh >"$tmp/rd-srv2.log" 2>&1 \
+# 自建服务器 + 只有哈希 (随机密码); --rustdesk-allow-id: 删掉 rendezvous / relay / api 三项 (含已有的 127.0.0.1)
+t="$rr/t2"; mkroot "$t"; mkroot "$rr/t5"
+mkdir -p "$rr/t5/home/ubuntu/.config/rustdesk"
+printf "%s\n" "[options]" "custom-rendezvous-server = '127.0.0.1'" "api-server = 'http://127.0.0.1'" "av1-test = 'Y'" > "$rr/t5/home/ubuntu/.config/rustdesk/RustDesk2.toml"
+if EDITION=desktop REMOTE_DESKTOP=rustdesk RUSTDESK_SERVER=rd.example.com:21116 TARGET_USER=ubuntu AIB_TARGET_ROOT="$t" AIB_SKIP_PKG=1 bash software/38-rustdesk.sh >"$tmp/rd-srv2.log" 2>&1 \
    && grep -qx 'custom-rendezvous-server rd.example.com:21116' "$t/etc/aib/rustdesk.options" \
    && grep -qx 'relay-server rd.example.com:21116' "$t/etc/aib/rustdesk.options" \
-   && ! grep -q '127.0.0.1' "$t/etc/aib/rustdesk.options" \
-   && EDITION=desktop REMOTE_DESKTOP=rustdesk RUSTDESK_ALLOW_ID=1 AIB_TARGET_ROOT="$rr/t5" AIB_SKIP_PKG=1 bash software/38-rustdesk.sh >"$tmp/rd-id.log" 2>&1 \
-   && grep -qx 'direct-server Y' "$rr/t5/etc/aib/rustdesk.options" \
-   && ! grep -q 'rendezvous\|relay\|api-server' "$rr/t5/etc/aib/rustdesk.options" "$rr/t5/root/.config/rustdesk/RustDesk2.toml" \
+   && ! grep -q '127.0.0.1' "$t/etc/aib/rustdesk.options" "$t/home/ubuntu/.config/rustdesk/RustDesk2.toml" \
+   && grep -qxF "custom-rendezvous-server = 'rd.example.com:21116'" "$t/var/lib/gdm3/.config/rustdesk/RustDesk2.toml" \
+   && grep -qxF "relay-server = 'rd.example.com:21116'" "$t/home/ubuntu/.config/rustdesk/RustDesk2.toml" \
+   && EDITION=desktop REMOTE_DESKTOP=rustdesk RUSTDESK_ALLOW_ID=1 TARGET_USER=ubuntu AIB_TARGET_ROOT="$rr/t5" AIB_SKIP_PKG=1 bash software/38-rustdesk.sh >"$tmp/rd-id.log" 2>&1 \
+   && grep -qx 'direct-server Y' "$rr/t5/etc/aib/rustdesk.options" && grep -qx '!custom-rendezvous-server' "$rr/t5/etc/aib/rustdesk.options" \
+   && ! grep -q 'rendezvous\|relay\|api-server' "$rr/t5/root/.config/rustdesk/RustDesk2.toml" "$rr/t5/home/ubuntu/.config/rustdesk/RustDesk2.toml" "$rr/t5/var/lib/gdm3/.config/rustdesk/RustDesk2.toml" \
+   && grep -qxF "av1-test = 'Y'" "$rr/t5/home/ubuntu/.config/rustdesk/RustDesk2.toml" \
+   && grep -qxF "direct-server = 'Y'" "$rr/t5/home/ubuntu/.config/rustdesk/RustDesk2.toml" \
    && grep -q '保留公共 ID 服务器' "$tmp/rd-id.log" \
    && [[ "$(stat -c %a "$t/root/rustdesk-password")" == 600 && "$(wc -c < "$t/root/rustdesk-password")" -eq 13 ]] \
    && ( # shellcheck disable=SC1091
         . "$t/etc/aib/rustdesk.secret"; [[ "$RUSTDESK_PASSWORD" == "$(cat "$t/root/rustdesk-password")" ]] ) \
    && ! EDITION=desktop REMOTE_DESKTOP=rustdesk RUSTDESK_SERVER='x;rm' AIB_TARGET_ROOT="$rr/t3" AIB_SKIP_PKG=1 bash software/38-rustdesk.sh >/dev/null 2>&1; then
-  pass "38-rustdesk: --rustdesk-server options, RUSTDESK_ALLOW_ID=1 keeps public ID, random password when no plaintext, rejects bad server"
+  pass "38-rustdesk: --rustdesk-server preseeded for all accounts, RUSTDESK_ALLOW_ID=1 removes rendezvous/relay/api keys, random password when no plaintext, rejects bad server"
 else
-  fail "38-rustdesk server / random password: $(tail -3 "$tmp/rd-srv2.log")"
+  fail "38-rustdesk server / allow-id / random password: $(tail -3 "$tmp/rd-srv2.log" "$tmp/rd-id.log")"
 fi
 # 36 钩子: RustDesk 也关合盖 / 空闲挂起, 但不装 x11vnc
 t="$rr/t4"

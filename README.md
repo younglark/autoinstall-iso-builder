@@ -155,23 +155,22 @@ Desktop **默认**关闭 Wayland 并预装 [RustDesk](https://github.com/rustdes
 **装机时做了什么**
 
 - 从官方 GitHub Release 装 `rustdesk-<版>-x86_64.deb`（arm64 是 `aarch64`），sha256 与写死在 `tools/rustdesk-release.sh` 里的官方值比对；启用官方的 `rustdesk.service`（root 运行 `rustdesk --service`）。拉 GitHub 慢的话可以设 `RUSTDESK_DL_BASE` 指向同结构的镜像（sha256 仍按官方值校验），或者用全离线捆绑。
-- RustDesk 1.5 的固定密码是加盐哈希存储的，只能通过运行中的服务设置，chroot 里做不到。所以装机时只把明文放进 `/etc/aib/rustdesk.secret`（root 0600），选项写进 `/etc/aib/rustdesk.options`，并预置 `/root/.config/rustdesk/RustDesk2.toml` 的 `[options]`；**首次开机**由一次性服务 `aib-rustdesk-setup.service`（`After=rustdesk.service`）调用 RustDesk 自己的 CLI：
-  - `rustdesk --option direct-server Y` + `direct-access-port 21118`：局域网 IP 直连；
-  - `rustdesk --option verification-method use-permanent-password`：只认固定密码（不用临时密码）；
-  - `rustdesk --option approve-mode password`：不弹「接受连接」确认框，无人值守也能连；
-  - 默认 `custom-rendezvous-server 127.0.0.1` / `relay-server 127.0.0.1` / `api-server http://127.0.0.1`（只允许局域网直连，见上）；给了 `--rustdesk-server` 时这两项改成自建服务器；`--rustdesk-allow-id` 时不写（用公共服务器）；
-  - `rustdesk --password …`：设固定密码。
-
-  设置之前先等 RustDesk 就绪（最多 180 秒）：`rustdesk.service` active、有 `rustdesk --service` 进程、配置目录 `/root/.config/rustdesk` 存在、主 IPC socket `/tmp/RustDesk-0/ipc` 已建立。服务没起来时调 CLI 会出现「设置固定密码失败: No such file or directory」这类假失败，`--get-id` 也会读到本地临时 ID，所以这里不调用 `--get-id`。每个选项都读回确认；密码最多试 5 次，返回 `Done!` 后删除明文，写 `/var/lib/aib/rustdesk-setup.done`，以后不再运行；还失败就 30 秒后由 systemd 重试。日志里不记录 ID 和明文密码。
+- **选项装机时就写好**：直连 / 认证 / rendezvous 选项直接合并进 root、登录用户（`--username`，默认 `ubuntu`）和 GDM 登录界面账号（`gdm`）各自的 `~/.config/rustdesk/RustDesk2.toml` 的 `[options]`（0600，属主为该账号），RustDesk **第一次启动就按这些选项运行**，不会先连 `rs-ny.rustdesk.com`。要给每个账号各写一份，是因为 RustDesk 1.5.1 的 `rustdesk.service`（root，`rustdesk --service`）本身只开 `/tmp/RustDesk-service/ipc_service`；真正监听 21118、连 rendezvous 的 `rustdesk --server` 由它以**活动会话用户**身份拉起：只有登录界面时是 `gdm`（uid 120，IPC 在 `/tmp/RustDesk-120/ipc`），登录后是登录用户（uid 1000，`/tmp/RustDesk-1000/ipc`），只有 Wayland 登录界面或 root 图形会话才是 root。`--server` 读自己 `$HOME` 下的配置，只有 root 配置已有 ID + 密钥对时才从 root 同步（`src/server.rs` `wait_initial_config_sync`），首次开机 root 配置是空的。装机时还不存在的账号，由 `rustdesk.service` 的 `ExecStartPre`（`aib-rustdesk-preseed --if-not-done`，首次设置完成前每次启动都跑）补上。写入的选项：
+  - `direct-server = 'Y'` + `direct-access-port = '21118'`：局域网 IP 直连；
+  - `verification-method = 'use-permanent-password'`：只认固定密码（不用临时密码）；
+  - `approve-mode = 'password'`：不弹「接受连接」确认框，无人值守也能连；
+  - 默认 `custom-rendezvous-server` / `relay-server` = `127.0.0.1`、`api-server` = `http://127.0.0.1`（只允许局域网直连，见上）；`--rustdesk-server H` 时前两项 = 自建服务器、不设 `api-server`；`--rustdesk-allow-id` 时三项都删掉（用公共服务器）。
+- **固定密码首次开机设置**：RustDesk 1.5 的固定密码是加盐哈希存储的，只能通过运行中的 RustDesk 设置，chroot 里做不到。装机时明文只放进 `/etc/aib/rustdesk.secret`（root 0600）；首次开机由一次性服务 `aib-rustdesk-setup.service` 调 `rustdesk --password …`。root 执行这个 CLI 时，RustDesk 不连 `/tmp/RustDesk-0/ipc`，而是找正在运行的 `rustdesk --server` 进程、连它的 uid 对应的 `/tmp/RustDesk-<uid>/ipc`（`src/ipc.rs` `user_main_ipc_server_uid`）。所以脚本等的是：`rustdesk.service` active + 有 `rustdesk --server` 进程 + 该进程 uid 的 IPC socket 已建立（不写死 uid，登录界面的 gdm 和登录用户都行），最多 180 秒；然后最多试 5 次 `rustdesk --password`，以输出 `Done!`（守护进程确认后才打印）为准。密码由 `--server` 写进它的配置并同步给 root，之后换成登录用户的 `--server` 时再从 root 同步过去。设完再用 `rustdesk --option` 把各选项读回一遍，缺的补设（兜底；注意 IPC 不通时 `--option` 读的是本地 root 配置，所以只当兜底，不当证据）。成功后删明文、写 `/var/lib/aib/rustdesk-setup.done`，以后不再运行。不调用 `--get-id`、不记录 ID，日志里不出现明文密码。
+- **重试有上限**：每次运行失败都在日志里写明缺什么（服务没 active / 没有 `--server` 进程 / 哪个 socket 没建立 / `--password` 的最后一行输出）。失败后 systemd 30 秒后重试，每次开机最多 6 次运行，用完以退出码 2 结束（`RestartPreventExitStatus=2`，unit 停在 failed，不会无限重试），下次开机再试；连续 3 次开机都失败就彻底放弃：删除明文密码，原因写进 `/var/lib/aib/rustdesk-setup.failed`，以后不再运行，需要手动 `sudo rustdesk --password '<新密码>'`。没有图形会话（比如服务器式无头启动）时 RustDesk 不会拉起 `--server`，就会走到这条路。
 - 明文密码不进 `provision.env` 和日志；构建时只放进 ISO 里的 `/provision/rustdesk.secret`（0600）。设置那一刻密码会出现在 `rustdesk --password` 的命令行参数里（RustDesk CLI 只支持这种方式），首次开机那一瞬间本机其它进程理论上能用 `ps` 看到。
 - 防火墙：只在 ufw **已启用**时放行 `21118/tcp`（装机时和首次开机各检查一次），不会主动打开 ufw。
 
 **安全提醒**
 
 - 21118 直连端口在局域网内谁都能连，只靠固定密码保护；不要映射到公网。外网请走 VPN 或自建服务器（`--rustdesk-server`）。
-- 默认模式下 RustDesk 仍会做 IPv6 STUN 探测（DNS 查询 `stun.l.google.com` 等，只为获知本机公网 IPv6，不注册 ID、不开放入站）；这是 RustDesk 内置行为，没有配置项能关。
+- 默认模式下 RustDesk 仍会做 DNS 查询 STUN 主机名（实测 1.5.1 为 `stun.nextcloud.com` / `stun.cloudflare.com` 等，IPv6 探测），但不向这些地址发包、不注册 ID、不开放入站；这是 RustDesk 内置行为，没有配置项能关。日志里每隔一段时间的 `http://127.0.0.1/api/heartbeat` / `127.0.0.1/api/audit` 连接失败警告也是预期的：`api-server` 指向本机回环，1.5.1 只在 API 地址为空或是官方公共地址时才不发审计 / 心跳，而让 API 地址为空的 `register-device=N` 是定制客户端的内置设置，普通配置项设不了。
 - 默认密码是公开的，装完立即改：`sudo rustdesk --password '<新密码>'`。
-- 排查：`systemctl status rustdesk aib-rustdesk-setup`、`journalctl -u aib-rustdesk-setup`、`sudo rustdesk --option direct-server`（应输出 `Y`）、`sudo rustdesk --option custom-rendezvous-server`（默认应输出 `127.0.0.1`）。
+- 排查：`systemctl status rustdesk aib-rustdesk-setup`、`journalctl -u aib-rustdesk-setup`、`cat /var/lib/aib/rustdesk-setup.failed`（放弃时的原因）、`ps -eo uid,args | grep 'rustdesk --server'`（应有一个，uid 120 或 1000）、`ls /tmp/RustDesk-*`、`sudo grep -A8 '^\[options\]' /home/<用户>/.config/rustdesk/RustDesk2.toml`、`sudo rustdesk --option custom-rendezvous-server`（默认应输出 `127.0.0.1`；IPC 不通时这条读的是 root 本地配置）。
 
 #### x11vnc（`--remote-desktop x11vnc`）
 
