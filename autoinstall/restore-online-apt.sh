@@ -27,10 +27,12 @@ if [ -d "$APT_ETC/sources.list.d.offline-bak" ]; then
 fi
 
 # --- third-party apt seeds from offline bundle ---
+# 没有 apt-sources/ (旧捆绑) 时只跳过这一段; 后面的 Ubuntu 源 (--mirror, 默认清华) 改写照常做
 APT_SRC="${OFFLINE_ROOT}/apt-sources"
+restore_third_party_sources() {
 if [ ! -d "$APT_SRC" ]; then
-  echo "warn: $APT_SRC 不存在 — 跳过第三方 apt 源写回 (旧捆绑? 请 --force 重建)"
-  exit 0
+  echo "warn: $APT_SRC 不存在 — 跳过第三方 apt 源写回 (旧捆绑? 请 --force 重建); Ubuntu 源仍按 --mirror 改写"
+  return 0
 fi
 
 install -m 0755 -d "$APT_ETC/keyrings" "$APT_ETC/sources.list.d" "$SHARE_KEYRINGS"
@@ -72,6 +74,8 @@ if [ -d "$APT_SRC/sources.list.d" ]; then
 fi
 
 echo "restored third-party apt sources from $APT_SRC ($restored files)"
+}
+restore_third_party_sources
 
 # 把 Ubuntu 源写成构建时的 --mirror (默认清华 https)。ca-certificates 已由 00-base
 # 从离线捆绑装好, 因此现在切 https 是安全的。
