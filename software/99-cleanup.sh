@@ -60,6 +60,15 @@ _manifest_ver() {
         echo "(not found)"
       fi
       ;;
+    grok-bot)
+      if dpkg-query -W -f='${Status}' grok-bot 2>/dev/null | grep -q 'install ok installed'; then
+        echo "grok-bot $(dpkg-query -W -f='${Version}' grok-bot) (用户自行登录)"
+      elif [ -f /var/log/autoinstall/grok-bot.skip ]; then
+        echo "(skipped: $(head -1 /var/log/autoinstall/grok-bot.skip))"
+      else
+        echo "(not found)"
+      fi
+      ;;
     rustdesk)
       if dpkg-query -W -f='${Status}' rustdesk 2>/dev/null | grep -q 'install ok installed'; then
         echo "rustdesk $(dpkg-query -W -f='${Version}' rustdesk)"
@@ -99,7 +108,7 @@ mkdir -p /var/log/autoinstall
   echo "# provisioned at $(date -u +%FT%TZ)"
   echo "# host: $(cat /etc/hostname 2>/dev/null)"
   echo
-  for c in git gh rg docker "docker compose" nvidia-driver nvidia-ctk java node npm grok opencode openmausbot unity godot gitea jenkins microsoft-edge-stable FlClash rustdesk x11vnc sshd; do
+  for c in git gh rg docker "docker compose" nvidia-driver nvidia-ctk java node npm grok opencode openmausbot unity godot gitea jenkins microsoft-edge-stable FlClash grok-bot rustdesk x11vnc sshd; do
     printf '%-18s ' "$c"
     _manifest_ver "$c" || echo "(not found)"
   done

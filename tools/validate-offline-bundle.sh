@@ -6,6 +6,8 @@
 #       [--require-x11vnc]   (build-iso --remote-desktop x11vnc 时: 捆绑里必须有 x11vnc + xauth)
 #       [--require-rustdesk] [--pin-rustdesk VER]
 #                            (build-iso Desktop 默认 RustDesk 时: 捆绑里必须有 rustdesk/ 同版本 deb + sha256, apt 池可装)
+#       [--require-grok-bot] [--grok-bot-version V] [--grok-bot-sha256 H]
+#                            (build-iso Desktop 默认 Grok Bot 时: 捆绑里必须有 grok-bot/ deb + sha256, 且它和直接依赖都在 apt 池)
 #       [--require-mdns]     (build-iso Server 预装 Gitea / Jenkins 时: 捆绑里必须有 avahi-daemon + libnss-mdns)
 #       [--nvidia-driver-version N] [--nvidia-kernel-flavour F]
 #                            (未 --skip 24 时: nvidia/ 记录的每个 flavour, 模块 meta / 内核 meta / 内核 ABI 版本必须一致)
@@ -25,6 +27,9 @@ REQUIRE_X11VNC=0
 REQUIRE_MDNS=0
 REQUIRE_RUSTDESK=0
 PIN_RUSTDESK="${PIN_RUSTDESK:-}"
+REQUIRE_GROK_BOT=0
+PIN_GROK_BOT="${PIN_GROK_BOT:-latest}"
+GROK_BOT_SHA256="${GROK_BOT_SHA256:-}"
 PIN_NVIDIA_DRIVER="${PIN_NVIDIA_DRIVER:-595}"
 NVIDIA_KERNEL_FLAVOUR="${NVIDIA_KERNEL_FLAVOUR:-}"
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger}"
@@ -60,10 +65,13 @@ while [[ $# -gt 0 ]]; do
     --require-mdns) REQUIRE_MDNS=1; shift ;;
     --require-rustdesk) REQUIRE_RUSTDESK=1; shift ;;
     --pin-rustdesk) PIN_RUSTDESK="$2"; shift 2 ;;
+    --require-grok-bot) REQUIRE_GROK_BOT=1; shift ;;
+    --grok-bot-version) PIN_GROK_BOT="$2"; shift 2 ;;
+    --grok-bot-sha256) GROK_BOT_SHA256="$2"; shift 2 ;;
     --nvidia-driver-version) PIN_NVIDIA_DRIVER="$2"; shift 2 ;;
     --nvidia-kernel-flavour) NVIDIA_KERNEL_FLAVOUR="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,10p' "$0"; exit 0 ;;
+      sed -n '2,14p' "$0"; exit 0 ;;
     *) die "未知参数: $1" ;;
   esac
 done
@@ -213,6 +221,88 @@ if [[ "$REQUIRE_RUSTDESK" -eq 1 ]] && ! should_skip 38-rustdesk; then
     if ! awk '/^Package: / && $2=="rustdesk" { f=1; exit } END { exit f?0:1 }' "$PACKAGES_FILE"; then
       missing+=("rustdesk")
     fi
+  fi
+fi
+# Grok Bot 桌面版 (Desktop 默认): deb + sha256 一致; grok-bot 和它的每个直接依赖 (任一备选) 都在 apt 池
+if [[ "$REQUIRE_GROK_BOT" -eq 1 ]] && ! should_skip 39-grok-bot; then
+  GB="$BUNDLE/grok-bot"
+  if [[ ! -d "$GB" ]]; then
+    missing_dirs+=("grok-bot/ (加入 Grok Bot 之前的旧捆绑; --force-fetch 重建, 或 --no-grok-bot)")
+  else
+    _fn="$(tr -d '[:space:]' < "$GB/deb.name" 2>/dev/null || true)"
+    _ver="$(tr -d '[:space:]' < "$GB/version" 2>/dev/null || true)"
+    _want="$(tr -d '[:space:]' < "$GB/sha256" 2>/dev/null || true)"
+    if [[ -z "$_fn" || ! -f "$GB/$_fn" ]]; then
+      missing_dirs+=("grok-bot/deb")
+    elif [[ ! "$_want" =~ ^[0-9a-f]{64}$ ]]; then
+      jp_errs+=("grok-bot/sha256 不是 64 位 hex")
+    elif [[ "$(sha256sum "$GB/$_fn" | awk '{print $1}')" != "$_want" ]]; then
+      jp_errs+=("grok-bot/$_fn sha256 与 grok-bot/sha256 不符")
+    fi
+    if [[ "$PIN_GROK_BOT" != "latest" && "$_ver" != "$PIN_GROK_BOT" ]]; then
+      jp_errs+=("grok-bot/version=${_ver:-?} != --grok-bot-version $PIN_GROK_BOT")
+    fi
+    _gsha="$(printf '%s' "$GROK_BOT_SHA256" | tr '[:upper:]' '[:lower:]')"
+    if [[ -n "$_gsha" && "$_want" != "$_gsha" ]]; then
+      jp_errs+=("grok-bot/sha256 != --grok-bot-sha256")
+    fi
+    # 池里的 grok-bot 版本 + 直接依赖 (Package 或 Provides 命中任一备选即可)
+    _gbchk="$(python3 - "$PACKAGES_FILE" "$_ver" <<'GBPY'
+import re, sys
+paras = open(sys.argv[1], encoding="utf-8", errors="replace").read().split("\n\n")
+have, gb = set(), []
+for para in paras:
+    f = {}
+    for line in para.splitlines():
+        m = re.match(r"^([A-Za-z0-9-]+):\s*(.*)$", line)
+        if m:
+            f[m.group(1)] = m.group(2)
+    n = f.get("Package")
+    if not n:
+        continue
+    have.add(n)
+    for p in f.get("Provides", "").split(","):
+        p = re.sub(r"\(.*?\)", "", p).strip()
+        if p:
+            have.add(p)
+    if n == "grok-bot":
+        gb.append(f)
+if not gb:
+    print("NOPKG"); sys.exit()
+want = sys.argv[2]
+sel = [f for f in gb if f.get("Version") == want] if want else gb
+if not sel:
+    print("NOVER " + ",".join(f.get("Version", "?") for f in gb)); sys.exit()
+miss = []
+for grp in sel[0].get("Depends", "").split(","):
+    alts = [re.sub(r"\(.*?\)|:any", "", a).strip() for a in grp.split("|")]
+    alts = [a for a in alts if a]
+    if alts and not any(a in have for a in alts):
+        miss.append("|".join(alts))
+# Recommends (libappindicator3-1, 托盘图标): 39-grok-bot.sh 会连同它装; 缺了只告警 (装机退回只装 deb)
+rmiss = []
+for grp in sel[0].get("Recommends", "").split(","):
+    alts = [re.sub(r"\(.*?\)|:any", "", a).strip() for a in grp.split("|")]
+    alts = [a for a in alts if a]
+    if alts and not any(a in have for a in alts):
+        rmiss.append("|".join(alts))
+print("MISS " + " ".join(miss) if miss else "OK")
+if rmiss:
+    print("RECMISS " + " ".join(rmiss))
+GBPY
+)" || _gbchk="ERR"
+    _gbrec="$(sed -n 's/^RECMISS //p' <<<"$_gbchk")"
+    _gbchk="$(head -n1 <<<"$_gbchk")"
+    if [[ -n "$_gbrec" ]]; then
+      echo "warn: apt 池缺 Grok Bot 的 Recommends: $_gbrec (托盘图标可能不显示; --force-fetch 重建可补上)" >&2
+    fi
+    case "$_gbchk" in
+      OK) ;;
+      NOPKG) missing+=("grok-bot") ;;
+      NOVER*) jp_errs+=("apt 池里 grok-bot 版本是 ${_gbchk#NOVER }, 不是 grok-bot/version=${_ver:-?}") ;;
+      MISS*) read -r -a _gbmiss <<< "${_gbchk#MISS }"; missing+=("${_gbmiss[@]}") ;;
+      *) jp_errs+=("grok-bot 依赖检查失败") ;;
+    esac
   fi
 fi
 # NVIDIA 驱动 (24-nvidia-driver.sh): 预编译模块必须和同一个内核版本配套, 否则装机会跳过驱动

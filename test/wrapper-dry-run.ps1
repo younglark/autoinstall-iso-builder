@@ -68,6 +68,13 @@ try {
   Expect '--no-nvidia-driver 透传' $out '--no-nvidia-driver --nvidia-driver-version 580 --nvidia-kernel-flavour generic'
   Expect 'PIN_NVIDIA_DRIVER 透传' $out '-e PIN_NVIDIA_DRIVER=580'
 
+  $env:PIN_GROK_BOT = '0.79.4'
+  $out = Run-Aib --dry-run build --iso u.iso --out o.iso --no-grok-bot --grok-bot-version 0.79.4 --grok-bot-url https://mirror.example/grok-bot_0.79.4_amd64.deb --grok-bot-sha256 cf0fd0032249cf08e75f6dff045766b5195078dd878d1eeed60a68c4d31a7a5a
+  Remove-Item Env:PIN_GROK_BOT
+  Expect '--no-grok-bot 透传' $out '--no-grok-bot --grok-bot-version 0.79.4 --grok-bot-url https://mirror.example/grok-bot_0.79.4_amd64.deb --grok-bot-sha256 cf0fd003'
+  Reject '--grok-bot-url 不当路径改写' $out '/work/https'
+  Expect 'PIN_GROK_BOT 透传' $out '-e PIN_GROK_BOT=0.79.4'
+
   $out = Run-Aib --dry-run build --iso u.iso --out o.iso --hostname node07 --service-url-host 192.168.1.20
   Expect '--service-url-host 透传' $out '--hostname node07 --service-url-host 192.168.1.20'
   Reject '--service-url-host 不当路径改写' $out '/work/192.168.1.20'

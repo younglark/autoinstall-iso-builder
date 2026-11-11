@@ -175,7 +175,7 @@ if (($PSVersionTable.PSVersion.Major -ge 6) -and $IsLinux) {
   $uid = (& id -u).Trim(); $gid = (& id -g).Trim()
   if ($uid -ne '0') { $Docker.AddRange([string[]]@('-e', "AIB_UID=$uid", '-e', "AIB_GID=$gid")) }
 }
-foreach ($v in @('PIN_NODE_MAJOR', 'PIN_GROK', 'PIN_OPENCODE', 'PIN_OPENMAUSBOT', 'PIN_UNITY_CLI', 'PIN_GITEA', 'PIN_RUSTDESK', 'PIN_NVIDIA_DRIVER', 'NVIDIA_KERNEL_FLAVOUR', 'NVIDIA_KERNEL_FLAVOURS', 'UBUNTU_MIRROR', 'UNITY_CLI_CDN_BASE', 'RUSTDESK_DL_BASE')) {
+foreach ($v in @('PIN_NODE_MAJOR', 'PIN_GROK', 'PIN_OPENCODE', 'PIN_OPENMAUSBOT', 'PIN_UNITY_CLI', 'PIN_GITEA', 'PIN_RUSTDESK', 'PIN_NVIDIA_DRIVER', 'NVIDIA_KERNEL_FLAVOUR', 'NVIDIA_KERNEL_FLAVOURS', 'PIN_GROK_BOT', 'GROK_BOT_DEB_URL', 'GROK_BOT_SHA256', 'UBUNTU_MIRROR', 'UNITY_CLI_CDN_BASE', 'RUSTDESK_DL_BASE')) {
   $val = [Environment]::GetEnvironmentVariable($v)
   if ($val) { $Docker.AddRange([string[]]@('-e', "$v=$val")) }
 }
