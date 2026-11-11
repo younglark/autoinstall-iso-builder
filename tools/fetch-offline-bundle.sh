@@ -596,21 +596,23 @@ if [ -n "$GROKBOT_DEB" ]; then
     first="${dep%%|*}"
     first="$(printf '%s' "$first" | sed 's/([^)]*)//g; s/^[[:space:]]*//; s/[[:space:]]*$//')"
     [ -n "$first" ] && printf '%s\n' "$first"
-  done)  # Recommends (libappindicator3-1, 托盘图标) 也进捆绑: 39-grok-bot.sh 会连同它一起装; 源里没有的跳过
+  done)
+  # Recommends (libappindicator3-1, 托盘图标) 也进捆绑; 已有种子 Provides 它则不另收真包
+  # (FlClash 的 libayatana-appindicator3-1 Provides 且 Conflicts libappindicator3-1)
+  # shellcheck disable=SC1091
+  if [ -f /grok-bot-release.sh ]; then
+    . /grok-bot-release.sh
+  elif [ -f "$(dirname "$0")/grok-bot-release.sh" ]; then
+    . "$(dirname "$0")/grok-bot-release.sh"
+  else
+    echo "ERROR: 找不到 grok-bot-release.sh (无法处理 Grok Bot Recommends)" >&2
+    exit 1
+  fi
   GROKBOT_RECS=()
   while IFS= read -r _r; do
     [ -n "$_r" ] || continue
-    _c="$(apt-cache policy "$_r" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
-    if [ -n "$_c" ] && [ "$_c" != "(none)" ]; then
-      GROKBOT_RECS+=("$_r"); SEEDS+=("$_r")
-    else
-      echo "warn: Grok Bot Recommends $_r 在 $RELEASE 源里没有, 不捆绑"
-    fi
-  done < <(dpkg-deb -f "$GROKBOT_DEB" Recommends 2>/dev/null | tr ',' '\n' | while IFS= read -r rec; do
-    rec="${rec%%|*}"
-    rec="$(printf '%s' "$rec" | sed 's/([^)]*)//g; s/:any//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
-    [ -n "$rec" ] && printf '%s\n' "$rec"
-  done)
+    GROKBOT_RECS+=("$_r"); SEEDS+=("$_r")
+  done < <(grokbot_seed_recommends "$GROKBOT_DEB" "${SEEDS[@]}")
   echo "Grok Bot Recommends 捆绑: ${GROKBOT_RECS[*]:-(无)}"
 fi
 # NVIDIA 驱动 + Canonical 预编译签名模块 + 同版本内核 (24-nvidia-driver.sh 离线路径)
@@ -844,6 +846,7 @@ INNER
 chmod +x "$WORK/fetch-debs.sh"
 cp "$SCRIPT_DIR/ubuntu-mirror.sh" "$WORK/ubuntu-mirror.sh"
 cp "$SCRIPT_DIR/apt-deb-reuse.sh" "$WORK/apt-deb-reuse.sh"
+cp "$SCRIPT_DIR/grok-bot-release.sh" "$WORK/grok-bot-release.sh"
 
 # --------------- FlClash deb (host; 官方 GitHub Release + SHA256SUMS) ---------------
 # 必须在容器抓 deb 依赖之前下好, 以便把 Depends 并入 noble/jammy apt 闭包。
@@ -959,6 +962,7 @@ else
     -v "$WORK/fetch-debs.sh:/fetch-debs.sh:ro" \
     -v "$WORK/ubuntu-mirror.sh:/ubuntu-mirror.sh:ro" \
     -v "$WORK/apt-deb-reuse.sh:/apt-deb-reuse.sh:ro" \
+    -v "$WORK/grok-bot-release.sh:/grok-bot-release.sh:ro" \
     -v "$WORK/out:/out" \
     "${REUSE_ARGS[@]+"${REUSE_ARGS[@]}"}" \
     -e FETCH_PRUNE_APT_CACHE="$PRUNE_APT_CACHE" \

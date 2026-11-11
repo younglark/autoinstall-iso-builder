@@ -147,13 +147,57 @@ grokbot_recommends() { # deb
 }
 
 # 上面的 Recommends 里 apt 当前能装的那些 (有 Candidate), 一行一个
+# 已有别的包 Provides 它时跳过: FlClash (37) 先装了 libayatana-appindicator3-1, 它 Provides 且 Conflicts
+# libappindicator3-1, 再装真包会冲突
 grokbot_available_recommends() { # deb
   local r c
   while IFS= read -r r; do
     [ -n "$r" ] || continue
+    if dpkg-query -W -f='${Status}|${Package}|${Provides}\n' 2>/dev/null | awk -F'|' -v r="$r" '
+         $1 ~ /install ok installed/ { n = split($3, a, /,/); for (i = 1; i <= n; i++) { sub(/^ +/, "", a[i]); sub(/ .*/, "", a[i]); if (a[i] == r) { found = 1 } } }
+         END { exit !found }'; then
+      echo "Grok Bot Recommends $r: 已由已装的包提供, 跳过" >&2
+      continue
+    fi
     c="$(apt-cache policy "$r" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
     if [ -n "$c" ] && [ "$c" != "(none)" ]; then printf '%s\n' "$r"; fi
   done < <(grokbot_recommends "$1")
+  return 0
+}
+
+# 哪些 Recommends 应并入离线捆绑: 源里有 Candidate, 且参数里的已有种子没有 Provides 它。
+# 用法: grokbot_seed_recommends <deb> [已有种子包…]
+# FlClash 的 libayatana-appindicator3-1 Provides 且 Conflicts/Replaces libappindicator3-1, 这时不另收真包。
+grokbot_seed_recommends() { # deb [planned-pkg...]
+  local deb="$1" r c prov p s
+  shift
+  local -a planned=("$@")
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    prov=""
+    for s in "${planned[@]}"; do
+      [ "${s%%=*}" = "$r" ] && prov="${s%%=*}"
+    done
+    if [ -z "$prov" ]; then
+      while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        for s in "${planned[@]}"; do
+          if [ "${s%%=*}" = "$p" ]; then prov="$p"; break; fi
+        done
+        [ -n "$prov" ] && break
+      done < <(apt-cache showpkg "$r" 2>/dev/null | awk '/^Reverse Provides:/ {f=1; next} f && NF {print $1}')
+    fi
+    if [ -n "$prov" ]; then
+      echo "Grok Bot Recommends $r: 已由种子 $prov 提供, 不另收" >&2
+      continue
+    fi
+    c="$(apt-cache policy "$r" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+    if [ -n "$c" ] && [ "$c" != "(none)" ]; then
+      printf '%s\n' "$r"
+    else
+      echo "warn: Grok Bot Recommends $r 在源里没有, 不捆绑" >&2
+    fi
+  done < <(grokbot_recommends "$deb")
   return 0
 }
 
