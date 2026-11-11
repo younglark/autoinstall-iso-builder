@@ -789,7 +789,7 @@ if EDITION=desktop X11VNC=1 AIB_TARGET_ROOT="$xr2" AIB_SKIP_PKG=1 bash "$xr2/pro
      && grep -qx 'WaylandEnable=false' "$xr2/etc/gdm3/custom.conf" \
      && grep -q '^After=display-manager.service' "$u" && grep -q '^WantedBy=graphical.target' "$u" \
      && grep -q '^ExecStart=/usr/local/sbin/aib-x11vnc-follow' "$u" && grep -q '^Restart=always' "$u" \
-     && [[ -x "$f" ]] && grep -q -- '-rfbauth "$PASSFILE"' "$f" && grep -q -- '-forever -shared -noxdamage' "$f" \
+     && [[ -x "$f" ]] && grep -q -- '-rfbauth "$PASSFILE"' "$f" && grep -q -- '-forever -shared -noshm -noxdamage' "$f" \
      && grep -q '/sys/class/tty/tty0/active' "$f" && grep -q 'xauth -f' "$f" \
      && grep -qx 'HandleLidSwitch=ignore' "$xr2/etc/systemd/logind.conf.d/90-autoinstall-x11vnc.conf" \
      && grep -q "sleep-inactive-ac-type='nothing'" "$xr2/etc/dconf/db/gdm.d/90-autoinstall-no-suspend" \
@@ -802,6 +802,55 @@ if EDITION=desktop X11VNC=1 AIB_TARGET_ROOT="$xr2" AIB_SKIP_PKG=1 bash "$xr2/pro
   fi
   if command -v shellcheck >/dev/null; then
     if shellcheck "$f"; then pass "aib-x11vnc-follow shellcheck"; else fail "aib-x11vnc-follow shellcheck"; fi
+  fi
+  # 回归: GDM 用 -displayfd 起 Xorg (命令行没有 :N), Xauthority 条目不带显示号 → 必须靠监听的 socket 认出显示号
+  xd_fn="$tmp/x_display_of.sh"
+  sed -n '/^x_display_of() {$/,/^}$/p' "$f" > "$xd_fn"
+  if [[ ! -s "$xd_fn" ]]; then
+    fail "x_display_of 未在 aib-x11vnc-follow 里找到"
+  elif ! command -v xauth >/dev/null; then
+    printf '[skip] %s\n' "x_display_of 回归 (没有 xauth)"
+  else
+    # shellcheck disable=SC1090
+    . "$xd_fn"
+    mk_gdm_xauth() { # file cookiehex: FamilyLocal "<host>/unix:" + FamilyWild, number 都为空 (与真机 GDM 一致)
+      local h; h="$(hostname)"
+      be16() { printf '%b' "\\$(printf '%03o' $(( $1 >> 8 )))\\$(printf '%03o' $(( $1 & 255 )))"; }
+      hex2bin() { local s="$1" i; for ((i = 0; i < ${#s}; i += 2)); do printf '%b' "\\$(printf '%03o' "0x${s:i:2}")"; done; }
+      {
+        be16 256;   be16 ${#h}; printf '%s' "$h"; be16 0; be16 18; printf 'MIT-MAGIC-COOKIE-1'; be16 16; hex2bin "$2"
+        be16 65535; be16 ${#h}; printf '%s' "$h"; be16 0; be16 18; printf 'MIT-MAGIC-COOKIE-1'; be16 16; hex2bin "$2"
+      } > "$1"
+    }
+    mk_gdm_xauth "$tmp/gdm-xauth" 00112233445566778899aabbccddeeff
+    # xauth 数字条目兜底 (进程既没 :N 也没 X socket)
+    xauth -f "$tmp/num-xauth" add :7 . 00112233445566778899aabbccddeeff 2>/dev/null
+    sleep 30 & sp=$!
+    if [[ -z "$(xauth -f "$tmp/gdm-xauth" list 2>/dev/null | sed -n 's/^[^ ]*:\([0-9][0-9]*\) .*/:\1/p')" ]] \
+       && [[ "$(xauth -f "$tmp/gdm-xauth" list 2>/dev/null | wc -l)" -eq 2 ]] \
+       && [[ "$(x_display_of "$sp" "$tmp/num-xauth")" == ":7" ]] && [[ -z "$(x_display_of "$sp" "$tmp/gdm-xauth")" ]]; then
+      pass "x_display_of: GDM 式 Xauthority 无显示号; 数字 xauth 兜底"
+    else
+      fail "x_display_of xauth fallback / GDM xauth fixture"
+    fi
+    kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null || true
+    if command -v Xvfb >/dev/null; then
+      # 先占一个显示 (诱饵), 再用 -displayfd 起第二个, 保证测到的不是 :0 之类的默认值
+      Xvfb -displayfd 3 -nolisten tcp -screen 0 320x240x24 3>"$tmp/dfd0" >/dev/null 2>&1 & xv0=$!
+      for _ in $(seq 1 50); do [[ -s "$tmp/dfd0" ]] && break; sleep 0.1; done
+      Xvfb -displayfd 3 -auth "$tmp/gdm-xauth" -nolisten tcp -screen 0 320x240x24 3>"$tmp/dfd1" >/dev/null 2>&1 & xv1=$!
+      for _ in $(seq 1 50); do [[ -s "$tmp/dfd1" ]] && break; sleep 0.1; done
+      n0="$(tr -dc 0-9 < "$tmp/dfd0")"; n1="$(tr -dc 0-9 < "$tmp/dfd1")"
+      got="$(x_display_of "$xv1" "$tmp/gdm-xauth")"
+      if [[ -n "$n1" && "$n1" != "$n0" && "$got" == ":$n1" ]] && ! tr '\0' ' ' < "/proc/$xv1/cmdline" | grep -q ' :[0-9]'; then
+        pass "x_display_of: -displayfd + 无显示号 Xauthority → :$n1 (由 X socket 认出)"
+      else
+        fail "x_display_of: 期望 :$n1 (诱饵 :$n0), 得到 '${got}'"
+      fi
+      kill "$xv0" "$xv1" 2>/dev/null; wait "$xv0" "$xv1" 2>/dev/null || true
+    else
+      printf '[skip] %s\n' "x_display_of X socket 检测 (没有 Xvfb)"
+    fi
   fi
 else
   fail "36-x11vnc-xorg x11vnc run: $(tail -5 "$tmp/x-on.log")"

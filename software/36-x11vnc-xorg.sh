@@ -123,7 +123,10 @@ echo "wrote /etc/x11vnc.pass (root 0600)"
 # GDM (Xorg) 登录界面跑在 vt1 (:0, auth=/run/user/<gdm>/gdm/Xauthority);
 # 用户登录后另起一个 Xorg (vt2, :1, auth=/run/user/<uid>/gdm/Xauthority), GNOME 锁屏也在这个 X 里。
 # 所以不能把 x11vnc 钉死在 :0: 这里每 2 秒看一次当前活动 VT 上的 Xorg, 取它的 -auth 文件和
-# 显示号 (xauth list), 变了就重启 x11vnc。x11vnc 自己的 -loop 会用旧 display/auth 重连, 不用它。
+# 显示号, 变了就重启 x11vnc。x11vnc 自己的 -loop 会用旧 display/auth 重连, 不用它。
+# 显示号不能只靠 xauth list: GDM 用 -displayfd 起 Xorg (命令行里没有 :N), 写进 Xauthority 的条目也不带
+# 显示号 (ubuntu-desktop/unix: 和 #ffff#...#:), 所以先看命令行, 再看 Xorg 监听的 /tmp/.X11-unix/XN socket。
+# GDM 的 Xorg 不允许 x11vnc 用 MIT-SHM (X_ShmAttach BadAccess, x11vnc 直接退出), 所以加 -noshm。
 install -d -m 0755 "$R/usr/local/sbin"
 cat > "$R/usr/local/sbin/aib-x11vnc-follow" <<'FOLLOW'
 #!/bin/bash
@@ -142,6 +145,24 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: 
   ufw status 2>/dev/null | grep -q "^${PORT}/tcp" || ufw allow "${PORT}/tcp" comment x11vnc >/dev/null 2>&1 || true
 fi
 
+# 输出 Xorg 进程的显示号 (例 :1)。依次尝试: 命令行里的 :N, 它监听的 /tmp/.X11-unix/XN socket, xauth 条目
+x_display_of() {
+  local pid="$1" auth="$2" arg fd link inodes=""
+  while IFS= read -r -d '' arg; do
+    case "$arg" in :[0-9]*) printf '%s\n' "$arg"; return 0 ;; esac
+  done < "/proc/$pid/cmdline" 2>/dev/null
+  for fd in "/proc/$pid/fd/"*; do
+    link="$(readlink "$fd" 2>/dev/null)" || continue
+    case "$link" in socket:\[*\]) link="${link#socket:[}"; inodes="$inodes ${link%]}" ;; esac
+  done
+  if [ -n "$inodes" ]; then
+    # /proc/net/unix: $7 = inode, $8 = 路径 (抽象 socket 前面带 @)
+    arg="$(awk -v l="$inodes " 'index(l, " " $7 " ") && $8 ~ /\/tmp\/\.X11-unix\/X[0-9]+$/ { sub(/.*X/, "", $8); print ":" $8; exit }' /proc/net/unix 2>/dev/null)"
+    [ -n "$arg" ] && { printf '%s\n' "$arg"; return 0; }
+  fi
+  xauth -f "$auth" list 2>/dev/null | sed -n 's/^[^ ]*:\([0-9][0-9]*\) .*/:\1/p' | head -1
+}
+
 # 输出 "<display> <authfile>"; 优先活动 VT 上的 Xorg, 没有则任取一个
 find_target() {
   local active pid vt auth disp first="" pick="" arg prev
@@ -155,7 +176,7 @@ find_target() {
       prev="$arg"
     done < "/proc/$pid/cmdline" 2>/dev/null
     if [ -z "$auth" ] || [ ! -r "$auth" ]; then continue; fi
-    disp="$(xauth -f "$auth" list 2>/dev/null | sed -n 's/^[^ ]*:\([0-9][0-9]*\) .*/:\1/p' | head -1)"
+    disp="$(x_display_of "$pid" "$auth")"
     [ -n "$disp" ] || continue
     [ -n "$first" ] || first="$disp $auth"
     if [ -n "$active" ] && [ "$vt" = "$active" ]; then pick="$disp $auth"; break; fi
@@ -191,7 +212,7 @@ while :; do
     auth="${target#* }"
     echo "$(date '+%F %T') x11vnc -> display $disp (auth $auth)"
     x11vnc -display "$disp" -auth "$auth" -rfbauth "$PASSFILE" -rfbport "$PORT" \
-      -forever -shared -noxdamage -repeat -xkb -nowf -o "$LOG" -q &
+      -forever -shared -noshm -noxdamage -repeat -xkb -nowf -o "$LOG" -q &
     child=$!
   fi
   sleep "$INTERVAL"
