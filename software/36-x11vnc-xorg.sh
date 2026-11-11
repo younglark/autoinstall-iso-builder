@@ -1,7 +1,8 @@
 #!/bin/bash
-# 36-x11vnc-xorg.sh — 可选: 关闭 Wayland (GDM/锁屏/会话全走 Xorg) + 预装 x11vnc 开机即可连
+# 36-x11vnc-xorg.sh — Desktop 默认: 关闭 Wayland (GDM/锁屏/会话全走 Xorg) + 预装 x11vnc 开机即可连
 #
-# 由 provision.env 控制 (build-iso.sh --disable-wayland / --x11vnc / --vnc-password):
+# 由 provision.env 控制 (build-iso.sh: Desktop 默认写 DISABLE_WAYLAND=1 X11VNC=1;
+# --wayland / Server 写两者为 0; 密码来自 --vnc-password / --password):
 #   DISABLE_WAYLAND=1  /etc/gdm3/custom.conf [daemon] WaylandEnable=false (幂等, 保留其它键)
 #   X11VNC=1           (隐含 DISABLE_WAYLAND=1) 安装 x11vnc + systemd 服务 x11vnc.service:
 #                      开机后在 GDM 登录界面就能连, 登录后自动跟到用户会话, 锁屏也能连。
@@ -25,7 +26,7 @@ RANDOM_PW_FILE="/root/x11vnc-password"
 
 if [ "$DISABLE_WAYLAND" != "1" ] && [ "$X11VNC" != "1" ]; then
   rm -f "$SECRET_FILE"
-  echo "skip: 未启用 --disable-wayland / --x11vnc"
+  echo "skip: 保留 Wayland, 不装 x11vnc (--wayland 或 Server)"
   exit 0
 fi
 if [ "${EDITION:-}" != "desktop" ]; then
@@ -220,7 +221,7 @@ echo "wrote /etc/systemd/system/x11vnc.service"
 # ---------------------------------------------------------------- 不挂起 (开机即可用)
 install -d -m 0755 "$R/etc/systemd/logind.conf.d"
 cat > "$R/etc/systemd/logind.conf.d/90-autoinstall-x11vnc.conf" <<'LOGIND'
-# autoinstall-iso-builder --x11vnc: 合盖 / 空闲不挂起, 保证随时能 VNC 连上 (锁屏照常)
+# autoinstall-iso-builder x11vnc (Desktop 默认): 合盖 / 空闲不挂起, 保证随时能 VNC 连上 (锁屏照常)
 [Login]
 HandleLidSwitch=ignore
 HandleLidSwitchExternalPower=ignore

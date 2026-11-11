@@ -38,7 +38,7 @@
 | `25-nvidia-container-toolkit.sh` | NVIDIA Container Toolkit | 官方仓库；`nvidia-ctk` 合并 Docker runtime（保留 daemon.json 日志轮转）；**不装 GPU 驱动** |
 | `30-jenkins.sh` | Jenkins LTS | 优先 JDK 21（不够退 17），jenkins 用户加入 docker 组；**零配置**：跳过安装向导、装机时建好管理员、预装 Pipeline / Git / Gitea / Docker Pipeline / Docker Cloud / Rebuild / AnsiColor / Parameterized Trigger 等插件（含全部依赖），监听 **0.0.0.0:8080** |
 | `35-microsoft-edge.sh` | Microsoft Edge 稳定版 | **仅 Desktop + amd64 默认安装**（Server / 非 amd64 自动跳过，`--skip 35` 也可跳过）。官方 apt 源 `packages.microsoft.com/repos/edge`；设为默认浏览器（`update-alternatives` + 系统/用户 `mimeapps.list`）；GNOME 收藏夹用 Edge 替换 Firefox（Firefox **保留**）；策略关掉首次运行提示，**不**关闭自动更新 |
-| `36-x11vnc-xorg.sh` | 关 Wayland / x11vnc（**可选，默认不装**） | 仅 Desktop。`--disable-wayland` 让 GDM 登录界面、锁屏、会话都走 Xorg；`--x11vnc` 预装 x11vnc，**开机即可连**（登录界面、锁屏、登录后的会话），隐含关 Wayland。详见下文「远程桌面」 |
+| `36-x11vnc-xorg.sh` | 关 Wayland + x11vnc（**Desktop 默认开启**） | 仅 Desktop（Server 跳过）。GDM 登录界面、锁屏、会话都走 Xorg，并预装 x11vnc，**开机即可连**（登录界面、锁屏、登录后的会话）。`--wayland` 保留 Wayland 且不装 x11vnc；`--skip 36` 也可跳过。详见下文「远程桌面」 |
 | `37-flclash.sh` | FlClash（ClashMeta 图形客户端） | **仅 Desktop 默认安装**（Server / 非 amd64·arm64 自动跳过；`--no-flclash` 或 `--skip 37` 也可跳过）。官方 GitHub Release 的 linux `.deb`（同级 `SHA256SUMS` 校验），**始终安装最新稳定版**。**只装应用**：不写订阅、不设系统代理、不启用 TUN、不装开机自启。详见下文 |
 | `40-nodejs.sh` | Node.js 24 | NodeSource 优先，官方 tarball 兜底 |
 | `45-gitea.sh` | Gitea（最新稳定版，可 `--pin-gitea`） | 官方 linux-amd64 二进制（sha256 校验）→ `/usr/local/bin/gitea`；系统用户 `git`；SQLite；**装机阶段写好配置并创建管理员**，开机 `gitea.service` 自启。监听 **0.0.0.0:3000**（不与 Jenkins 8080 冲突），开放注册，LFS 开，`OFFLINE_MODE`。SSH 克隆走系统 OpenSSH：`git@host:user/repo.git` |
@@ -72,20 +72,31 @@ sudo apt remove FlClash
 
 若曾在应用内开启系统代理或 TUN，请先在应用里关掉再卸载。全离线时 deb 与 apt 依赖（`libayatana-appindicator3-1`、`libsecret-1-0` 及其闭包）都在捆绑里，装机不访问 GitHub。
 
-### 远程桌面：关闭 Wayland / x11vnc（仅 Desktop，可选）
+### 远程桌面：关闭 Wayland + x11vnc（Desktop 默认开启）
 
-两个开关默认都**关**，只对 Desktop 生效（Server 会告警并忽略），由 `software/36-x11vnc-xorg.sh` 落地（所以不能和 `--no-provision` 同用）。
+Desktop **默认**关闭 Wayland 并预装 x11vnc，不用加任何参数；Server 不受影响（不装 x11vnc，不改 GDM）。由 `software/36-x11vnc-xorg.sh` 落地，所以 Desktop 默认路径不能和 `--no-provision` 同用（加了 `--wayland` 就可以）。
 
-| 参数 | 效果 |
+| 默认 / 参数 | 效果 |
 |---|---|
-| `--disable-wayland` | 往 `/etc/gdm3/custom.conf` 的 `[daemon]` 写 `WaylandEnable=false`（幂等，其它键保留）。GDM 登录界面、锁屏和用户会话全部走 Xorg |
-| `--x11vnc` | 预装 x11vnc（离线从捆绑装），**隐含** `--disable-wayland`（构建时告警）。开机即可连，不用先登录 |
-| `--vnc-password P` | VNC 密码。默认 = `--password` 明文（都没给就是默认密码 `ubuntu1990`，构建时告警）；只给了 `--password-hash` 时装机生成随机密码写入 `/root/x11vnc-password`（root 0600） |
+| （默认，Desktop） | 往 `/etc/gdm3/custom.conf` 的 `[daemon]` 写 `WaylandEnable=false`（幂等，其它键保留），GDM 登录界面、锁屏和用户会话全部走 Xorg；预装 x11vnc（离线从捆绑装），开机即可连，不用先登录；关掉合盖/空闲挂起 |
+| `--wayland` | 保留 Wayland，**不装** x11vnc，也不改合盖/空闲挂起设置。Server 上告警并忽略 |
+| `--vnc-password P` | VNC 密码（≥6 位）。默认 = `--password` 明文（都没给就是默认密码 `ubuntu1990`，构建时告警）；只给了 `--password-hash` 时装机生成随机密码写入 `/root/x11vnc-password`（root 0600）。和 `--wayland` 同用时告警并忽略 |
+| `--skip 36` | 跳过这个钩子：效果同 `--wayland`（保留 Wayland、不装 x11vnc） |
+
+旧参数 `--disable-wayland` 和 `--x11vnc` **已移除**，再传会直接报错并提示改用默认行为或 `--wayland`。
+
+构建时会醒目告警：VNC 流量不加密、局域网内可直接连 5900 端口；若 VNC 密码回落到公开的默认值 `ubuntu1990`，装完务必修改。
 
 ```bash
+# Desktop 默认: 关 Wayland + x11vnc, 单独指定 VNC 密码
 ./build-iso.sh --iso ubuntu-24.04.5.1-desktop-amd64.iso --out out/desk-vnc.iso \
-  --password 'Ch@ngeMe' --x11vnc --vnc-password 'Vnc#2026'
+  --password 'Ch@ngeMe' --vnc-password 'Vnc#2026'
+# 保留 Wayland, 不装 x11vnc
+./build-iso.sh --iso ubuntu-24.04.5.1-desktop-amd64.iso --out out/desk.iso \
+  --password 'Ch@ngeMe' --wayland
 ```
+
+全离线时，Desktop 默认要求捆绑里有 `x11vnc` + `xauth`（构建时校验）。抓包脚本早已默认把它们放进捆绑、fingerprint 没有变化，近期抓的捆绑可以直接用；只有在 x11vnc 加入种子之前抓的老捆绑会校验失败，用 `--fetch-offline --force-fetch` 重建即可。
 
 **开机就能连是怎么做到的**
 
@@ -189,7 +200,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 
 加：在 `software/` 放一个 `85-你的东西.sh`，按现有脚本的约定（`set -euo pipefail`、结尾自带校验命令、失败即非零退出）即可，无需改主脚本。
 
-减：`--skip "30 70"` 跳过 Jenkins 和 OpenMausBot；`--skip "30-jenkins 70-openmausbot"` 等价。Desktop 上不装 FlClash 用 `--no-flclash`（或 `--skip 37`）。整套不要就 `--no-provision`。
+减：`--skip "30 70"` 跳过 Jenkins 和 OpenMausBot；`--skip "30-jenkins 70-openmausbot"` 等价。Desktop 上不装 FlClash 用 `--no-flclash`（或 `--skip 37`）。整套不要就 `--no-provision`（Desktop 上要同时加 `--wayland`，因为默认的关 Wayland + x11vnc 由 `36` 钩子落地）。
 
 ---
 
@@ -489,9 +500,8 @@ cat /var/log/autoinstall/20-docker.log
 | `--edition` | `auto`（默认）/ `server` / `desktop`。`auto` 读 ISO 的 `casper/install-sources.yaml`（`variant: desktop/server`），退回 `.disk/info`；显式指定优先 |
 | `--desktop-source` | 仅 desktop：`minimal`（默认，`ubuntu-desktop-minimal`）/ `standard`（`ubuntu-desktop`）/ 任意 source id；会对照 ISO 的 install-sources.yaml 校验 |
 | `--realname` | `identity.realname`（登录界面显示名）；desktop 默认等于 `--username` |
-| `--disable-wayland` | 仅 desktop，默认关：GDM 关闭 Wayland（登录界面/锁屏/会话全走 Xorg） |
-| `--x11vnc` | 仅 desktop，默认关：预装 x11vnc，开机即可从登录界面、锁屏、会话 VNC 连接（5900，局域网，不加密）；隐含 `--disable-wayland`，并关掉合盖/空闲挂起 |
-| `--vnc-password P` | x11vnc 密码（≥6 位，VNC 只用前 8 位），默认 = `--password` 明文；只有哈希时装机随机生成 → `/root/x11vnc-password` |
+| `--wayland` | 仅 desktop：保留 Wayland，不装 x11vnc，不改合盖/空闲挂起。**不加时 Desktop 默认**关 Wayland 并预装 x11vnc（开机即可从登录界面、锁屏、会话 VNC 连接，5900，局域网，不加密）。旧的 `--disable-wayland` / `--x11vnc` 已移除，传了会报错 |
+| `--vnc-password P` | x11vnc 密码（≥6 位，VNC 只用前 8 位），默认 = `--password` 明文；只有哈希时装机随机生成 → `/root/x11vnc-password`；与 `--wayland` 同用时忽略 |
 | `--menu-regex` | 要注入的菜单标题正则。默认 server `Try or Install`；desktop `^(Try or Install Ubuntu\|Ubuntu \(safe graphics\))$` |
 
 

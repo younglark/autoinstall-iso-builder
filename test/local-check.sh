@@ -734,7 +734,7 @@ else
 fi
 rm -f "$_sums" "$_bad"
 
-echo "== disable-wayland / x11vnc script (36-x11vnc-xorg) =="
+echo "== wayland-off / x11vnc script (36-x11vnc-xorg) =="
 xr="$(mktemp -d)"
 mkdir -p "$xr/etc/gdm3"
 printf '# GDM configuration storage\n\n[daemon]\n# Uncomment the line below to force the login screen to use Xorg\n#WaylandEnable=false\nAutomaticLoginEnable=False\n\n[security]\n\n[debug]\n#Enable=true\n' > "$xr/etc/gdm3/custom.conf"
@@ -762,7 +762,7 @@ then
   if [[ ! -e "$xr/etc/systemd/system/x11vnc.service" ]]; then
     pass "gdm custom.conf: WaylandEnable=false idempotent, other keys kept, no x11vnc"
   else
-    fail "disable-wayland alone installed x11vnc"
+    fail "DISABLE_WAYLAND=1 alone installed x11vnc"
   fi
 else
   fail "gdm custom.conf writer: $(cat "$xr/etc/gdm3/custom.conf")"
@@ -823,35 +823,29 @@ else
 fi
 rm -rf "$xr" "$xr2" "$xr3"
 
-echo "== build-iso --disable-wayland / --x11vnc (fake ISO) =="
+echo "== build-iso remote desktop: Desktop 默认 x11vnc / --wayland (fake ISO) =="
 if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
   xb="$(mktemp -d)"
   bash test/make-fake-iso.sh desktop "$xb/d.iso" >/dev/null 2>&1
   bash test/make-fake-iso.sh server "$xb/s.iso" >/dev/null 2>&1
   _xenv() { xorriso -osirrox on -indev "$1" -extract /provision "$2" >/dev/null 2>&1; }
-  # 默认关闭
-  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o0.iso" --password 'Pl@in99x' >"$xb/o0.log" 2>&1 && _xenv "$xb/o0.iso" "$xb/p0" \
-     && grep -qx 'X11VNC=0' "$xb/p0/provision.env" && grep -qx 'DISABLE_WAYLAND=0' "$xb/p0/provision.env" \
-     && [[ ! -e "$xb/p0/x11vnc.secret" ]] && [[ -f "$xb/p0/36-x11vnc-xorg.sh" ]]; then
-    pass "default: wayland/x11vnc off"
-  else
-    fail "default remote-desktop flags: $(tail -3 "$xb/o0.log")"
-  fi
-  # --x11vnc 隐含 --disable-wayland, 默认密码 = --password, 明文不进日志/provision.env
-  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o1.iso" --password 'Pl@in99x' --x11vnc >"$xb/o1.log" 2>&1 && _xenv "$xb/o1.iso" "$xb/p1" \
+  # Desktop 默认: 关 Wayland + x11vnc, 密码 = --password (secret 文件), 明文不进日志/provision.env, 安全告警
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o1.iso" --password 'Pl@in99x' >"$xb/o1.log" 2>&1 && _xenv "$xb/o1.iso" "$xb/p1" \
      && grep -qx 'X11VNC=1' "$xb/p1/provision.env" && grep -qx 'DISABLE_WAYLAND=1' "$xb/p1/provision.env" \
-     && grep -q '自动启用 --disable-wayland' "$xb/o1.log" \
+     && [[ -f "$xb/p1/36-x11vnc-xorg.sh" ]] \
+     && grep -q 'VNC 流量不加密' "$xb/o1.log" && grep -q '5900' "$xb/o1.log" \
+     && ! grep -q 'x11vnc 使用默认密码' "$xb/o1.log" \
      && ( # shellcheck disable=SC1091
           . "$xb/p1/x11vnc.secret"; [[ "$VNC_PASSWORD" == 'Pl@in99x' ]] ) \
      && ! grep -q 'Pl@in99x' "$xb/o1.log" "$xb/p1/provision.env"; then
-    pass "--x11vnc implies --disable-wayland, password via secret file, not logged"
+    pass "desktop default: wayland off + x11vnc, password via secret file, not logged, security warning"
   else
-    fail "--x11vnc build: $(tail -3 "$xb/o1.log")"
+    fail "desktop default x11vnc build: $(tail -3 "$xb/o1.log")"
   fi
-  # 默认凭据 → 告警; --vnc-password 覆盖
-  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o2.iso" --x11vnc >"$xb/o2.log" 2>&1 \
+  # 默认凭据 → 默认密码告警; --vnc-password 覆盖
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o2.iso" >"$xb/o2.log" 2>&1 \
      && grep -q 'x11vnc 使用默认密码' "$xb/o2.log" && ! grep -q 'ubuntu1990' "$xb/o2.log" \
-     && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o3.iso" --x11vnc --vnc-password 'vncpass1' >"$xb/o3.log" 2>&1 && _xenv "$xb/o3.iso" "$xb/p3" \
+     && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o3.iso" --vnc-password 'vncpass1' >"$xb/o3.log" 2>&1 && _xenv "$xb/o3.iso" "$xb/p3" \
      && ( # shellcheck disable=SC1091
           . "$xb/p3/x11vnc.secret"; [[ "$VNC_PASSWORD" == 'vncpass1' ]] ) && ! grep -q 'vncpass1' "$xb/o3.log"; then
     pass "x11vnc default-password warning + --vnc-password override"
@@ -859,32 +853,60 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
     fail "x11vnc password defaults"
   fi
   # 只有哈希 → 无 secret, 提示随机密码
-  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o4.iso" --password-hash "$(openssl passwd -6 x)" --x11vnc >"$xb/o4.log" 2>&1 && _xenv "$xb/o4.iso" "$xb/p4" \
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o4.iso" --password-hash "$(openssl passwd -6 x)" >"$xb/o4.log" 2>&1 && _xenv "$xb/o4.iso" "$xb/p4" \
      && [[ ! -e "$xb/p4/x11vnc.secret" ]] && grep -q '/root/x11vnc-password' "$xb/o4.log"; then
     pass "x11vnc hash-only: random password notice"
   else
     fail "x11vnc hash-only"
   fi
-  # --disable-wayland 单独
-  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o5.iso" --password 'Pl@in99x' --disable-wayland >"$xb/o5.log" 2>&1 && _xenv "$xb/o5.iso" "$xb/p5" \
-     && grep -qx 'DISABLE_WAYLAND=1' "$xb/p5/provision.env" && grep -qx 'X11VNC=0' "$xb/p5/provision.env"; then
-    pass "--disable-wayland alone"
+  # --wayland: 保留 Wayland, 不装 x11vnc; --vnc-password 告警并忽略 (不进 ISO)
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o5.iso" --password 'Pl@in99x' --wayland --vnc-password 'vncpass2' >"$xb/o5.log" 2>&1 && _xenv "$xb/o5.iso" "$xb/p5" \
+     && grep -qx 'DISABLE_WAYLAND=0' "$xb/p5/provision.env" && grep -qx 'X11VNC=0' "$xb/p5/provision.env" \
+     && [[ ! -e "$xb/p5/x11vnc.secret" ]] && grep -q -- '--vnc-password 与 --wayland 同用无效' "$xb/o5.log" \
+     && ! grep -q 'VNC 流量不加密' "$xb/o5.log" && ! grep -q 'vncpass2' "$xb/o5.log"; then
+    pass "--wayland: keeps wayland, no x11vnc, --vnc-password ignored"
   else
-    fail "--disable-wayland alone"
+    fail "--wayland: $(tail -3 "$xb/o5.log")"
   fi
-  # Server: 忽略并告警
-  if bash build-iso.sh --iso "$xb/s.iso" --out "$xb/o6.iso" --password 'Pl@in99x' --x11vnc --disable-wayland >"$xb/o6.log" 2>&1 && _xenv "$xb/o6.iso" "$xb/p6" \
-     && grep -q '只用于 Desktop' "$xb/o6.log" && grep -qx 'X11VNC=0' "$xb/p6/provision.env" && [[ ! -e "$xb/p6/x11vnc.secret" ]]; then
-    pass "server: --x11vnc ignored with warning"
+  # --wayland 可与 --no-provision 同用 (钩子空跑)
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o7.iso" --password 'Pl@in99x' --wayland --no-provision --dry-run >"$xb/o7.log" 2>&1; then
+    pass "--wayland --no-provision allowed"
   else
-    fail "server x11vnc handling"
+    fail "--wayland --no-provision: $(tail -3 "$xb/o7.log")"
   fi
-  for bad in "--x11vnc --no-provision" "--disable-wayland --no-provision" "--x11vnc --vnc-password 12345"; do
+  # --skip 36: 跳过默认行为 (告警, 不投递 secret)
+  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o8.iso" --password 'Pl@in99x' --skip 36 >"$xb/o8.log" 2>&1 && _xenv "$xb/o8.iso" "$xb/p8" \
+     && grep -q '跳过了 36-x11vnc-xorg' "$xb/o8.log" && [[ ! -e "$xb/p8/x11vnc.secret" ]]; then
+    pass "--skip 36 skips default x11vnc"
+  else
+    fail "--skip 36: $(tail -3 "$xb/o8.log")"
+  fi
+  # Server: 不受影响; --wayland 告警忽略
+  if bash build-iso.sh --iso "$xb/s.iso" --out "$xb/o6.iso" --password 'Pl@in99x' >"$xb/o6.log" 2>&1 && _xenv "$xb/o6.iso" "$xb/p6" \
+     && grep -qx 'X11VNC=0' "$xb/p6/provision.env" && grep -qx 'DISABLE_WAYLAND=0' "$xb/p6/provision.env" \
+     && [[ ! -e "$xb/p6/x11vnc.secret" ]] && ! grep -q 'VNC 流量不加密' "$xb/o6.log" \
+     && bash build-iso.sh --iso "$xb/s.iso" --out "$xb/o6b.iso" --password 'Pl@in99x' --wayland --dry-run >"$xb/o6b.log" 2>&1 \
+     && grep -q -- '--wayland 只用于 Desktop' "$xb/o6b.log"; then
+    pass "server: no x11vnc by default, --wayland ignored with warning"
+  else
+    fail "server x11vnc handling: $(tail -3 "$xb/o6.log" "$xb/o6b.log")"
+  fi
+  # 旧参数已移除: 报错并提示 --wayland
+  for old in --disable-wayland --x11vnc; do
+    if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/bad.iso" --password x "$old" --dry-run >"$xb/old.log" 2>&1; then
+      fail "should reject removed flag: $old"
+    elif grep -q -- "$old 已移除" "$xb/old.log" && grep -q -- '--wayland' "$xb/old.log"; then
+      pass "rejects removed flag: $old (hint --wayland)"
+    else
+      fail "removed flag message: $old: $(tail -2 "$xb/old.log")"
+    fi
+  done
+  for bad in "--no-provision" "--vnc-password 12345"; do
     # shellcheck disable=SC2086
     if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/bad.iso" --password x $bad --dry-run >/dev/null 2>&1; then
-      fail "should reject: $bad"
+      fail "desktop should reject: $bad"
     else
-      pass "rejects: $bad"
+      pass "desktop rejects: $bad"
     fi
   done
   rm -rf "$xb"
@@ -1245,7 +1267,7 @@ if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip 30" >/dev
 else
   fail "validate jenkins-plugins skip logic"
 fi
-# --require-x11vnc (build-iso --x11vnc): 捆绑里必须有 x11vnc + xauth
+# --require-x11vnc (build-iso Desktop 默认, 未加 --wayland): 捆绑里必须有 x11vnc + xauth
 if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip 30" >/dev/null 2>&1 \
    && ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip 30" --require-x11vnc >/dev/null 2>&1; then
   printf 'Package: x11vnc\nVersion: 1\n\nPackage: xauth\nVersion: 1\n\n' >> "$vb/apt/Packages"

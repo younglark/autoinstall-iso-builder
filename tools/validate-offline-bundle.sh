@@ -3,7 +3,7 @@
 # 用法:
 #   ./tools/validate-offline-bundle.sh --bundle DIR [--release noble|jammy|24.04|22.04]
 #       [--skip "30 70"] [--pin-node N] [--pin-grok V] [--jenkins-plugins "a b"] ...
-#       [--require-x11vnc]   (build-iso --x11vnc 时: 捆绑里必须有 x11vnc + xauth)
+#       [--require-x11vnc]   (build-iso Desktop 默认装 x11vnc 时 (未加 --wayland): 捆绑里必须有 x11vnc + xauth)
 set -Eeuo pipefail
 
 BUNDLE=""
