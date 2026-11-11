@@ -658,6 +658,9 @@ for _s in "${SEEDS[@]}"; do SEED_NAMES+=("${_s%%=*}"); done
 
 # ---- deb 复用: 先按空 archives 解析出本次需要的全部文件 (名 + 大小 + 索引哈希) ----
 NEED_LIST="$(mktemp)"
+SEED_URIS="$(mktemp)"
+CLOSURE_NAMES="$(mktemp)"
+KDROP_LIST="$(mktemp)"
 EMPTY_ARCH="$(mktemp -d)"
 mkdir -p "$EMPTY_ARCH/partial"
 # 输出格式: 'URI' 文件名 大小 SHA256:hex
@@ -666,14 +669,24 @@ print_uris() {
     | awk -F"'" 'NF>=3 {print $3}' | awk 'NF>=3 {print $1, $2, $3}'
 }
 
+# SEEDS 的求解器闭包 (pkg=ver 锁版本, 与下面实际下载同一事务): 内核类包以它为准。
+# 容器里没装任何内核, 所以闭包里的内核类包就是选定 flavour (generic / generic-hwe-*) 及其 ABI 需要的全部。
+print_uris install --download-only --reinstall "${SEEDS[@]}" > "$SEED_URIS" \
+  || print_uris install --download-only "${SEEDS[@]}" > "$SEED_URIS" || true
+aib_deb_pkg_name < "$SEED_URIS" | sort -u > "$CLOSURE_NAMES"
+
 # 已装在容器里的依赖 (如 libcurl4t64) 不会因 --reinstall SEEDS 而被重新下载,
 # 导致离线池缺依赖: curl_X 需要 libcurl4t64(=X) 但池里没有。强制把递归 Depends 也 download。
 mapfile -t _dep_pkgs < <(
   apt-cache depends --recurse --no-recommends --no-suggests \
     --no-conflicts --no-breaks --no-replaces --no-enhances \
     "${SEED_NAMES[@]}" 2>/dev/null \
-    | awk '/^[A-Za-z0-9]/{print $1}' | sort -u
+    | awk '/^[A-Za-z0-9]/{print $1}' | sort -u \
+    | aib_kernel_filter "$CLOSURE_NAMES" "$KDROP_LIST"
 )
+if [ -s "$KDROP_LIST" ]; then
+  echo "递归依赖里不属于选定内核 flavour 的内核类包: 跳过 $(wc -l < "$KDROP_LIST") 个 (aws/azure/gcp/oracle/lowlatency/… 及其 NVIDIA 预编译模块)"
+fi
 _dl=()
 for _p in "${_dep_pkgs[@]}"; do
   # linux-firmware* (~600MB) 不进捆绑: 目标机装机时已带 linux-firmware, 内核 meta 的依赖不带版本约束
@@ -685,12 +698,11 @@ for _p in "${_dep_pkgs[@]}"; do
 done
 # 解析阶段: SEEDS 闭包 + 递归依赖 (与下面实际下载同样的分批/逐个回退)
 {
-  print_uris install --download-only --reinstall "${SEEDS[@]}" \
-    || print_uris install --download-only "${SEEDS[@]}" || true
+  cat "$SEED_URIS"
   _j=0
   while [ "$_j" -lt "${#_dl[@]}" ]; do
     _c=("${_dl[@]:_j:40}")
-    if ! print_uris install --download-only --reinstall "${_c[@]}"; then
+    if ! print_uris download "${_c[@]}"; then
       for _q in "${_c[@]}"; do print_uris download "$_q" || true; done
     fi
     _j=$((_j + 40))
@@ -714,26 +726,40 @@ apt-get install -y --download-only --reinstall -o Dir::Cache::archives=/var/cach
 
 if [ "${#_dl[@]}" -gt 0 ]; then
   echo "force-download ${#_dl[@]} recursive depends (incl. already-installed)"
-  # 分批, 避免命令行过长; 失败不致命 (个别过渡包可忽略)
+  # 用 apt-get download (按候选版本取文件, 不做依赖求解): 递归列表本身已闭合 (含所有替代/Provides),
+  # 不需要再求解。以前用 install --download-only --reinstall 分批, 批内有互斥替代 (polkitd 的
+  # default-logind | logind → elogind vs systemd, libqt5gui5t64 vs libqt5gui5-gles …) 时整批作废,
+  # 日志里一堆整批失败再逐个回退; 结果文件相同, 只是噪声和多余的求解。
+  # 已在 archives 的 (复用或已下载, 大小+哈希一致) apt-get download 会直接跳过。
   _i=0
   while [ "$_i" -lt "${#_dl[@]}" ]; do
     _chunk=("${_dl[@]:_i:40}")
-    if ! apt-get install -y --download-only --reinstall \
-      -o Dir::Cache::archives=/var/cache/apt/archives \
-      "${_chunk[@]}"; then
-      # 整批是一个事务: 批内有互斥的候选 (如 libqt5gui5t64 vs libqt5gui5-gles) 时整批作废,
-      # 会把同批的 libpsl5t64 / python3.12 等一起漏掉。逐个 apt-get download (不解析依赖, 不会冲突)。
-      echo "chunk failed; per-package download fallback (${#_chunk[@]})"
-      # 已在 archives 的 (复用或已下载) 跳过
+    if ! ( cd /var/cache/apt/archives && apt-get download -q -o APT::Sandbox::User=root "${_chunk[@]}" >/dev/null 2>&1 ); then
+      # 批内个别名字无候选 (只剩旧版本 / 被 pin 掉) 时整批失败: 逐个下载
+      echo "batch download failed; per-package download fallback (${#_chunk[@]})"
       ( cd /var/cache/apt/archives && for _q in "${_chunk[@]}"; do
-          _want="$(print_uris download "$_q" | awk '{print $1}' | head -1 || true)"
-          if [ -n "$_want" ] && [ -f "$_want" ]; then continue; fi
-          apt-get download -o APT::Sandbox::User=root "$_q" >/dev/null 2>&1 || echo "  skip: $_q"
+          apt-get download -q -o APT::Sandbox::User=root "$_q" >/dev/null 2>&1 || echo "  skip: $_q"
         done )
     fi
     _i=$((_i + 40))
   done
 fi
+
+# 内核类包核对: 只能是求解器为选定 flavour 解析出的那些 (防止递归展开把其它 flavour 内核带回来)
+_kbad=0; _kn=0; _kbytes=0
+for _f in "$ARCHIVES"/*.deb; do
+  [ -f "$_f" ] || continue
+  _p="$(basename "$_f" | aib_deb_pkg_name)"
+  aib_is_kernel_pkg "$_p" || continue
+  _kn=$((_kn + 1)); _kbytes=$((_kbytes + $(stat -c %s "$_f")))
+  if ! grep -qxF -- "$_p" "$CLOSURE_NAMES"; then
+    echo "ERROR: 捆绑里出现不属于选定内核 flavour 的内核类包: $(basename "$_f")" >&2
+    _kbad=1
+  fi
+done
+echo "内核类 deb (flavour: ${NVIDIA_FLAVOURS:-无}): $_kn 个, $((_kbytes / 1048576)) MiB"
+[ "$_kbad" -eq 0 ] || exit 1
+rm -f "$SEED_URIS" "$CLOSURE_NAMES" "$KDROP_LIST"
 
 # 把 FlClash .deb 放进 archives, 并用 apt 再解析一次依赖 (以防 Depends 有遗漏)
 if [ -n "$FLCLASH_DEB" ]; then

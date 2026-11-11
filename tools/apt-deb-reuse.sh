@@ -63,3 +63,43 @@ aib_deb_sync_cache() {
   fi
   echo "$synced $pruned"
 }
+
+# ---- 内核类包过滤 (NVIDIA 预编译模块 / 内核 meta 的虚包、替代依赖) ----
+# apt-cache depends --recurse 会把 "A | B" 的所有替代、虚包的所有 Provides 都展开:
+# linux-modules-nvidia-595-open-generic 的 nvidia-dkms-595-open 等虚包会拉进 aws/azure/gcp/oracle/
+# lowlatency/nvidia/6.14 hwe … 全部 flavour 的 linux-image / linux-modules / 预编译模块 (每个 ~150MB)。
+# 内核类包只保留 apt 求解器为 SEEDS (pkg=ver 锁版本) 实际解析出的那些 (= 选定 flavour + 其 ABI)。
+
+# aib_deb_pkg_name: stdin 每行 "<文件名> ..." (pkg_ver_arch.deb) → 包名
+aib_deb_pkg_name() {
+  awk 'NF { n = $1; sub(/_.*/, "", n); if (n != "") print n }'
+}
+
+# aib_is_kernel_pkg NAME: 内核 / 内核模块 / 头文件 / 工具 / 内核 meta (按 flavour 区分的包) → 0
+#   不算内核类 (与 flavour 无关, 照常走递归闭包): linux-firmware* (另有规则) linux-base* linux-libc-dev
+#   linux-sound-base linux-doc linux-source* linux-tools-common linux-cloud-tools-common linux-tools-host
+aib_is_kernel_pkg() {
+  case "$1" in
+    linux-firmware|linux-firmware-*|linux-base|linux-base-*|linux-libc-dev|linux-libc-dev-*) return 1 ;;
+    linux-sound-base|linux-doc|linux-source|linux-source-*) return 1 ;;
+    linux-tools-common|linux-cloud-tools-common|linux-tools-host) return 1 ;;
+    linux-*) return 0 ;;
+    nvidia-dkms-*|nvidia-kernel-source-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# aib_kernel_filter ALLOW_FILE [DROPPED_FILE] < 包名 > 包名
+#   内核类且不在 ALLOW_FILE (求解器闭包包名, 每行一个) 的丢弃 (写入 DROPPED_FILE); 其余原样输出
+aib_kernel_filter() {
+  local allow="$1" dropped="${2:-/dev/null}" p
+  : > "$dropped"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if aib_is_kernel_pkg "$p" && ! grep -qxF -- "$p" "$allow"; then
+      printf '%s\n' "$p" >> "$dropped"
+      continue
+    fi
+    printf '%s\n' "$p"
+  done
+}

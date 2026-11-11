@@ -2444,6 +2444,69 @@ else
   fail "fetch reuse wiring"
 fi
 
+echo "== fetch: 内核类包只保留选定 flavour (NVIDIA 595-open generic / generic-hwe-24.04) =="
+# fixture: noble 上真实 apt-cache depends --recurse 输出 (recurse.txt) 与 SEEDS 求解器闭包 (closure.txt) 的内核/NVIDIA 相关部分
+kf=test/fixtures/kernel-filter
+kt="$(mktemp -d)"
+# shellcheck disable=SC1091
+. tools/apt-deb-reuse.sh
+aib_kernel_filter "$kf/closure.txt" "$kt/dropped" < "$kf/recurse.txt" > "$kt/kept"
+_kok=1
+# 1) 保留下来的内核类包必须都在求解器闭包里
+while IFS= read -r p; do
+  if aib_is_kernel_pkg "$p" && ! grep -qxF "$p" "$kf/closure.txt"; then echo "  kept non-closure kernel pkg: $p" >&2; _kok=0; fi
+done < "$kt/kept"
+# 2) 不能有其它 flavour / 其它 ABI 的内核
+if grep -E -- '-(aws|azure|azure-fde|gcp|gke|ibm|oracle|nvidia|nvidia-lowlatency|lowlatency|vmware|oem)(-[0-9.]+)?$|-(6\.11|6\.14|6\.17)\.|unsigned' "$kt/kept" \
+   | while IFS= read -r p; do aib_is_kernel_pkg "$p" && echo "$p"; done | grep -q .; then
+  echo "  other flavour kernel kept: $(grep -E -- '-(aws|azure|gcp|gke|ibm|oracle|lowlatency|vmware|oem)' "$kt/kept" | grep '^linux-' | head -3 | tr '\n' ' ')" >&2; _kok=0
+fi
+# 3) 闭包里且出现在递归列表里的内核类包全部保留; generic / hwe 的关键包都在
+while IFS= read -r p; do
+  if aib_is_kernel_pkg "$p" && grep -qxF "$p" "$kf/recurse.txt" && ! grep -qxF "$p" "$kt/kept"; then echo "  dropped needed: $p" >&2; _kok=0; fi
+done < "$kf/closure.txt"
+for p in linux-modules-nvidia-595-open-generic-hwe-24.04 linux-modules-nvidia-595-open-generic \
+         linux-modules-nvidia-595-open-7.0.0-42-generic linux-modules-nvidia-595-open-6.8.0-149-generic \
+         linux-image-7.0.0-42-generic linux-image-6.8.0-149-generic linux-modules-7.0.0-42-generic \
+         linux-modules-6.8.0-149-generic linux-generic-hwe-24.04 linux-generic \
+         polkitd elogind dkms linux-base linux-libc-dev linux-firmware libc6; do
+  grep -qxF "$p" "$kt/kept" || { echo "  missing kept: $p" >&2; _kok=0; }
+done
+for p in linux-image-6.17.0-1020-aws linux-modules-nvidia-595-open-aws linux-modules-nvidia-595-open-6.8.0-1069-aws \
+         linux-image-7.0.0-1017-azure linux-modules-nvidia-595-open-oracle linux-image-6.8.0-149-lowlatency \
+         linux-image-6.14.0-1015-nvidia linux-image-unsigned-7.0.0-42-generic linux-image-6.17.0-42-generic \
+         nvidia-dkms-595-open; do
+  grep -qxF "$p" "$kt/dropped" || { echo "  not dropped: $p" >&2; _kok=0; }
+done
+# 4) 分类函数
+for p in linux-image-generic linux-headers-7.0.0-42-generic linux-hwe-7.0-tools-7.0.0-42 linux-objects-nvidia-595-open-7.0.0-42-generic \
+         linux-signatures-nvidia-7.0.0-42-generic linux-cloud-tools-6.8.0-149-generic linux-buildinfo-6.8.0-149-generic linux-aws nvidia-dkms-595-open; do
+  aib_is_kernel_pkg "$p" || { echo "  should be kernel-class: $p" >&2; _kok=0; }
+done
+for p in linux-firmware linux-firmware-intel-graphics linux-base linux-libc-dev linux-tools-common linux-sound-base dkms nvidia-driver-595-open libnvidia-gl-595; do
+  if aib_is_kernel_pkg "$p"; then echo "  should not be kernel-class: $p" >&2; _kok=0; fi
+done
+if [[ "$_kok" -eq 1 && "$(wc -l < "$kt/dropped")" -ge 150 ]]; then
+  pass "kernel filter: keeps generic/hwe closure ($(grep -c '^linux-' "$kt/kept") linux-*), drops $(wc -l < "$kt/dropped") other-flavour pkgs"
+else
+  fail "kernel filter (dropped $(wc -l < "$kt/dropped"))"
+fi
+rm -rf "$kt"
+# 接线: 递归列表过内核过滤; 补下载用 apt-get download (不求解, 无 chunk 冲突); 下载后核对内核类包
+_fb="$(sed -n '/^# ---- deb 复用/,/^# 把 FlClash .deb/p' tools/fetch-offline-bundle.sh)"
+# shellcheck disable=SC2016  # 字面量匹配脚本源码
+if grep -qF 'aib_kernel_filter "$CLOSURE_NAMES"' <<<"$_fb" \
+   && grep -qF 'aib_deb_pkg_name < "$SEED_URIS"' <<<"$_fb" \
+   && grep -qF 'apt-get download -q -o APT::Sandbox::User=root "${_chunk[@]}"' <<<"$_fb" \
+   && grep -qF 'print_uris download "${_c[@]}"' <<<"$_fb" \
+   && ! grep -q 'chunk failed' <<<"$_fb" \
+   && ! grep -q 'install -y --download-only --reinstall' <<<"$(sed -n '/_chunk=(/,/_i=\$((_i/p' <<<"$_fb")" \
+   && grep -q '捆绑里出现不属于选定内核 flavour 的内核类包' <<<"$_fb"; then
+  pass "fetch wires kernel filter + batch apt-get download + post-download kernel check"
+else
+  fail "fetch kernel filter wiring"
+fi
+
 echo "== fetch-offline-bundle recursive depends =="
 if grep -q 'force-download' tools/fetch-offline-bundle.sh && grep -q 'apt-cache depends --recurse' tools/fetch-offline-bundle.sh \
    && grep -q 'per-package download fallback' tools/fetch-offline-bundle.sh; then
