@@ -52,8 +52,8 @@ try {
   Expect 'jammy 本地变体' $out 'autoinstall-iso-builder:local-jammy'
   Expect 'jammy 用 22.04 构建' $out 'UBUNTU_VERSION=22.04 --platform linux/amd64'
 
-  $out = Run-Aib --dry-run build --iso u.iso --out o.iso --x11vnc --disable-wayland --vnc-password 'vnc s3cret'
-  Expect '--x11vnc 透传' $out '--x11vnc --disable-wayland'
+  $out = Run-Aib --dry-run build --iso u.iso --out o.iso --wayland --vnc-password 'vnc s3cret'
+  Expect '--wayland 透传' $out '--wayland --vnc-password'
   Expect 'VNC 密码打码' $out "--vnc-password '***'"
   Reject 'VNC 密码不泄露' $out 's3cret'
   $out = Run-Aib --dry-run fetch-offline --release noble --apt-cache (Join-Path $work 'debcache')

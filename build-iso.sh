@@ -69,8 +69,9 @@ JENKINS_ADMIN_USER=""
 JENKINS_ADMIN_PASSWORD=""
 DEFAULT_JENKINS_PLUGINS="workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger"
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-$DEFAULT_JENKINS_PLUGINS}"
-# 远程桌面 (仅 Desktop, 默认关闭): 关 Wayland / x11vnc 开机即可连 (隐含关 Wayland)
-DISABLE_WAYLAND=0
+# 远程桌面 (仅 Desktop, 默认开启): 关 Wayland + 预装 x11vnc 开机即可连; --wayland 保留 Wayland 且不装 x11vnc
+WAYLAND=0
+DISABLE_WAYLAND=0   # 内部: 由 EDITION + WAYLAND 推导后写入 provision.env
 X11VNC=0
 VNC_PASSWORD=""
 NO_FLCLASH=0
@@ -141,13 +142,14 @@ usage() {
   --jenkins-plugins "a b c"
                         预装的 Jenkins 插件 (自动带全部依赖; 可写 name:version), 空格分隔
                         默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger
-  --disable-wayland     仅 desktop: GDM 关闭 Wayland (/etc/gdm3/custom.conf WaylandEnable=false),
-                        登录界面 / 锁屏 / 用户会话全部走 Xorg。默认不关
-  --x11vnc              仅 desktop: 预装 x11vnc, 开机即可在 GDM 登录界面、锁屏和登录后的会话里
-                        用 VNC 连上本地桌面 (端口 5900, 仅限局域网; 不加密)。隐含 --disable-wayland,
-                        并关闭合盖挂起 / 空闲自动挂起 (锁屏保留)。默认不装
-  --vnc-password P      x11vnc 密码 (VNC 只用前 8 个字符)。默认 = --password 明文 (含默认密码);
-                        只给了 --password-hash 时装机生成随机密码写入 /root/x11vnc-password
+  (远程桌面)            Desktop 默认: GDM 关闭 Wayland (/etc/gdm3/custom.conf WaylandEnable=false,
+                        登录界面 / 锁屏 / 会话全走 Xorg) 并预装 x11vnc, 开机即可在登录界面、锁屏和
+                        会话里用 VNC 连上本地桌面 (端口 5900, 局域网; 不加密), 并关闭合盖 / 空闲挂起
+                        (锁屏保留)。--skip 36 也可跳过这一步
+  --wayland             仅 desktop: 保留 Wayland, 不装 x11vnc, 不改合盖 / 空闲挂起设置
+  --vnc-password P      x11vnc 密码 (≥6 位, VNC 只用前 8 个字符)。默认 = --password 明文 (含默认密码);
+                        只给了 --password-hash 时装机生成随机密码写入 /root/x11vnc-password。
+                        与 --wayland 同用时无效
   --iso-sha256 HEX      校验源 ISO 的 SHA256, 不匹配则失败
   --iso-sha256sums FILE 用 SHA256SUMS 文件按 basename 校验源 ISO
   --menu-regex REGEX    要注入的菜单项标题正则。默认 server: "Try or Install";
@@ -228,8 +230,9 @@ while [[ $# -gt 0 ]]; do
     --jenkins-admin-user) JENKINS_ADMIN_USER="$2"; shift 2 ;;
     --jenkins-admin-password) JENKINS_ADMIN_PASSWORD="$2"; shift 2 ;;
     --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
-    --disable-wayland) DISABLE_WAYLAND=1; shift ;;
-    --x11vnc)         X11VNC=1; shift ;;
+    --wayland)        WAYLAND=1; shift ;;
+    --disable-wayland|--x11vnc)
+      die "$1 已移除: Desktop 现在默认关闭 Wayland 并预装 x11vnc; 要保留 Wayland 且不装 x11vnc 请用 --wayland" ;;
     --vnc-password)   VNC_PASSWORD="$2"; shift 2 ;;
     --iso-sha256)     ISO_SHA256="$2"; shift 2 ;;
     --iso-sha256sums) ISO_SHA256SUMS="$2"; shift 2 ;;
@@ -431,20 +434,21 @@ else
   [[ -n "$MENU_REGEX" ]] || MENU_REGEX="Try or Install"
 fi
 
-# ---------------------------------------------------------------- 远程桌面 (Desktop 可选)
+# ---------------------------------------------------------------- 远程桌面 (Desktop 默认开启)
+# Desktop 且没给 --wayland: 关 Wayland + 预装 x11vnc (36-x11vnc-xorg.sh); 否则两者都关, 钩子空跑。
 VNC_PW_SOURCE=""
 if [[ "$EDITION" != "desktop" ]]; then
-  if [[ "$DISABLE_WAYLAND" -eq 1 || "$X11VNC" -eq 1 ]]; then
-    warn "--disable-wayland / --x11vnc 只用于 Desktop; 当前 edition=$EDITION, 忽略"
-  fi
+  if [[ "$WAYLAND" -eq 1 ]]; then warn "--wayland 只用于 Desktop; 当前 edition=$EDITION, 忽略"; fi
   DISABLE_WAYLAND=0
   X11VNC=0
+elif [[ "$WAYLAND" -eq 1 ]]; then
+  DISABLE_WAYLAND=0
+  X11VNC=0
+else
+  DISABLE_WAYLAND=1
+  X11VNC=1
 fi
 if [[ "$X11VNC" -eq 1 ]]; then
-  if [[ "$DISABLE_WAYLAND" -ne 1 ]]; then
-    warn "--x11vnc 需要 Xorg: 自动启用 --disable-wayland (登录界面/锁屏/会话全部走 Xorg)"
-    DISABLE_WAYLAND=1
-  fi
   if [[ -n "$VNC_PASSWORD" ]]; then
     [[ "$VNC_PASSWORD" != *$'\n'* ]] || die "--vnc-password 不能含换行"
     [[ "${#VNC_PASSWORD}" -ge 6 ]] || die "--vnc-password 至少 6 位"
@@ -458,17 +462,25 @@ if [[ "$X11VNC" -eq 1 ]]; then
   if [[ -n "$VNC_PASSWORD" && "${#VNC_PASSWORD}" -gt 8 ]]; then
     warn "VNC 密码超过 8 位: VNC 协议只校验前 8 个字符"
   fi
-  if [[ "$VNC_PW_SOURCE" == "password" && "$USED_DEFAULT_PASSWORD" -eq 1 ]]; then
-    warn "x11vnc 使用默认密码 (与用户 $USERNAME_ 相同, 公开的默认值); 装完请改: sudo x11vnc -storepasswd /etc/x11vnc.pass && sudo systemctl restart x11vnc"
-  fi
 elif [[ -n "$VNC_PASSWORD" ]]; then
-  warn "--vnc-password 只在 --x11vnc 时生效, 忽略"
+  if [[ "$EDITION" == "desktop" ]]; then
+    warn "--vnc-password 与 --wayland 同用无效 (不装 x11vnc), 忽略"
+  else
+    warn "--vnc-password 只用于 Desktop 的 x11vnc; 当前 edition=$EDITION, 忽略"
+  fi
   VNC_PASSWORD=""
 fi
-if [[ "$DISABLE_WAYLAND" -eq 1 || "$X11VNC" -eq 1 ]]; then
-  [[ "$PROVISION" -eq 1 ]] || die "--disable-wayland / --x11vnc 由 software/36-x11vnc-xorg.sh 落地, 不能与 --no-provision 同用"
-  should_skip_script 36-x11vnc-xorg && warn "--skip 跳过了 36-x11vnc-xorg: --disable-wayland / --x11vnc 不会生效"
-  log "远程桌面: disable-wayland=$DISABLE_WAYLAND x11vnc=$X11VNC${VNC_PW_SOURCE:+ vnc-password=$VNC_PW_SOURCE}"
+if [[ "$X11VNC" -eq 1 ]]; then
+  [[ "$PROVISION" -eq 1 ]] || die "Desktop 默认关 Wayland + 预装 x11vnc, 由 software/36-x11vnc-xorg.sh 落地, 不能与 --no-provision 同用 (要保留 Wayland 且不装 x11vnc 请加 --wayland)"
+  if should_skip_script 36-x11vnc-xorg; then
+    warn "--skip 跳过了 36-x11vnc-xorg: 保留 Wayland, 不装 x11vnc"
+  else
+    log "远程桌面: 关 Wayland + x11vnc (端口 5900)${VNC_PW_SOURCE:+ vnc-password=$VNC_PW_SOURCE}; 不需要请加 --wayland"
+    warn "x11vnc 安全提示: VNC 流量不加密, 局域网内可直接连 5900 端口; 只在可信网络用, 不要映射到公网 (外网走 VPN / SSH 隧道)"
+    if [[ "$VNC_PW_SOURCE" == "password" && "$USED_DEFAULT_PASSWORD" -eq 1 ]]; then
+      warn "x11vnc 使用默认密码 (与用户 $USERNAME_ 相同, 公开的默认值); 装完请改: sudo x11vnc -storepasswd /etc/x11vnc.pass && sudo systemctl restart x11vnc"
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------- 全离线捆绑
@@ -523,6 +535,7 @@ if [[ -n "$OFFLINE_BUNDLE" ]]; then
     [[ -n "$REL_FOR_V" ]] && VAL_ARGS+=(--release "$REL_FOR_V")
     [[ -n "$PIN_UNITY_CLI" ]] && VAL_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
     VAL_ARGS+=(--pin-gitea "$PIN_GITEA" --jenkins-plugins "$JENKINS_PLUGINS")
+    # Desktop 默认 (未加 --wayland) 装 x11vnc: 捆绑必须带 x11vnc + xauth (validate 自己处理 --skip 36)
     [[ "$X11VNC" -eq 1 ]] && VAL_ARGS+=(--require-x11vnc)
     bash "$SCRIPT_DIR/tools/validate-offline-bundle.sh" "${VAL_ARGS[@]}"       || die "离线捆绑校验失败 (见上)。重建: ./tools/fetch-offline-bundle.sh --force ..."
   fi
