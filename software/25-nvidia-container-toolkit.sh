@@ -1,5 +1,5 @@
 #!/bin/bash
-# 25-nvidia-container-toolkit.sh — NVIDIA Container Toolkit (不含 GPU 驱动)
+# 25-nvidia-container-toolkit.sh — NVIDIA Container Toolkit (只装 toolkit; GPU 驱动由 24-nvidia-driver.sh 安装)
 # 官方: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
 # 依赖 20-docker.sh 先写入 /etc/docker/daemon.json；本脚本用 nvidia-ctk 合并 nvidia runtime，不覆盖日志轮转等已有项。
 set -euo pipefail
@@ -37,4 +37,4 @@ grep -q '"nvidia"' /etc/docker/daemon.json || {
   cat /etc/docker/daemon.json
   exit 1
 }
-echo "nvidia-container-toolkit ok (未安装 GPU 驱动；有 GPU 的机器需另行装驱动后可用 --gpus)"
+echo "nvidia-container-toolkit ok (GPU 驱动见 24-nvidia-driver.sh；重启加载驱动后 docker run --gpus all 可用；--no-nvidia-driver 时需自行装驱动)"

@@ -63,6 +63,10 @@ reject "RustDesk 密码不泄露" "$out" "s3cret"
 expect "--rustdesk-server 透传" "$out" "--rustdesk-server rd.example.com"
 reject "--rustdesk-server 不当路径改写" "$out" "/work/rd.example.com"
 
+out="$(PIN_NVIDIA_DRIVER=580 bash "$AIB" --dry-run build --iso u.iso --out o.iso --no-nvidia-driver --nvidia-driver-version 580 --nvidia-kernel-flavour generic)"
+expect "--no-nvidia-driver 透传" "$out" "--no-nvidia-driver --nvidia-driver-version 580 --nvidia-kernel-flavour generic"
+expect "PIN_NVIDIA_DRIVER 透传" "$out" "-e PIN_NVIDIA_DRIVER=580"
+
 out="$(bash "$AIB" --dry-run build --iso u.iso --out o.iso --hostname node07 --service-url-host 192.168.1.20)"
 expect "--service-url-host 透传" "$out" "--hostname node07 --service-url-host 192.168.1.20"
 reject "--service-url-host 不当路径改写" "$out" "/work/192.168.1.20"

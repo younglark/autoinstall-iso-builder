@@ -36,7 +36,8 @@
 | `12-avahi-mdns.sh` | Avahi（mDNS） | 预装了 Gitea 或 Jenkins 时启用：装 `avahi-daemon` + `libnss-mdns`（Desktop 自带则跳过 apt；Server 补装，离线走捆绑），enable `avahi-daemon`，让局域网能用 `<主机名>.local` 访问本机；ufw **已启用**时放行 `5353/udp`，不会主动启用 ufw。详见下文「Gitea / Jenkins 的访问地址」 |
 | `15-github-cli.sh` | GitHub CLI (`gh`) | 官方 apt 源（cli.github.com）；**不**执行 `gh auth` |
 | `20-docker.sh` | Docker CE | 官方仓库（非 `docker.io`），含 compose v2 / buildx，**配了日志轮转** |
-| `25-nvidia-container-toolkit.sh` | NVIDIA Container Toolkit | 官方仓库；`nvidia-ctk` 合并 Docker runtime（保留 daemon.json 日志轮转）；**不装 GPU 驱动** |
+| `24-nvidia-driver.sh` | NVIDIA 驱动 595（open）+ Intel VA-API | **每台机器都装，不检测硬件**（`--no-nvidia-driver` 或 `--skip 24` 关闭）。Ubuntu 官方 `nvidia-driver-595-open` + Canonical 签名的预编译模块 `linux-modules-nvidia-595-open-<flavour>` + **同版本**内核 meta（不走 DKMS，Secure Boot 下可直接加载，不登记 MOK）；另装 `intel-media-va-driver-non-free`、`vainfo`。模块和内核版本对不上时**跳过并记日志**，不让装机失败。详见下文 |
+| `25-nvidia-container-toolkit.sh` | NVIDIA Container Toolkit | 官方仓库；`nvidia-ctk` 合并 Docker runtime（保留 daemon.json 日志轮转）；GPU 驱动由 `24-nvidia-driver.sh` 装 |
 | `30-jenkins.sh` | Jenkins LTS | 优先 JDK 21（不够退 17），jenkins 用户加入 docker 组；**零配置**：跳过安装向导、装机时建好管理员、预装 Pipeline / Git / Gitea / Docker Pipeline / Docker Cloud / Rebuild / AnsiColor / Parameterized Trigger 等插件（含全部依赖），监听 **0.0.0.0:8080**，Jenkins URL 设为 `http://<主机名>.local:8080/` |
 | `35-microsoft-edge.sh` | Microsoft Edge 稳定版 | **仅 Desktop + amd64 默认安装**（Server / 非 amd64 自动跳过，`--skip 35` 也可跳过）。官方 apt 源 `packages.microsoft.com/repos/edge`；设为默认浏览器（`update-alternatives` + 系统/用户 `mimeapps.list`）；GNOME 收藏夹用 Edge 替换 Firefox（Firefox **保留**）；策略关掉首次运行提示，**不**关闭自动更新 |
 | `36-x11vnc-xorg.sh` | 关 Wayland（**Desktop 默认**）+ 可选 x11vnc | 仅 Desktop（Server 跳过）。GDM 登录界面、锁屏、会话都走 Xorg；装了远程桌面时关掉合盖/空闲挂起。`--remote-desktop x11vnc` 时在这里装 x11vnc。`--wayland` 保留 Wayland；`--skip 36` 也可跳过。详见下文「远程桌面」 |
@@ -50,6 +51,25 @@
 | `80-unity-cli.sh` | Unity CLI | 官方 CDN 二进制装到 `/usr/local/bin/unity`；**不含 Editor / 登录 / 许可证** |
 | `85-godot.sh` | Godot Engine 4.7.2 | 官方 Linux x86_64 标准编辑器 zip → `/opt/godot/4.7.2/` + `/usr/local/bin/godot`；**不含 export templates** |
 | `99-cleanup.sh` | 收尾 | 恢复 `resolv.conf`、删 `policy-rc.d`、清 apt 缓存、写清单 |
+
+### NVIDIA 驱动（默认每台机器都装）
+
+`software/24-nvidia-driver.sh` 不做硬件检测，每台机器都装（没有 N 卡的机器只是多了用户态库和一个不会被加载的模块）。不装网卡驱动。
+
+| 包 | 说明 |
+|---|---|
+| `nvidia-driver-595-open` | 用户态驱动（restricted）。分支号可改：`--nvidia-driver-version N`（环境变量 `PIN_NVIDIA_DRIVER`） |
+| `linux-modules-nvidia-595-open-<flavour>` | Canonical 编译并签名的内核模块 meta。它 `Provides: nvidia-dkms-595-open`，所以 apt 不会装 dkms、不会现场编译 |
+| `linux-<flavour>` | 与模块 meta **同版本**的内核 meta（例：`linux-generic-hwe-24.04` 7.0.0-42 ↔ `linux-modules-nvidia-595-open-generic-hwe-24.04` 7.0.0-42 → 内核 `7.0.0-42-generic`）。装完下次开机进这个内核 |
+| `nvidia-settings`、`nvidia-prime` | 仅 Desktop（设置面板、混合显卡 `prime-select`） |
+| `intel-media-va-driver-non-free`、`vainfo` | Intel 核显 VA-API 硬解/硬编（前者仅 amd64；multiverse） |
+
+- **flavour**：按目标机已装的内核 meta 判断（`linux-generic-hwe-24.04` → `generic-hwe-24.04`，`linux-generic` → `generic`，`linux-oem-24.04` → `oem-24.04`），`--nvidia-kernel-flavour F` 可指定。Desktop 24.04 默认是 HWE，Server 默认是 GA。
+- **版本必须一致**：模块 meta 的版本要能找到同版本的 `linux-<flavour>` / `linux-image-<flavour>` / `linux-headers-<flavour>`。内核 meta 候选比模块新（模块还没跟上）时，锁到模块那一版一起装。找不到同版本内核、已装内核比模块还新（会降级）、该 flavour 没有预编译模块、或者 apt 模拟时会拉进 DKMS，都只打一行 `nvidia-driver: SKIP: …` 并以 0 退出，不装驱动，装机照常完成。看 `/var/log/autoinstall/24-nvidia-driver.log`。
+- **Secure Boot**：不登记 MOK，只提示。预编译模块由 Canonical 签名，Ubuntu shim 信任，开不开 Secure Boot 都能加载。
+- **Wayland**：驱动包不改 `/etc/gdm3/custom.conf`。gdm 的 `61-gdm.rules` 遇到 NVIDIA 只会写 `WaylandEnable false` 或 `PreferredDisplayServer`，不会打开 Wayland，所以 Desktop 默认的 `WaylandEnable=false`（`36` 钩子写入）保持不变。钩子再兜底检查一次：若某版 gdm 规则会写 `WaylandEnable true`，就在 `/etc/udev/rules.d/61-gdm.rules` 放一份去掉那一行的同名规则。
+- **装完验证**：重启后 `nvidia-smi`、`vainfo`；`docker run --rm --gpus all ubuntu nvidia-smi`（Container Toolkit 由 `25` 装）。
+- **全离线**：捆绑里带驱动、预编译模块、同版本内核（默认 HWE + GA 两套 flavour）及依赖闭包；`validate-offline-bundle.sh` 检查每个 flavour 的模块 meta、内核 meta、内核 ABI 版本一致。`linux-firmware`（约 600 MB）不进捆绑，用目标机已装的那份。
 
 ### Microsoft Edge（仅 Desktop）
 
@@ -562,6 +582,9 @@ cat /var/log/autoinstall/20-docker.log
 | `--pin-unity-cli VER` | Unity CLI 版本（默认拉 stable，若无则 beta）；亦可用 `PIN_UNITY_CLI` |
 | `--pin-gitea VER` | Gitea 版本（默认 `latest`，从 `dl.gitea.com/gitea/version.json` 解析；亦可 `PIN_GITEA=28.3.0`） |
 | `--no-flclash` | 不预装 FlClash（等价 `--skip 37` / `--skip 37-flclash`）。Desktop 默认预装最新稳定版（官方 GitHub Release + `SHA256SUMS`） |
+| `--no-nvidia-driver` | 不装 NVIDIA 驱动（等价 `--skip 24` / `--skip 24-nvidia-driver`）。默认每台机器都装，不检测硬件 |
+| `--nvidia-driver-version N` | NVIDIA 驱动分支，默认 `595`（`PIN_NVIDIA_DRIVER`） |
+| `--nvidia-kernel-flavour F` | 内核 flavour（如 `generic-hwe-24.04` / `generic`），默认装机时按已装内核自动判断；全离线时也要求捆绑里有它 |
 | `--gitea-admin-user U` | Gitea 管理员用户名，默认 = `--username` |
 | `--gitea-admin-password P` | Gitea 管理员密码（至少 8 位），默认 = `--password` 明文；只给了 `--password-hash` 时装机写入 `/root/gitea-admin-password` |
 | `--gitea-admin-email E` | Gitea 管理员邮箱，默认 `<用户名>@localhost` |
@@ -649,7 +672,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 | 阶段 | 行为 |
 |---|---|
-| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource + Microsoft Edge + x11vnc + Avahi（`avahi-daemon` / `libnss-mdns`）+ FlClash / RustDesk 的 apt 依赖），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）与 FlClash linux `.deb`（`flclash/`，约 40 MB，官方 GitHub `SHA256SUMS` 校验）、RustDesk `.deb`（`rustdesk/`，约 25 MB，钉扎版本 + 官方 sha256）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
+| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource + Microsoft Edge + x11vnc + Avahi（`avahi-daemon` / `libnss-mdns`）+ FlClash / RustDesk 的 apt 依赖 + NVIDIA 驱动 / 预编译模块 / 同版本内核 / Intel VA-API，见下），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）与 FlClash linux `.deb`（`flclash/`，约 40 MB，官方 GitHub `SHA256SUMS` 校验）、RustDesk `.deb`（`rustdesk/`，约 25 MB，钉扎版本 + 官方 sha256）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
 | ISO | 写入 `/offline/{apt,apt-sources,npm,node,unity-cli,godot,gitea,jenkins-plugins,manifest.json}` |
 | 装机 late-commands | 拷到 `/opt/offline`，临时只启用 `deb [trusted=yes] file:/opt/offline/apt ./`，再跑 `software/`（`OFFLINE=1`） |
 | `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装；FlClash 从 `flclash/`、RustDesk 从 `rustdesk/` 安装（依赖来自本地 apt 池）；Jenkins 插件从 `jenkins-plugins/` 拷贝 |
@@ -660,6 +683,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 - 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；`manifest.json` 含 `fingerprint`（schema 3：release/arch/pins/seeds，含 `apt-sources`、Jenkins 插件列表与解析器指纹）。指纹一致才复用，否则或旧格式需 `--force` 重建。构建时 `validate-offline-bundle.sh` 会核对 apt 种子包、`apt-sources/` keyring+list，以及 `unity-cli/`、`godot/`、`gitea/`、`jenkins-plugins/`（lock 里每个插件都在且 sha256 与 lock 一致、请求列表与 `--jenkins-plugins` 一致）等目录；失败则提示 `--force` / `--force-fetch`。
 - **Avahi（2026-11 加入）**：`avahi-daemon` / `libnss-mdns` 没有计入指纹（Desktop 自带，旧捆绑照样能用）。**Server** 全离线构建且预装 Gitea 或 Jenkins 时，`build-iso.sh` 会让 validate 检查这两个包；之前抓的捆绑里没有，会报缺包，加 `--force-fetch`（或 `fetch-offline-bundle.sh --force`）重抓一次即可。
 - **避免重复下载**（`--force` 也一样）：抓包前先按「空缓存」解析出本次需要的全部 deb（文件名 + 大小 + Packages 索引里的哈希），从本地 deb 缓存 `cache/apt-archives/<release>-<arch>/` 和旧捆绑的 `apt/` 里把**文件名、大小、哈希都一致**的直接放进 apt 的 archives 目录（apt 跳过下载前还会按索引里的 SHA256/SHA512 再校验一次，不一致就重下），apt 只下载缺的；新下的 deb 回写缓存。日志会打印「复用 N，新下载 M」。Unity CLI / Gitea / Godot / FlClash / Jenkins 插件 / Node tarball 在版本不变且校验和一致时也直接用旧捆绑里的文件。缓存只增不删，`--prune-apt-cache` 清掉本次没用到的；`--apt-cache DIR` 换位置，`--no-apt-cache` 不用缓存。指纹只看捆绑内容和参数，跟缓存无关；产出和不用缓存时一样（同一批 deb）。
+- **NVIDIA 驱动（2026-11 加入）**：捆绑多了 `nvidia/`（`driver` + `flavours`，每行 `<flavour> <模块/内核 meta 版本> <内核 ABI>`），apt 池里多了 `nvidia-driver-595-open`、`nvidia-settings`、`nvidia-prime`、预编译模块、同版本内核（默认 `generic-hwe-24.04` 和 `generic` 两套，`fetch-offline-bundle.sh --nvidia-kernel-flavours "…"` 可改）、`intel-media-va-driver-non-free`、`vainfo` 及依赖闭包，约 **+0.8–1.0 GB**。`linux-firmware*`（约 600 MB）故意不收（目标机已装；要收就设 `FETCH_KEEP_LINUX_FIRMWARE=1`）。指纹变了，旧捆绑需 `--force-fetch` 重建（deb 走缓存复用）。不要驱动：`fetch-offline-bundle.sh --no-nvidia-driver` 配合 `build-iso.sh --no-nvidia-driver`。
 - `--fetch-offline` 用 **ISO 识别到的 release**（非仅文件名）选 jammy/noble；加 `--force-fetch` 等价于给 fetch 传 `--force`。
 - npm/`node` 打包使用 `--owner=0 --group=0`；安装时 `tar --no-same-owner`，Node 解到 `/opt/node-…` 再 symlink，避免 `/usr/local` 属主变成 uid 1000。
 - 全离线装完写回第三方 apt 源：`apt-sources/` 在 fetch 时按在线脚本同款材料抓取；`restore-online-apt.sh` **全量写回**捆绑内种子（不按 `--skip` 裁剪）。旧捆绑缺 `apt-sources/` 时需 `--force` 重建。
@@ -712,7 +736,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 | Jenkins 匿名访问返回 403 / 无注册入口 | 设计如此 | 匿名不可读、禁止自助注册；需要开放时在“系统管理 → 安全”里调整 |
 | `npm install` 超时 / 404 | 公网 registry 不通 | 换 `registry.npmmirror.com`，或改走内网 Verdaccio |
 | `docker` 命令要 sudo | 组权限未生效 | 重新登录（组变更需新会话） |
-| `docker run --gpus` 失败 | **未装 GPU 驱动**（本镜像只预装 Toolkit） | 在目标机另行安装 NVIDIA 驱动后再用；无 GPU 的 VM 只能验证 `nvidia-ctk --version` / daemon.json |
+| `docker run --gpus` 失败 | 驱动没装上（`--no-nvidia-driver`，或 `24` 因版本不匹配跳过），或装完还没重启 | 看 `/var/log/autoinstall/24-nvidia-driver.log` 里的 `SKIP:` 原因；重启后 `nvidia-smi`。无 GPU 的 VM 只能验证 `nvidia-ctk --version` / daemon.json |
 | `unity` 能跑但装不了 Editor / 未登录 | **镜像只预装 CLI** | 装机后 `unity auth login`，再 `unity install <ver>`；许可证另激活 |
 | 浏览器打不开 Gitea | 服务未起或防火墙 | `systemctl status gitea`；确认本机防火墙未拦 3000 端口（脚本**不**改防火墙） |
 | `<主机名>.local` 打不开 / 解析失败 | 客户端不支持 mDNS（Android、容器、跨网段），主机名重名被 Avahi 改成 `xxx-2.local`，或装完改过主机名 | 先用 `http://<IP>:3000/` 确认服务正常；`avahi-resolve -n <主机名>.local`、`systemctl status avahi-daemon`；重名或改名按「Gitea / Jenkins 的访问地址」里的命令同步 URL；需要稳定地址时构建用 `--service-url-host` |
