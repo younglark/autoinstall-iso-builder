@@ -687,21 +687,42 @@ mapfile -t _dep_pkgs < <(
 if [ -s "$KDROP_LIST" ]; then
   echo "递归依赖里不属于选定内核 flavour 的内核类包: 跳过 $(wc -l < "$KDROP_LIST") 个 (aws/azure/gcp/oracle/lowlatency/… 及其 NVIDIA 预编译模块)"
 fi
-_dl=()
+# 分两类 (都要下载; 区别只在用不用求解器):
+#   _dl     求解器闭包里的 / 容器里已装的: 彼此可共存, 照旧 install --download-only --reinstall 分批
+#           (同时带上它们的 Recommends, 与原来一致)
+#   _dl_alt 只因 "A | B" 替代 / 虚包 Provides 被递归带进来、求解器没选的 (elogind / libpam-elogind /
+#           dbus-broker / systemd-standalone-sysusers / dkms 工具链 …): 用 apt-get download 直接取文件,
+#           不进事务 —— 原来它们和 systemd 等放在同一批里互斥, 整批失败再逐个回退 (polkitd 的
+#           default-logind | logind …), 日志全是噪声; 结果文件不变。
+_inst_names="$(mktemp)"
+dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 2>/dev/null | awk '$1 ~ /^ii/ {print $2}' | sort -u > "$_inst_names"
+_dl=(); _dl_alt=()
 for _p in "${_dep_pkgs[@]}"; do
   # linux-firmware* (~600MB) 不进捆绑: 目标机装机时已带 linux-firmware, 内核 meta 的依赖不带版本约束
   case "$_p" in linux-firmware|linux-firmware-*) [ "$KEEP_LINUX_FIRMWARE" = "1" ] || continue ;; esac
   # 跳过虚拟包 / 不存在的名字
-  if apt-cache show "$_p" >/dev/null 2>&1; then
+  apt-cache show "$_p" >/dev/null 2>&1 || continue
+  if grep -qxF -- "$_p" "$CLOSURE_NAMES" || grep -qxF -- "$_p" "$_inst_names"; then
     _dl+=("$_p")
+  else
+    _dl_alt+=("$_p")
   fi
 done
+rm -f "$_inst_names"
 # 解析阶段: SEEDS 闭包 + 递归依赖 (与下面实际下载同样的分批/逐个回退)
 {
   cat "$SEED_URIS"
   _j=0
   while [ "$_j" -lt "${#_dl[@]}" ]; do
     _c=("${_dl[@]:_j:40}")
+    if ! print_uris install --download-only --reinstall "${_c[@]}"; then
+      for _q in "${_c[@]}"; do print_uris download "$_q" || true; done
+    fi
+    _j=$((_j + 40))
+  done
+  _j=0
+  while [ "$_j" -lt "${#_dl_alt[@]}" ]; do
+    _c=("${_dl_alt[@]:_j:40}")
     if ! print_uris download "${_c[@]}"; then
       for _q in "${_c[@]}"; do print_uris download "$_q" || true; done
     fi
@@ -726,18 +747,32 @@ apt-get install -y --download-only --reinstall -o Dir::Cache::archives=/var/cach
 
 if [ "${#_dl[@]}" -gt 0 ]; then
   echo "force-download ${#_dl[@]} recursive depends (incl. already-installed)"
-  # 用 apt-get download (按候选版本取文件, 不做依赖求解): 递归列表本身已闭合 (含所有替代/Provides),
-  # 不需要再求解。以前用 install --download-only --reinstall 分批, 批内有互斥替代 (polkitd 的
-  # default-logind | logind → elogind vs systemd, libqt5gui5t64 vs libqt5gui5-gles …) 时整批作废,
-  # 日志里一堆整批失败再逐个回退; 结果文件相同, 只是噪声和多余的求解。
-  # 已在 archives 的 (复用或已下载, 大小+哈希一致) apt-get download 会直接跳过。
+  # 分批, 避免命令行过长; 失败不致命 (个别过渡包可忽略)
   _i=0
   while [ "$_i" -lt "${#_dl[@]}" ]; do
     _chunk=("${_dl[@]:_i:40}")
-    if ! ( cd /var/cache/apt/archives && apt-get download -q -o APT::Sandbox::User=root "${_chunk[@]}" >/dev/null 2>&1 ); then
-      # 批内个别名字无候选 (只剩旧版本 / 被 pin 掉) 时整批失败: 逐个下载
-      echo "batch download failed; per-package download fallback (${#_chunk[@]})"
+    if ! apt-get install -y --download-only --reinstall \
+      -o Dir::Cache::archives=/var/cache/apt/archives \
+      "${_chunk[@]}"; then
+      # 批内都是可共存的包, 正常不会失败; 兜底逐个 apt-get download (不解析依赖, 不会冲突)
+      echo "chunk failed; per-package download fallback (${#_chunk[@]})"
       ( cd /var/cache/apt/archives && for _q in "${_chunk[@]}"; do
+          apt-get download -q -o APT::Sandbox::User=root "$_q" >/dev/null 2>&1 || echo "  skip: $_q"
+        done )
+    fi
+    _i=$((_i + 40))
+  done
+fi
+if [ "${#_dl_alt[@]}" -gt 0 ]; then
+  echo "download ${#_dl_alt[@]} alternative-only recursive depends (apt-get download, no resolver)"
+  # 已在 archives 的 (复用或已下载, 大小+哈希一致) apt-get download 会直接跳过
+  _i=0
+  while [ "$_i" -lt "${#_dl_alt[@]}" ]; do
+    _alt=("${_dl_alt[@]:_i:40}")
+    if ! ( cd /var/cache/apt/archives && apt-get download -q -o APT::Sandbox::User=root "${_alt[@]}" >/dev/null 2>&1 ); then
+      # 批内个别名字无候选 (只剩旧版本 / 被 pin 掉) 时整批失败: 逐个下载
+      echo "batch download failed; per-package download fallback (${#_alt[@]})"
+      ( cd /var/cache/apt/archives && for _q in "${_alt[@]}"; do
           apt-get download -q -o APT::Sandbox::User=root "$_q" >/dev/null 2>&1 || echo "  skip: $_q"
         done )
     fi

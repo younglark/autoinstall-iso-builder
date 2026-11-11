@@ -2492,17 +2492,17 @@ else
   fail "kernel filter (dropped $(wc -l < "$kt/dropped"))"
 fi
 rm -rf "$kt"
-# 接线: 递归列表过内核过滤; 补下载用 apt-get download (不求解, 无 chunk 冲突); 下载后核对内核类包
+# 接线: 递归列表过内核过滤; 求解器没选的替代包用 apt-get download (不求解, 无 chunk 冲突); 下载后核对内核类包
 _fb="$(sed -n '/^# ---- deb 复用/,/^# 把 FlClash .deb/p' tools/fetch-offline-bundle.sh)"
 # shellcheck disable=SC2016  # 字面量匹配脚本源码
 if grep -qF 'aib_kernel_filter "$CLOSURE_NAMES"' <<<"$_fb" \
    && grep -qF 'aib_deb_pkg_name < "$SEED_URIS"' <<<"$_fb" \
-   && grep -qF 'apt-get download -q -o APT::Sandbox::User=root "${_chunk[@]}"' <<<"$_fb" \
+   && grep -qF 'apt-get download -q -o APT::Sandbox::User=root "${_alt[@]}"' <<<"$_fb" \
    && grep -qF 'print_uris download "${_c[@]}"' <<<"$_fb" \
-   && ! grep -q 'chunk failed' <<<"$_fb" \
-   && ! grep -q 'install -y --download-only --reinstall' <<<"$(sed -n '/_chunk=(/,/_i=\$((_i/p' <<<"$_fb")" \
+   && grep -qF 'grep -qxF -- "$_p" "$CLOSURE_NAMES" || grep -qxF -- "$_p" "$_inst_names"' <<<"$_fb" \
+   && ! grep -q 'install -y --download-only --reinstall' <<<"$(sed -n '/_alt=("/,/_i=\$((_i/p' <<<"$_fb")" \
    && grep -q '捆绑里出现不属于选定内核 flavour 的内核类包' <<<"$_fb"; then
-  pass "fetch wires kernel filter + batch apt-get download + post-download kernel check"
+  pass "fetch wires kernel filter + resolver/alternative split (apt-get download) + post-download kernel check"
 else
   fail "fetch kernel filter wiring"
 fi
