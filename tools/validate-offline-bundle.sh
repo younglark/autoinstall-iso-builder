@@ -4,6 +4,7 @@
 #   ./tools/validate-offline-bundle.sh --bundle DIR [--release noble|jammy|24.04|22.04]
 #       [--skip "30 70"] [--pin-node N] [--pin-grok V] [--jenkins-plugins "a b"] ...
 #       [--require-x11vnc]   (build-iso Desktop 默认装 x11vnc 时 (未加 --wayland): 捆绑里必须有 x11vnc + xauth)
+#       [--require-mdns]     (build-iso Server 预装 Gitea / Jenkins 时: 捆绑里必须有 avahi-daemon + libnss-mdns)
 set -Eeuo pipefail
 
 BUNDLE=""
@@ -17,6 +18,7 @@ PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 PIN_GODOT="${PIN_GODOT:-4.7.2}"
 PIN_GITEA="${PIN_GITEA:-latest}"
 REQUIRE_X11VNC=0
+REQUIRE_MDNS=0
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger}"
 
 die()  { printf '[fail] %s\n' "$*" >&2; exit 1; }
@@ -47,8 +49,9 @@ while [[ $# -gt 0 ]]; do
     --pin-gitea) PIN_GITEA="$2"; shift 2 ;;
     --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
     --require-x11vnc) REQUIRE_X11VNC=1; shift ;;
+    --require-mdns) REQUIRE_MDNS=1; shift ;;
     -h|--help)
-      sed -n '2,7p' "$0"; exit 0 ;;
+      sed -n '2,8p' "$0"; exit 0 ;;
     *) die "未知参数: $1" ;;
   esac
 done
@@ -74,6 +77,10 @@ should_skip 40-nodejs || NEED_PKGS+=(nodejs)
 should_skip 35-microsoft-edge || NEED_PKGS+=(microsoft-edge-stable)
 if [[ "$REQUIRE_X11VNC" -eq 1 ]] && ! should_skip 36-x11vnc-xorg; then
   NEED_PKGS+=(x11vnc xauth)
+fi
+# Server 上 Gitea / Jenkins 的 <hostname>.local 要 Avahi (Desktop 自带, 不要求); 旧捆绑没有 → --force-fetch
+if [[ "$REQUIRE_MDNS" -eq 1 ]] && ! should_skip 12-avahi-mdns && { ! should_skip 30-jenkins || ! should_skip 45-gitea; }; then
+  NEED_PKGS+=(avahi-daemon libnss-mdns)
 fi
 
 PACKAGES_FILE="$BUNDLE/apt/Packages"

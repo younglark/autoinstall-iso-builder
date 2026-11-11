@@ -304,7 +304,12 @@ if command -v virt-cat >/dev/null 2>&1; then
   GITEA_INI="$(virt-cat -a "$DISK" /etc/gitea/app.ini 2>/dev/null || true)"
   if grep -q '^INSTALL_LOCK = true' <<<"$GITEA_INI"; then
     echo "    app.ini INSTALL_LOCK = true"
-    grep -E '^(HTTP_ADDR|HTTP_PORT|DB_TYPE|DISABLE_REGISTRATION) ' <<<"$GITEA_INI" | sed 's/^/    /'
+    grep -E '^(HTTP_ADDR|HTTP_PORT|ROOT_URL|DOMAIN|SSH_DOMAIN|DB_TYPE|DISABLE_REGISTRATION) ' <<<"$GITEA_INI" | sed 's/^/    /'
+    # 默认 ROOT_URL = http://<目标机 hostname>.local:3000/ (构建时给了 --service-url-host 则是该主机)
+    _vm_host="$(virt-cat -a "$DISK" /etc/hostname 2>/dev/null | head -1 | tr -d '[:space:]')"
+    if [[ -n "$_vm_host" ]] && ! grep -qxF "ROOT_URL = http://${_vm_host%%.*}.local:3000/" <<<"$GITEA_INI"; then
+      echo "    [!] ROOT_URL 不是 http://${_vm_host%%.*}.local:3000/ (若用了 --service-url-host 可忽略)"
+    fi
   else
     echo "    [!] /etc/gitea/app.ini 缺失或无 INSTALL_LOCK (若 --skip 45 可忽略)"
   fi
@@ -333,8 +338,20 @@ if command -v virt-cat >/dev/null 2>&1; then
   fi
   virt-cat -a "$DISK" /var/lib/jenkins/config.xml 2>/dev/null \
     | grep -E 'useSecurity|FullControlOnceLoggedIn|disableSignup' | sed 's/^ */    /'
+  virt-cat -a "$DISK" /var/lib/jenkins/jenkins.model.JenkinsLocationConfiguration.xml 2>/dev/null \
+    | grep -o '<jenkinsUrl>[^<]*</jenkinsUrl>' | sed 's/^/    /' \
+    || echo "    [!] 缺 jenkins.model.JenkinsLocationConfiguration.xml (若 --skip 30 可忽略)"
   virt-ls -a "$DISK" /opt/provision 2>/dev/null | grep -qx 'jenkins-admin.secret' \
     && echo "    [!] /opt/provision/jenkins-admin.secret 仍在 (应已删除)"
+
+  echo
+  echo "==> mDNS (12-avahi-mdns.sh):"
+  if virt-ls -a "$DISK" /etc/systemd/system/multi-user.target.wants 2>/dev/null | grep -qx 'avahi-daemon.service'; then
+    echo "    avahi-daemon.service enabled"
+  else
+    echo "    [!] avahi-daemon.service 未 enable (若 --skip 12 或 Gitea / Jenkins 都跳过可忽略)"
+  fi
+  virt-cat -a "$DISK" /etc/nsswitch.conf 2>/dev/null | grep '^hosts:' | sed 's/^/    /'
 
   echo
   echo "==> SSH:"

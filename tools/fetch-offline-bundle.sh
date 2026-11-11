@@ -215,6 +215,8 @@ payload = {
     "microsoft-edge-stable", "x11vnc", "xauth",
     "unity-cli", "godot", "gitea", "flclash", "apt-sources",
     "fontconfig", "libharfbuzz0b", "python3-bcrypt", "jenkins-plugins",
+    # avahi-daemon / libnss-mdns (Server 上 Gitea / Jenkins 的 <hostname>.local) 故意不进指纹:
+    # Desktop 自带, 旧捆绑仍可复用; Server 用旧捆绑时 validate --require-mdns 报缺包 → --force-fetch
   ],
 }
 print(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16])
@@ -418,6 +420,7 @@ SEEDS=(
   "$JAVA_PKG" jenkins fontconfig libharfbuzz0b python3-bcrypt
   nodejs
   x11vnc xauth
+  avahi-daemon libnss-mdns
 )
 # Microsoft Edge 仅 amd64; 非 amd64 跳过以免 apt 解析失败
 if [ "$ARCH" = "amd64" ]; then

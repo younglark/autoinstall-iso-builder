@@ -33,15 +33,16 @@
 |---|---|---|
 | `00-base.sh` | 基础依赖 | `policy-rc.d` 拦住 chroot 里的服务启动；修 `resolv.conf`；apt 非交互；含 **git**、**ripgrep**（`rg`） |
 | `10-openssh.sh` | openssh-server | 幂等兜底，启用 `ssh.service` |
+| `12-avahi-mdns.sh` | Avahi（mDNS） | 预装了 Gitea 或 Jenkins 时启用：装 `avahi-daemon` + `libnss-mdns`（Desktop 自带则跳过 apt；Server 补装，离线走捆绑），enable `avahi-daemon`，让局域网能用 `<主机名>.local` 访问本机；ufw **已启用**时放行 `5353/udp`，不会主动启用 ufw。详见下文「Gitea / Jenkins 的访问地址」 |
 | `15-github-cli.sh` | GitHub CLI (`gh`) | 官方 apt 源（cli.github.com）；**不**执行 `gh auth` |
 | `20-docker.sh` | Docker CE | 官方仓库（非 `docker.io`），含 compose v2 / buildx，**配了日志轮转** |
 | `25-nvidia-container-toolkit.sh` | NVIDIA Container Toolkit | 官方仓库；`nvidia-ctk` 合并 Docker runtime（保留 daemon.json 日志轮转）；**不装 GPU 驱动** |
-| `30-jenkins.sh` | Jenkins LTS | 优先 JDK 21（不够退 17），jenkins 用户加入 docker 组；**零配置**：跳过安装向导、装机时建好管理员、预装 Pipeline / Git / Gitea / Docker Pipeline / Docker Cloud / Rebuild / AnsiColor / Parameterized Trigger 等插件（含全部依赖），监听 **0.0.0.0:8080** |
+| `30-jenkins.sh` | Jenkins LTS | 优先 JDK 21（不够退 17），jenkins 用户加入 docker 组；**零配置**：跳过安装向导、装机时建好管理员、预装 Pipeline / Git / Gitea / Docker Pipeline / Docker Cloud / Rebuild / AnsiColor / Parameterized Trigger 等插件（含全部依赖），监听 **0.0.0.0:8080**，Jenkins URL 设为 `http://<主机名>.local:8080/` |
 | `35-microsoft-edge.sh` | Microsoft Edge 稳定版 | **仅 Desktop + amd64 默认安装**（Server / 非 amd64 自动跳过，`--skip 35` 也可跳过）。官方 apt 源 `packages.microsoft.com/repos/edge`；设为默认浏览器（`update-alternatives` + 系统/用户 `mimeapps.list`）；GNOME 收藏夹用 Edge 替换 Firefox（Firefox **保留**）；策略关掉首次运行提示，**不**关闭自动更新 |
 | `36-x11vnc-xorg.sh` | 关 Wayland + x11vnc（**Desktop 默认开启**） | 仅 Desktop（Server 跳过）。GDM 登录界面、锁屏、会话都走 Xorg，并预装 x11vnc，**开机即可连**（登录界面、锁屏、登录后的会话）。`--wayland` 保留 Wayland 且不装 x11vnc；`--skip 36` 也可跳过。详见下文「远程桌面」 |
 | `37-flclash.sh` | FlClash（ClashMeta 图形客户端） | **仅 Desktop 默认安装**（Server / 非 amd64·arm64 自动跳过；`--no-flclash` 或 `--skip 37` 也可跳过）。官方 GitHub Release 的 linux `.deb`（同级 `SHA256SUMS` 校验），**始终安装最新稳定版**。**只装应用**：不写订阅、不设系统代理、不启用 TUN、不装开机自启。详见下文 |
 | `40-nodejs.sh` | Node.js 24 | NodeSource 优先，官方 tarball 兜底 |
-| `45-gitea.sh` | Gitea（最新稳定版，可 `--pin-gitea`） | 官方 linux-amd64 二进制（sha256 校验）→ `/usr/local/bin/gitea`；系统用户 `git`；SQLite；**装机阶段写好配置并创建管理员**，开机 `gitea.service` 自启。监听 **0.0.0.0:3000**（不与 Jenkins 8080 冲突），开放注册，LFS 开，`OFFLINE_MODE`。SSH 克隆走系统 OpenSSH：`git@host:user/repo.git` |
+| `45-gitea.sh` | Gitea（最新稳定版，可 `--pin-gitea`） | 官方 linux-amd64 二进制（sha256 校验）→ `/usr/local/bin/gitea`；系统用户 `git`；SQLite；**装机阶段写好配置并创建管理员**，开机 `gitea.service` 自启。监听 **0.0.0.0:3000**（不与 Jenkins 8080 冲突），`ROOT_URL` 为 `http://<主机名>.local:3000/`，开放注册，LFS 开，`OFFLINE_MODE`。SSH 克隆走系统 OpenSSH：`git@host:user/repo.git` |
 | `50-grok.sh` | xAI Grok Build | `@xai-official/grok`，**官方包**，不是社区的 `@vibe-kit/grok-cli` |
 | `60-opencode.sh` | OpenCode | `opencode-ai` |
 | `70-openmausbot.sh` | OpenMausBot | npm CLI + 一个**故意未启用**的 systemd 单元 |
@@ -160,7 +161,9 @@ sudo systemctl restart gdm3                     # 会注销当前图形会话
   解析用仓库自带的 `tools/resolve-jenkins-plugins.py`（纯 Python 3 标准库，不需要 Java）：取 `https://updates.jenkins.io/update-center.actual.json?version=<Jenkins 版本>`，递归解析非 optional 依赖，只选 `requiredCore` ≤ 目标版本的插件版本（固定版本或推荐版不兼容时查 `plugin-versions.json`），下载 `.hpi` 并用 update center 的 **sha256** 校验，写 `plugins.lock`（每行 `name:version:sha256`）。在线构建：装机时在 chroot 里按本机 Jenkins 版本跑它，下载到 `/var/lib/jenkins/plugins`；全离线构建：fetch 时按捆绑里**同一个** Jenkins 版本解析到 `jenkins-plugins/`，装机直接拷贝。lock 都会留在 `/var/lib/jenkins/plugins.lock`。
 - 补装 `fontconfig` / `libharfbuzz0b`（headless JRE 不带，缺了 Jenkins 启动时 AWT 字体初始化失败）和 `python3-bcrypt`（算哈希用）。
 
-开机后浏览器打开 `http://<本机IP>:8080/`，用上面的管理员登录即可（`JENKINS_URL` 未设置，Jenkins 首页会提示一次，可在“系统管理 → 系统配置”里填）。**装完请尽快改掉管理员密码**（右上角用户名 → Security）。
+- **Jenkins URL**：装机时写入 `/var/lib/jenkins/jenkins.model.JenkinsLocationConfiguration.xml` 的 `jenkinsUrl` = `http://<主机名>.local:8080/`（或 `--service-url-host` 指定的主机），等同于“系统管理 → 系统配置 → Jenkins URL”，首页不再提示未配置。不依赖 JCasC 插件。
+
+开机后浏览器打开 `http://<主机名>.local:8080/`（或 `http://<本机IP>:8080/`），用上面的管理员登录即可。**装完请尽快改掉管理员密码**（右上角用户名 → Security）。
 
 ### Gitea：装完即可用
 
@@ -170,11 +173,49 @@ sudo systemctl restart gdm3                     # 会注销当前图形会话
 - 创建管理员（默认用户名 = `--username`（默认 `ubuntu`），密码 = `--password` 明文（都不传时为默认密码 `ubuntu1990`）；可用 `--gitea-admin-user` / `--gitea-admin-password` / `--gitea-admin-email` 覆盖）。只给了 `--password-hash`、没有明文时，会生成随机密码并写入 **`/root/gitea-admin-password`**（root、0600）。构建时的明文密码单独放在 ISO 的 `/provision/gitea-admin.secret`（0600，不进 `provision.env` / 构建日志），装机用完即删。管理员 `must-change-password=false`，**装完请尽快改掉密码**；
 - `systemctl enable gitea.service`（官方单元，`After=network-online.target`）。防火墙规则不动。
 
-开机后浏览器打开 `http://<本机IP>:3000/` 即可（`HTTP_ADDR=0.0.0.0`，局域网可访问）。**开放注册**（`DISABLE_REGISTRATION=false`），局域网里的人都能自助注册；若只想管理员拉人，把该值改成 `true` 后 `sudo systemctl restart gitea`。
+开机后浏览器打开 `http://<主机名>.local:3000/`（或 `http://<本机IP>:3000/`）即可（`HTTP_ADDR=0.0.0.0`，局域网可访问）。**开放注册**（`DISABLE_REGISTRATION=false`），局域网里的人都能自助注册；若只想管理员拉人，把该值改成 `true` 后 `sudo systemctl restart gitea`。
 
-网页上显示的克隆地址默认是 `http://localhost:3000/` / `git@localhost:...`（构建时还不知道装到哪台机器）。要改成真实 IP 或域名，编辑 `/etc/gitea/app.ini` 的 `[server]` 段 `ROOT_URL`、`DOMAIN`、`SSH_DOMAIN`，然后重启 Gitea。
+网页上显示的克隆地址是 `http://<主机名>.local:3000/<用户>/<仓库>.git` / `git@<主机名>.local:<用户>/<仓库>.git`（`app.ini` 的 `ROOT_URL`、`DOMAIN`、`SSH_DOMAIN`，装机时按目标机的主机名写入）。要换成 IP 或域名，构建时用 `--service-url-host`，或装完按下一节手动改。
 
 SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.ssh/authorized_keys`）。不要用 `--username git`（与该系统用户冲突）；若你事后在 sshd 里加了 `AllowUsers`，请把 `git` 加进去。
+
+### Gitea / Jenkins 的访问地址（`<主机名>.local`）
+
+装机时 `45-gitea.sh` / `30-jenkins.sh` 读取目标系统的 `/etc/hostname`（= 构建时 `--hostname`，默认 `ubuntu-node`），把对外 URL 写成：
+
+| 服务 | 默认 URL | 写到哪里 |
+|---|---|---|
+| Gitea | `http://<主机名>.local:3000/` | `/etc/gitea/app.ini` `[server]` 段 `ROOT_URL`、`DOMAIN`、`SSH_DOMAIN` |
+| Jenkins | `http://<主机名>.local:8080/` | `/var/lib/jenkins/jenkins.model.JenkinsLocationConfiguration.xml` 的 `jenkinsUrl` |
+
+- `.local` 靠 mDNS：`12-avahi-mdns.sh` 会装好并启用 Avahi（Desktop 自带；Server 补装 `avahi-daemon` + `libnss-mdns`）。macOS / iOS 原生支持；Windows 10 / 11 一般能直接解析；Linux 桌面装了 `libnss-mdns` 即可。
+- 想用 IP 或域名：构建时加 `--service-url-host 192.168.1.20`（或 `ci.example.com`、`localhost`），URL 变为 `http://192.168.1.20:3000/` 与 `http://192.168.1.20:8080/`。不要带 `http://` 或端口。
+- 服务仍监听 `0.0.0.0`，用 IP 照样能打开网页；URL 只影响页面上显示的克隆地址、Webhook / 构建链接、邮件里的链接。
+- 构建时会校验 `--hostname`：只能是小写字母、数字和中间的连字符，1–63 位，不能含点或下划线，不能以连字符开头或结尾（如 `ubuntu-node`、`node01`、`desk-01`）。不合法直接报错，不会自动改写。
+
+**限制（v1 不做自动同步）**：
+
+- **同一网络里每台机器要用不同的 `--hostname`**。同一张 ISO 装多台时主机名会重复，Avahi 会自动把后来者改成 `xxx-2.local`，而写进配置的 URL 还是 `xxx.local`，就会指到别的机器。每台单独构建，或装完按下面的命令改。
+- **装完再改主机名，URL 不会跟着变**。改主机名后手动同步：
+
+  ```bash
+  NEW=new-host   # 新主机名
+  sudo hostnamectl set-hostname "$NEW"
+  # Gitea
+  sudo sed -i -E -e "s|^ROOT_URL *=.*|ROOT_URL = http://$NEW.local:3000/|" \
+                 -e "s|^DOMAIN *=.*|DOMAIN = $NEW.local|" \
+                 -e "s|^SSH_DOMAIN *=.*|SSH_DOMAIN = $NEW.local|" /etc/gitea/app.ini
+  sudo systemctl restart gitea
+  # Jenkins (也可在网页“系统管理 → 系统配置 → Jenkins URL”里改)
+  sudo sed -i "s|<jenkinsUrl>[^<]*</jenkinsUrl>|<jenkinsUrl>http://$NEW.local:8080/</jenkinsUrl>|" \
+    /var/lib/jenkins/jenkins.model.JenkinsLocationConfiguration.xml
+  sudo systemctl restart jenkins
+  sudo systemctl restart avahi-daemon
+  ```
+
+  换成 IP / 域名同理，把 `$NEW.local` 换成目标主机即可。
+- **Android、Docker 容器（包括 Jenkins 的 Docker agent）、跨网段 / VPN 访问时通常解析不了 `.local`**。流水线里克隆仓库建议用 IP，或构建时用 `--service-url-host` 指定 IP / 内网域名。
+- ufw 已启用时 `12-avahi-mdns.sh` 会放行 `5353/udp`；Gitea 3000 / Jenkins 8080 端口仍不自动放行。
 
 ### 密钥一律不进镜像
 
@@ -468,6 +509,8 @@ cat /var/log/autoinstall/20-docker.log
 | `--iso` / `--out` | 输入/输出路径，必填 |
 | `--password-hash` | **推荐**。`openssl passwd -6 '密码'` 的结果 |
 | `--password` | 明文，脚本自动哈希；会进 shell 历史，仅调试用 |
+| `--hostname` | 默认 `ubuntu-node`。必须是单个主机名标签：小写字母 / 数字 / 中间的连字符，1–63 位，不能含点或下划线（不合法直接报错）。Gitea / Jenkins URL 默认用 `<hostname>.local`，**每台机器请用不同的名字** |
+| `--service-url-host H` | 覆盖 Gitea / Jenkins URL 的主机部分（IPv4、FQDN 或 `localhost`），如 `--service-url-host 192.168.1.20` → `http://192.168.1.20:3000/` 与 `:8080/`。Gitea、Jenkins 都 `--skip` 时忽略 |
 | `--username` | 默认 `ubuntu`（`git` 与 Gitea 系统用户冲突，会被拒绝） |
 | （都不传密码） | `--password` / `--password-hash` 都没给时，使用**默认密码 `ubuntu1990`**（构建时告警），Gitea / Jenkins 管理员同样是 `ubuntu` / `ubuntu1990`。这是公开的默认值，**装完请立即改**：`passwd`，并在 Gitea / Jenkins 网页里改管理员密码 |
 | `--packages` | 逗号分隔、**不要空格**（如 `vim,curl,htop`）；走 subiquity 的 apt（第三方包走 `software/`） |
@@ -574,7 +617,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 | 阶段 | 行为 |
 |---|---|
-| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource + Microsoft Edge + x11vnc + FlClash 的 apt 依赖），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）与 FlClash linux `.deb`（`flclash/`，约 40 MB，官方 GitHub `SHA256SUMS` 校验）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
+| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource + Microsoft Edge + x11vnc + Avahi（`avahi-daemon` / `libnss-mdns`）+ FlClash 的 apt 依赖），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）与 FlClash linux `.deb`（`flclash/`，约 40 MB，官方 GitHub `SHA256SUMS` 校验）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
 | ISO | 写入 `/offline/{apt,apt-sources,npm,node,unity-cli,godot,gitea,jenkins-plugins,manifest.json}` |
 | 装机 late-commands | 拷到 `/opt/offline`，临时只启用 `deb [trusted=yes] file:/opt/offline/apt ./`，再跑 `software/`（`OFFLINE=1`） |
 | `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装；FlClash 从 `flclash/` 安装（依赖来自本地 apt 池）；Jenkins 插件从 `jenkins-plugins/` 拷贝 |
@@ -583,6 +626,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 体积与缓存：
 
 - 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；`manifest.json` 含 `fingerprint`（schema 3：release/arch/pins/seeds，含 `apt-sources`、Jenkins 插件列表与解析器指纹）。指纹一致才复用，否则或旧格式需 `--force` 重建。构建时 `validate-offline-bundle.sh` 会核对 apt 种子包、`apt-sources/` keyring+list，以及 `unity-cli/`、`godot/`、`gitea/`、`jenkins-plugins/`（lock 里每个插件都在且 sha256 与 lock 一致、请求列表与 `--jenkins-plugins` 一致）等目录；失败则提示 `--force` / `--force-fetch`。
+- **Avahi（2026-11 加入）**：`avahi-daemon` / `libnss-mdns` 没有计入指纹（Desktop 自带，旧捆绑照样能用）。**Server** 全离线构建且预装 Gitea 或 Jenkins 时，`build-iso.sh` 会让 validate 检查这两个包；之前抓的捆绑里没有，会报缺包，加 `--force-fetch`（或 `fetch-offline-bundle.sh --force`）重抓一次即可。
 - **避免重复下载**（`--force` 也一样）：抓包前先按「空缓存」解析出本次需要的全部 deb（文件名 + 大小 + Packages 索引里的哈希），从本地 deb 缓存 `cache/apt-archives/<release>-<arch>/` 和旧捆绑的 `apt/` 里把**文件名、大小、哈希都一致**的直接放进 apt 的 archives 目录（apt 跳过下载前还会按索引里的 SHA256/SHA512 再校验一次，不一致就重下），apt 只下载缺的；新下的 deb 回写缓存。日志会打印「复用 N，新下载 M」。Unity CLI / Gitea / Godot / FlClash / Jenkins 插件 / Node tarball 在版本不变且校验和一致时也直接用旧捆绑里的文件。缓存只增不删，`--prune-apt-cache` 清掉本次没用到的；`--apt-cache DIR` 换位置，`--no-apt-cache` 不用缓存。指纹只看捆绑内容和参数，跟缓存无关；产出和不用缓存时一样（同一批 deb）。
 - `--fetch-offline` 用 **ISO 识别到的 release**（非仅文件名）选 jammy/noble；加 `--force-fetch` 等价于给 fetch 传 `--force`。
 - npm/`node` 打包使用 `--owner=0 --group=0`；安装时 `tar --no-same-owner`，Node 解到 `/opt/node-…` 再 symlink，避免 `/usr/local` 属主变成 uid 1000。
@@ -616,7 +660,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 2. `xorriso -indev out.iso -report_el_torito plain` 里 **BIOS 与 UEFI 两个引导项都在**。
 3. 虚拟机 BIOS + UEFI 各装一次，`virt-cat` 读到的 `/var/log/autoinstall/manifest.txt` 里 git / gh / rg / docker / nvidia-ctk / node / grok / opencode / openmausbot / unity / godot / gitea 都有版本号。
 4. `provision-failed.txt` 为空。
-5. 重启后 `systemctl status docker jenkins ssh gitea` 都是 active；浏览器打开 `http://<IP>:3000/` 能进（开放注册），用构建时的管理员账号即可登录；`http://<IP>:8080/` 直接是 Jenkins 登录页（无安装向导），同一账号登录后“插件管理 → 已安装”里 Pipeline / Git / Gitea 等全部启用。
+5. 重启后 `systemctl status docker jenkins ssh gitea` 都是 active；浏览器打开 `http://<主机名>.local:3000/`（或 `http://<IP>:3000/`）能进（开放注册），页面上的克隆地址是 `<主机名>.local`，用构建时的管理员账号即可登录；`http://<IP>:8080/` 直接是 Jenkins 登录页（无安装向导），同一账号登录后“插件管理 → 已安装”里 Pipeline / Git / Gitea 等全部启用。
 
 ---
 
@@ -638,7 +682,8 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 | `docker` 命令要 sudo | 组权限未生效 | 重新登录（组变更需新会话） |
 | `docker run --gpus` 失败 | **未装 GPU 驱动**（本镜像只预装 Toolkit） | 在目标机另行安装 NVIDIA 驱动后再用；无 GPU 的 VM 只能验证 `nvidia-ctk --version` / daemon.json |
 | `unity` 能跑但装不了 Editor / 未登录 | **镜像只预装 CLI** | 装机后 `unity auth login`，再 `unity install <ver>`；许可证另激活 |
-| 浏览器打不开 Gitea / 克隆地址是 localhost | 服务未起，或 `ROOT_URL` 仍是默认 | `systemctl status gitea`；确认本机防火墙未拦 3000 端口（脚本**不**改防火墙）。网页显示的地址要改的话，编辑 `/etc/gitea/app.ini` 的 `ROOT_URL` / `DOMAIN` / `SSH_DOMAIN` 后 `systemctl restart gitea` |
+| 浏览器打不开 Gitea | 服务未起或防火墙 | `systemctl status gitea`；确认本机防火墙未拦 3000 端口（脚本**不**改防火墙） |
+| `<主机名>.local` 打不开 / 解析失败 | 客户端不支持 mDNS（Android、容器、跨网段），主机名重名被 Avahi 改成 `xxx-2.local`，或装完改过主机名 | 先用 `http://<IP>:3000/` 确认服务正常；`avahi-resolve -n <主机名>.local`、`systemctl status avahi-daemon`；重名或改名按「Gitea / Jenkins 的访问地址」里的命令同步 URL；需要稳定地址时构建用 `--service-url-host` |
 | 忘记 Gitea 管理员密码 | 只给了 `--password-hash` 构建 | 看 `/root/gitea-admin-password`（root 0600）；若用了 `--password`，密码与系统用户相同（装完请改掉） |
 | `git@host:...` SSH 克隆被拒 | `AllowUsers` 没包含 `git`，或没把公钥加到 Gitea | 系统 OpenSSH + 用户 `git`；在 Gitea 里给用户添加 SSH 公钥。sshd 默认没有 `AllowUsers` |
 | `openmausbot` 打不开窗口 | 它是 Electron 应用 | 服务器上只能用 `openmausbot serve` |
