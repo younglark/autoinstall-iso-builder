@@ -147,10 +147,18 @@ grokbot_recommends() { # deb
 }
 
 # 上面的 Recommends 里 apt 当前能装的那些 (有 Candidate), 一行一个
+# 已有别的包 Provides 它时跳过: FlClash (37) 先装了 libayatana-appindicator3-1, 它 Provides 且 Conflicts
+# libappindicator3-1, 再装真包会冲突
 grokbot_available_recommends() { # deb
   local r c
   while IFS= read -r r; do
     [ -n "$r" ] || continue
+    if dpkg-query -W -f='${Status}|${Package}|${Provides}\n' 2>/dev/null | awk -F'|' -v r="$r" '
+         $1 ~ /install ok installed/ { n = split($3, a, /,/); for (i = 1; i <= n; i++) { sub(/^ +/, "", a[i]); sub(/ .*/, "", a[i]); if (a[i] == r) { found = 1 } } }
+         END { exit !found }'; then
+      echo "Grok Bot Recommends $r: 已由已装的包提供, 跳过" >&2
+      continue
+    fi
     c="$(apt-cache policy "$r" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
     if [ -n "$c" ] && [ "$c" != "(none)" ]; then printf '%s\n' "$r"; fi
   done < <(grokbot_recommends "$1")

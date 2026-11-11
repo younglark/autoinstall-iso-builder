@@ -601,7 +601,14 @@ if [ -n "$GROKBOT_DEB" ]; then
   while IFS= read -r _r; do
     [ -n "$_r" ] || continue
     _c="$(apt-cache policy "$_r" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
-    if [ -n "$_c" ] && [ "$_c" != "(none)" ]; then
+    # 已有种子 Provides 它 (FlClash 依赖的 libayatana-appindicator3-1 Provides 且 Conflicts libappindicator3-1) → 不另收真包
+    _prov=""
+    for _p in $(apt-cache showpkg "$_r" 2>/dev/null | awk '/^Reverse Provides:/ {f=1; next} f && NF {print $1}'); do
+      for _s in "${SEEDS[@]}"; do [ "${_s%%=*}" = "$_p" ] && _prov="$_p"; done
+    done
+    if [ -n "$_prov" ]; then
+      echo "Grok Bot Recommends $_r: 已由种子 $_prov 提供, 不另收"
+    elif [ -n "$_c" ] && [ "$_c" != "(none)" ]; then
       GROKBOT_RECS+=("$_r"); SEEDS+=("$_r")
     else
       echo "warn: Grok Bot Recommends $_r 在 $RELEASE 源里没有, 不捆绑"
