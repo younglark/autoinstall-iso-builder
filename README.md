@@ -43,6 +43,7 @@
 | `36-x11vnc-xorg.sh` | 关 Wayland（**Desktop 默认**）+ 可选 x11vnc | 仅 Desktop（Server 跳过）。GDM 登录界面、锁屏、会话都走 Xorg；装了远程桌面时关掉合盖/空闲挂起。`--remote-desktop x11vnc` 时在这里装 x11vnc。`--wayland` 保留 Wayland；`--skip 36` 也可跳过。详见下文「远程桌面」 |
 | `37-flclash.sh` | FlClash（ClashMeta 图形客户端） | **仅 Desktop 默认安装**（Server / 非 amd64·arm64 自动跳过；`--no-flclash` 或 `--skip 37` 也可跳过）。官方 GitHub Release 的 linux `.deb`（同级 `SHA256SUMS` 校验），**始终安装最新稳定版**。**只装应用**：不写订阅、不设系统代理、不启用 TUN、不装开机自启。详见下文 |
 | `38-rustdesk.sh` | RustDesk（**Desktop 默认远程桌面**） | 仅 Desktop + amd64/arm64。官方 GitHub Release 的 `.deb`（钉扎 1.5.1，sha256 校验，`--pin-rustdesk` 可改）；开启局域网 **IP 直连**（`21118/tcp`）、只用**固定密码**（默认 = `--password`），开机即可从登录界面、锁屏、会话连。`--remote-desktop x11vnc\|none` 换掉或不装；`--skip 38` 也可跳过。详见下文「远程桌面」 |
+| `39-grok-bot.sh` | Grok Bot 桌面版 | **仅 Desktop 默认安装**（Server / 非 amd64·arm64 自动跳过；`--no-grok-bot` 或 `--skip 39` 也可跳过）。官方 linux `.deb`（发布 feed 的最新版，sha256 用签名 apt 索引或内置值校验；`--grok-bot-version` / `--grok-bot-url` + `--grok-bot-sha256` 可钉扎）；保留官方 apt 源，之后随 `apt upgrade` 更新。**只装应用**：不登录、不预置配置。失败只记 SKIP，不影响装机。详见下文 |
 | `40-nodejs.sh` | Node.js 24 | NodeSource 优先，官方 tarball 兜底 |
 | `45-gitea.sh` | Gitea（最新稳定版，可 `--pin-gitea`） | 官方 linux-amd64 二进制（sha256 校验）→ `/usr/local/bin/gitea`；系统用户 `git`；SQLite；**装机阶段写好配置并创建管理员**，开机 `gitea.service` 自启。监听 **0.0.0.0:3000**（不与 Jenkins 8080 冲突），`ROOT_URL` 为 `http://<主机名>.local:3000/`，开放注册，LFS 开，`OFFLINE_MODE`。SSH 克隆走系统 OpenSSH：`git@host:user/repo.git` |
 | `50-grok.sh` | xAI Grok Build | `@xai-official/grok`，**官方包**，不是社区的 `@vibe-kit/grok-cli` |
@@ -93,6 +94,21 @@ sudo apt remove FlClash
 ```
 
 若曾在应用内开启系统代理或 TUN，请先在应用里关掉再卸载。全离线时 deb 与 apt 依赖（`libayatana-appindicator3-1`、`libsecret-1-0` 及其闭包）都在捆绑里，装机不访问 GitHub。
+
+### Grok Bot 桌面版（仅 Desktop）
+
+Desktop 默认预装 Grok Bot 桌面版（官方 linux `.deb`，`grok-bot` 包，装到 `/opt/Grok Bot`，命令 `/usr/bin/grok-bot`）。Server 与非 amd64/arm64 自动跳过。
+
+- **版本**：默认 `latest` = 发布 feed `https://api2.cursor.sh/updates/api/download/stable/linux-x64/sand`（arm64 是 `linux-arm64`）给出的当前版本和 `debUrl`（`downloads.cursor.com`）。写这段时是 `0.79.4`。
+- **校验**：deb 的 sha256 依次取 `--grok-bot-sha256` → `tools/grok-bot-release.sh` 里内置的已知版本值（目前 0.79.4 amd64/arm64）→ 官方签名 apt 索引（`gpgv` 用仓库里的 `tools/grok-bot-archive-key.asc` 校验 `InRelease`，再查 `Packages`）。还会核对 deb 的包名、版本、架构。拿不到可信 sha256 就不装。
+- **钉扎**：`--grok-bot-version X.Y.Z`（必须是内置已知版本或 feed 当前版本；官方 feed / apt 仓库只保留最新版），或 `--grok-bot-url URL --grok-bot-sha256 SHA`（完全钉扎，可指向自建镜像）。
+- **安装**：`apt-get install --no-install-recommends ./grok-bot_*.deb`，依赖（GTK3、NSS、libsecret 等）由 apt 解析；不装 Recommends（`libappindicator3-1`）。官方 postinst 会装 AppArmor profile（24.04 限制非特权 user namespace，Electron 沙箱需要它）；chroot 里检测不到 AppArmor 时由钩子补放 `/etc/apparmor.d/grok-bot`。
+- **只装应用**：不登录、不写账号或配置、不设开机自启。装完从应用菜单打开 Grok Bot，由用户自己登录。
+- **失败不致命**：下载、校验或安装失败都只打印 `SKIP: Grok Bot 未安装: …`，原因写进 `/var/log/autoinstall/grok-bot.skip`，`99-cleanup` 汇总里显示 `grok-bot (skipped: …)`；装机继续。
+- **apt 源与更新**：官方 postinst 写 `/etc/apt/sources.list.d/grok-bot.sources`（`https://downloads.cursor.com/aptrepo`，`Signed-By: /usr/share/keyrings/grok-bot.gpg`），这里**保留**它，装完 `sudo apt update && sudo apt upgrade` 即可更新 Grok Bot。离线装机时钩子先把它挪进 `enable-offline-apt.sh` 的 `sources.list.d.offline-bak/`，装机过程中的 `apt-get update` 不会去连外网；`restore-online-apt.sh` 收尾时原样挪回。清华源改写只动 Ubuntu 源，不碰它。装完仍无网时 `apt-get update` 对它只告警，不报错。
+- **跳过 / 卸载**：`--no-grok-bot`，或 `--skip 39` / `--skip 39-grok-bot`。卸载：`sudo apt remove grok-bot`（postrm 会删掉 apt 源和 key）。
+
+> **国内网络**：`api2.cursor.sh` 和 `downloads.cursor.com` 在国内可能很慢或被拦截（deb 约 110 MB），在线装机时容易拖慢甚至 SKIP。建议用全离线捆绑（`--fetch-offline`）：deb 和依赖都在构建机上预先下载并校验，装机时不连这两个域名。也可以用 `--grok-bot-url` + `--grok-bot-sha256` 指向内网镜像。
 
 ### 远程桌面：关闭 Wayland + RustDesk（Desktop 默认开启）
 
@@ -281,7 +297,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 
 ### 容量与依赖提醒
 
-- 目标盘预留 **≥ 25 GB**（Docker 镜像 + Jenkins workspace 很吃空间）；这套预装本身约占 1.2–1.5 GB（另加 Godot 解压约 140 MB、Gitea 二进制约 115 MB、FlClash deb 约 40 MB、RustDesk deb 约 25 MB，数据目录随后增长）。
+- 目标盘预留 **≥ 25 GB**（Docker 镜像 + Jenkins workspace 很吃空间）；这套预装本身约占 1.2–1.5 GB（另加 Godot 解压约 140 MB、Gitea 二进制约 115 MB、FlClash deb 约 40 MB、RustDesk deb 约 25 MB、Grok Bot deb 约 110 MB（装后约 370 MB），数据目录随后增长）。
 - OpenMausBot 是 Electron 应用，npm 包会拉下较大体积的运行时；服务器上只用 `openmausbot serve`，不需要 X11。
 - 首次开机后要跑一次 `apt-get update`——`99-cleanup.sh` 为了缩体积清掉了 `/var/lib/apt/lists`。
 
@@ -289,7 +305,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 
 加：在 `software/` 放一个 `85-你的东西.sh`，按现有脚本的约定（`set -euo pipefail`、结尾自带校验命令、失败即非零退出）即可，无需改主脚本。
 
-减：`--skip "30 70"` 跳过 Jenkins 和 OpenMausBot；`--skip "30-jenkins 70-openmausbot"` 等价。Desktop 上不装 FlClash 用 `--no-flclash`（或 `--skip 37`）。整套不要就 `--no-provision`（Desktop 上要同时加 `--wayland`，因为默认的关 Wayland + RustDesk 由 `36` / `38` 钩子落地；此时不装远程桌面）。
+减：`--skip "30 70"` 跳过 Jenkins 和 OpenMausBot；`--skip "30-jenkins 70-openmausbot"` 等价。Desktop 上不装 FlClash 用 `--no-flclash`（或 `--skip 37`），不装 Grok Bot 用 `--no-grok-bot`（或 `--skip 39`）。整套不要就 `--no-provision`（Desktop 上要同时加 `--wayland`，因为默认的关 Wayland + RustDesk 由 `36` / `38` 钩子落地；此时不装远程桌面）。
 
 ---
 
@@ -479,7 +495,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso --uefi
 | 选盘 | 默认停在选盘页 | 同左：图形安装器停在「安装类型/磁盘」页，确认后继续 |
 | 配置投递 | `/nocloud` + 内核参数 | 同左；另在 ISO 根放一份 `/autoinstall.yaml` 兜底（Subiquity 优先级：内核参数 > live 根 > cloud-config > 介质根，正常不会用到） |
 
-`software/*.sh` 在 Desktop 目标上大体不用改：Desktop minimal 不带 curl/git/openssh-server，`00-base`/`10-openssh` 会补装；已装的包（ca-certificates、gnupg、jq 等）照旧跳过。GitHub CLI / Docker / NVIDIA Container Toolkit / Jenkins / Node / Gitea / Grok / OpenCode / OpenMausBot / Unity CLI / Godot 与 Server 相同（Toolkit **不含** GPU 驱动；Unity CLI **不含** Editor；Godot **不含** export templates）。**例外**：`35-microsoft-edge.sh` 只在 Desktop + amd64 安装，并把 Edge 设为默认浏览器（Firefox 保留）；`37-flclash.sh` 只在 Desktop + amd64/arm64 安装 FlClash（不配置代理）；Server 自动跳过。
+`software/*.sh` 在 Desktop 目标上大体不用改：Desktop minimal 不带 curl/git/openssh-server，`00-base`/`10-openssh` 会补装；已装的包（ca-certificates、gnupg、jq 等）照旧跳过。GitHub CLI / Docker / NVIDIA Container Toolkit / Jenkins / Node / Gitea / Grok / OpenCode / OpenMausBot / Unity CLI / Godot 与 Server 相同（Toolkit **不含** GPU 驱动；Unity CLI **不含** Editor；Godot **不含** export templates）。**例外**：`35-microsoft-edge.sh` 只在 Desktop + amd64 安装，并把 Edge 设为默认浏览器（Firefox 保留）；`37-flclash.sh` 只在 Desktop + amd64/arm64 安装 FlClash（不配置代理）；`39-grok-bot.sh` 只在 Desktop + amd64/arm64 安装 Grok Bot（不登录）；Server 自动跳过。
 
 ### 离线：Desktop 能不能全离线？
 
@@ -548,7 +564,7 @@ cat /var/log/autoinstall/20-docker.log
 
 **装完系统的源是合理的**：在线安装时 Subiquity 按 `apt.primary` 写出 sources，之后一直用 `--mirror`（默认清华）。全离线安装过程不访问镜像，装完由 `restore-online-apt.sh` 恢复安装器写下的同一份 Ubuntu 源，并写回 Docker / Jenkins 等第三方源。境外使用或需要官方源时，构建时加上 `--mirror http://archive.ubuntu.com/ubuntu` 即可。当前 ISO 构建以 amd64 为主；自行给非 amd64 抓离线包时，未指定 `--ubuntu-mirror` 会自动改用 `ubuntu-ports`。
 
-第三方源（Docker CE、Jenkins、NodeSource、GitHub CLI、NVIDIA toolkit、Microsoft Edge）以及 npm / Jenkins 插件 / Gitea 二进制 / FlClash GitHub Release，不走 Ubuntu 镜像，也不受 `--mirror` 影响。
+第三方源（Docker CE、Jenkins、NodeSource、GitHub CLI、NVIDIA toolkit、Microsoft Edge）以及 npm / Jenkins 插件 / Gitea 二进制 / FlClash GitHub Release / Grok Bot（`downloads.cursor.com`），不走 Ubuntu 镜像，也不受 `--mirror` 影响。
 
 ## 参数一览
 
@@ -582,6 +598,10 @@ cat /var/log/autoinstall/20-docker.log
 | `--pin-unity-cli VER` | Unity CLI 版本（默认拉 stable，若无则 beta）；亦可用 `PIN_UNITY_CLI` |
 | `--pin-gitea VER` | Gitea 版本（默认 `latest`，从 `dl.gitea.com/gitea/version.json` 解析；亦可 `PIN_GITEA=28.3.0`） |
 | `--no-flclash` | 不预装 FlClash（等价 `--skip 37` / `--skip 37-flclash`）。Desktop 默认预装最新稳定版（官方 GitHub Release + `SHA256SUMS`） |
+| `--no-grok-bot` | 不预装 Grok Bot 桌面版（等价 `--skip 39` / `--skip 39-grok-bot`）。Desktop 默认预装 |
+| `--grok-bot-version V` | Grok Bot 版本，默认 `latest`（发布 feed 当前版本）；`X.Y.Z` 须是内置已知版本或 feed 当前版本（环境变量 `PIN_GROK_BOT`） |
+| `--grok-bot-url URL` | 完全钉扎 Grok Bot deb 的下载地址（可用内网镜像），必须同时给 `--grok-bot-sha256`（环境变量 `GROK_BOT_DEB_URL`） |
+| `--grok-bot-sha256 SHA` | Grok Bot deb 的期望 sha256（环境变量 `GROK_BOT_SHA256`） |
 | `--no-nvidia-driver` | 不装 NVIDIA 驱动（等价 `--skip 24` / `--skip 24-nvidia-driver`）。默认每台机器都装，不检测硬件 |
 | `--nvidia-driver-version N` | NVIDIA 驱动分支，默认 `595`（`PIN_NVIDIA_DRIVER`） |
 | `--nvidia-kernel-flavour F` | 内核 flavour（如 `generic-hwe-24.04` / `generic`），默认装机时按已装内核自动判断；全离线时也要求捆绑里有它 |
@@ -628,7 +648,7 @@ cat /var/log/autoinstall/20-docker.log
 ### 完整性与版本复现
 
 - 推荐先验证官方 `SHA256SUMS.gpg`（用 Ubuntu CD Image signing key），再传 `--iso-sha256sums SHA256SUMS`；脚本只验证 SHA256，不替代 GPG 签名验证。
-- `--pin-grok` / `--pin-opencode` / `--pin-openmausbot` / `--pin-gitea` 给具体版本可避免 `latest` 漂移。默认仍为 `latest`。FlClash 始终跟随最新稳定版，不能钉扎。
+- `--pin-grok` / `--pin-opencode` / `--pin-openmausbot` / `--pin-gitea` 给具体版本可避免 `latest` 漂移。默认仍为 `latest`。FlClash 始终跟随最新稳定版，不能钉扎。Grok Bot 用 `--grok-bot-version` 或 `--grok-bot-url` + `--grok-bot-sha256` 钉扎。
 - `--pin-node 24` 只钉主版本；NodeSource、Docker、Jenkins 仍跟随其稳定仓库，尚未做完整 apt 版本锁。
 - Jenkins apt 源自 2026-01 起需 `jenkins.io-2026.key`（2023 密钥已过期）；本仓库脚本已切换。若要求严格复现，应使用内网快照源并固定 `.deb` 版本。当前默认行为不变，不承诺 bit-for-bit 可复现。
 - `apt.primary` 暂保留 legacy 格式以兼容 22.04 的旧版 Subiquity（且安装器刷新关闭）；24.04-only 项目可迁移到 `mirror-selection.primary`。默认 URI 是清华源，详见下方「默认 apt 源」。
@@ -643,7 +663,7 @@ bash test/local-check.sh
 
 ### 全离线模式（`--offline` + `--offline-bundle`）
 
-目标：装机过程**零外网请求**，装完仍有 Docker / Jenkins / Node 24 / Grok / OpenCode / OpenMausBot / Unity CLI / Godot / Gitea / FlClash（Desktop）。
+目标：装机过程**零外网请求**，装完仍有 Docker / Jenkins / Node 24 / Grok / OpenCode / OpenMausBot / Unity CLI / Godot / Gitea / FlClash / Grok Bot（Desktop）。
 
 ```bash
 # 1) 构建期联网抓取捆绑（按发行版缓存，可复用）
@@ -672,10 +692,10 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 
 | 阶段 | 行为 |
 |---|---|
-| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource + Microsoft Edge + x11vnc + Avahi（`avahi-daemon` / `libnss-mdns`）+ FlClash / RustDesk 的 apt 依赖 + NVIDIA 驱动 / 预编译模块 / 同版本内核 / Intel VA-API，见下），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）与 FlClash linux `.deb`（`flclash/`，约 40 MB，官方 GitHub `SHA256SUMS` 校验）、RustDesk `.deb`（`rustdesk/`，约 25 MB，钉扎版本 + 官方 sha256）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
+| `fetch-offline-bundle.sh` | 在 `ubuntu:24.04`/`22.04` 容器内解析完整 deb 依赖闭包（Ubuntu + Docker + NVIDIA Container Toolkit + Jenkins + NodeSource + Microsoft Edge + x11vnc + Avahi（`avahi-daemon` / `libnss-mdns`）+ FlClash / RustDesk / Grok Bot 的 apt 依赖 + NVIDIA 驱动 / 预编译模块 / 同版本内核 / Intel VA-API，见下），`dpkg-scanpackages` 生成本地 apt 源；同时把第三方 **keyring + `.list`/`.sources`** 存进 `apt-sources/`；宿主机 `npm` 打全局 prefix 树；另存 Node 官方 tarball、Unity CLI 二进制（`unity-cli/`，约 128 MB）、Godot 4.7.2 zip（`godot/`，约 75 MB）与 Gitea linux-amd64 二进制（`gitea/`，约 115 MB，官方 sha256 校验）与 FlClash linux `.deb`（`flclash/`，约 40 MB，官方 GitHub `SHA256SUMS` 校验）、RustDesk `.deb`（`rustdesk/`，约 25 MB，钉扎版本 + 官方 sha256）、Grok Bot `.deb`（`grok-bot/`，约 110 MB，sha256 来自签名 apt 索引 / 内置值 / `--grok-bot-sha256`，写进 `manifest.json`；`--no-grok-bot` 不抓）兜底；并在宿主机用 `tools/resolve-jenkins-plugins.py` 按捆绑里 Jenkins 的版本解析插件闭包到 `jenkins-plugins/`（默认 87 个、约 74 MB，含 `plugins.lock`） |
 | ISO | 写入 `/offline/{apt,apt-sources,npm,node,unity-cli,godot,gitea,jenkins-plugins,manifest.json}` |
 | 装机 late-commands | 拷到 `/opt/offline`，临时只启用 `deb [trusted=yes] file:/opt/offline/apt ./`，再跑 `software/`（`OFFLINE=1`） |
-| `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装；FlClash 从 `flclash/`、RustDesk 从 `rustdesk/` 安装（依赖来自本地 apt 池）；Jenkins 插件从 `jenkins-plugins/` 拷贝 |
+| `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装；FlClash 从 `flclash/`、RustDesk 从 `rustdesk/`、Grok Bot 从 `grok-bot/` 安装（依赖来自本地 apt 池）；Jenkins 插件从 `jenkins-plugins/` 拷贝 |
 | `restore-online-apt.sh` | 卸掉离线 pin、恢复安装器写入的 Ubuntu 源（即 `--mirror`，默认清华 https，含 `-security`）后，把捆绑内 **全部** `apt-sources/` 种子写回（Docker CE / GitHub CLI / NVIDIA toolkit / Jenkins / NodeSource / Microsoft Edge；与在线脚本同一批 URL/密钥）。装机时可能仍无网，此处不做 `apt update`；联网后即可收安全更新。纯在线构建不会调用本脚本 |
 
 体积与缓存：
@@ -705,6 +725,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 - Godot 是官方 zip（GitHub releases / downloads.godotengine.org，固定 **4.7.2**）→ 全离线捆绑的 `godot/`；无捆绑时脚本会联网下载；**不含** export templates
 - Gitea 是官方二进制（`dl.gitea.com`，默认 latest，可用 `--pin-gitea`）→ 全离线捆绑的 `gitea/`；无捆绑时脚本会联网下载并用官方 `.sha256` 校验
 - FlClash 是官方 GitHub Release 的 linux `.deb`（始终跟随最新稳定版）→ 全离线捆绑的 `flclash/` 以及 apt 池里的依赖；无捆绑时脚本会联网下载并用官方 `SHA256SUMS` 校验。仓库没有为 GitHub 资产配置国内代理，抓包/在线安装需要能访问 `github.com`
+- Grok Bot 是官方 linux `.deb` → 全离线捆绑的 `grok-bot/`（deb + `sha256` + `version`）以及 apt 池里的依赖（Desktop 的 GTK 依赖大多已在池里，额外只多几 MB；捆绑总体约 +110 MB）。`validate-offline-bundle.sh` 在 Desktop 构建时（`--require-grok-bot`）检查 deb 的 sha256 / 版本和每个直接依赖都在池里。加入 Grok Bot 后 fingerprint 变了，老捆绑要 `--fetch-offline --force-fetch` 重建（apt deb 从缓存复用）。抓包机需要能访问 `api2.cursor.sh` 和 `downloads.cursor.com`（国内可能很慢，可用 `--grok-bot-url` 指向镜像）
 
 真正要全离线，建议改为「内网镜像源 + 自建 npm registry（Verdaccio）」，比往 ISO 里塞依赖靠谱得多。
 
@@ -784,6 +805,6 @@ xorriso -indev ubuntu.iso -outdev out.iso \
 
 - 口令是哈希，不是明文；哈希本身也别提交到公开仓库。若用 `--password` 构建，Gitea / Jenkins 管理员明文会短暂出现在 ISO 的 `/provision/gitea-admin.secret` / `jenkins-admin.secret`（0600），装机后从目标机删除；拿到 ISO 的人在安装前仍可能读到，请勿把此类 ISO 公开分发。
 - 没有任何 API key / 私钥进镜像。SSH **公钥**可通过 `--ssh-authorized-keys` 注入，属于公开信息；私钥绝不注入。
-- 目标机磁盘 ≥ 25 GB，且装机时能访问 cli.github.com / docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / packages.microsoft.com（Desktop 上的 Microsoft Edge） / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）、`github.com/godotengine/godot` 或 `downloads.godotengine.org`（Godot 4.7.2），`github.com/chen08209/FlClash`（Desktop 上的 FlClash linux `.deb` 与 `SHA256SUMS`）、`github.com/rustdesk/rustdesk`（Desktop 上的 RustDesk `.deb`；非默认版本还要 `api.github.com` 查 sha256），以及 `dl.gitea.com`（Gitea 二进制与 sha256）与 `updates.jenkins.io` 及其下载镜像（Jenkins 插件）。全离线捆绑可免除这些外网依赖。
+- 目标机磁盘 ≥ 25 GB，且装机时能访问 cli.github.com / docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / packages.microsoft.com（Desktop 上的 Microsoft Edge） / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）、`github.com/godotengine/godot` 或 `downloads.godotengine.org`（Godot 4.7.2），`github.com/chen08209/FlClash`（Desktop 上的 FlClash linux `.deb` 与 `SHA256SUMS`）、`github.com/rustdesk/rustdesk`（Desktop 上的 RustDesk `.deb`；非默认版本还要 `api.github.com` 查 sha256）、`api2.cursor.sh` 与 `downloads.cursor.com`（Desktop 上的 Grok Bot `.deb` 和它的签名 apt 源；国内可能慢或被拦截），以及 `dl.gitea.com`（Gitea 二进制与 sha256）与 `updates.jenkins.io` 及其下载镜像（Jenkins 插件）。全离线捆绑可免除这些外网依赖。
 
 这条线一旦破，后面所有「镜像管理」都失去意义。

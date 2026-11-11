@@ -1397,7 +1397,7 @@ else
   fail "36-x11vnc-xorg with RustDesk"
 fi
 rm -rf "$rr"
-if grep -q 'rustdesk/' tools/fetch-offline-bundle.sh && grep -q '"rustdesk", "apt-sources"' tools/fetch-offline-bundle.sh \
+if grep -q 'rustdesk/' tools/fetch-offline-bundle.sh && grep -q '"flclash", "rustdesk",' tools/fetch-offline-bundle.sh \
    && grep -q '"rustdesk": sys.argv\[12\]' tools/fetch-offline-bundle.sh && grep -q -- '--pin-rustdesk' tools/fetch-offline-bundle.sh \
    && grep -q 'FETCH_RUSTDESK_DIR' tools/fetch-offline-bundle.sh \
    && grep -q -- '--require-rustdesk' tools/validate-offline-bundle.sh && grep -q -- '--require-rustdesk' build-iso.sh \
@@ -1651,6 +1651,152 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
 else
   echo "(xorriso/openssl missing, flclash build test skipped)"
 fi
+
+echo "== grok-bot script (39-grok-bot) + release helper + build flags =="
+# 不联网: 内置版本解析 / 参数校验 / deb 字段核对 / 装机钩子的跳过与离线 apt 源处理
+gt="$(mktemp -d)"
+if (
+  set -e
+  # shellcheck disable=SC1091
+  . tools/grok-bot-release.sh
+  grokbot_resolve 0.79.4 amd64
+  [[ "$GROK_BOT_DEB_NAME" == grok-bot_0.79.4_amd64.deb && "$GROK_BOT_SHA_SOURCE" == builtin ]]
+  [[ "$GROK_BOT_DEB_URL" == https://downloads.cursor.com/grokbot/stable/7b5e3d87b3866229f111269975bc91bd8f3f7243/linux/x64/grok-bot_0.79.4_amd64.deb ]]
+  [[ "$GROK_BOT_SHA256" == cf0fd0032249cf08e75f6dff045766b5195078dd878d1eeed60a68c4d31a7a5a ]]
+  grokbot_resolve 0.79.4 arm64
+  [[ "$GROK_BOT_DEB_NAME" == grok-bot_0.79.4_arm64.deb && "$GROK_BOT_SHA256" == 2ba919c2c8a6ff29e8ad9065b82daa13635e4306677a5c6ce00e9bfb3c1f5324 ]]
+  grokbot_resolve latest amd64 https://mirror.example/x/grok-bot_9.9.9_amd64.deb "$(printf 'a%.0s' {1..64})"
+  [[ "$GROK_BOT_SHA_SOURCE" == pinned && -z "$GROK_BOT_VERSION" && "$GROK_BOT_DEB_NAME" == grok-bot_9.9.9_amd64.deb ]]
+  ! grokbot_resolve 0.79.4 riscv64 2>/dev/null
+  ! grokbot_resolve '0.79;rm' amd64 2>/dev/null
+  ! grokbot_resolve latest amd64 https://mirror.example/x.deb 2>/dev/null          # URL 无 sha256
+  ! grokbot_resolve 0.79.4 amd64 "" "$(printf 'b%.0s' {1..64})" 2>/dev/null         # 与内置 sha256 不符
+  ! grokbot_resolve latest amd64 'https://m.example/a b.deb' "$(printf 'a%.0s' {1..64})" 2>/dev/null
+  # feed 不可达 → 报错 (不联网: file:// 不存在)
+  ! GROK_BOT_FEED_BASE=file:///nonexistent grokbot_resolve latest amd64 2>/dev/null
+  # 真 deb 字段核对: Package / Version / Architecture + sha256
+  mkdir -p "$gt/pkg/DEBIAN"
+  printf 'Package: grok-bot\nVersion: 0.79.4\nArchitecture: amd64\nMaintainer: t <t@t>\nDescription: t\n' > "$gt/pkg/DEBIAN/control"
+  dpkg-deb --build "$gt/pkg" "$gt/g.deb" >/dev/null
+  _s="$(sha256sum "$gt/g.deb" | cut -d' ' -f1)"
+  grokbot_verify_deb "$gt/g.deb" "$_s" 0.79.4 amd64
+  ! grokbot_verify_deb "$gt/g.deb" "$_s" 0.79.5 amd64 2>/dev/null
+  ! grokbot_verify_deb "$gt/g.deb" "$_s" 0.79.4 arm64 2>/dev/null
+  ! grokbot_verify_deb "$gt/g.deb" "$(printf 'c%.0s' {1..64})" 2>/dev/null
+  sed -i 's/^Package: grok-bot/Package: evil/' "$gt/pkg/DEBIAN/control"
+  dpkg-deb --build "$gt/pkg" "$gt/e.deb" >/dev/null
+  ! grokbot_verify_deb "$gt/e.deb" "$(sha256sum "$gt/e.deb" | cut -d' ' -f1)" 2>/dev/null
+) >"$gt/rel.log" 2>&1; then
+  pass "grok-bot-release: builtin 0.79.4 (amd64/arm64), pinned URL+sha256, rejects bad arch/version/url/sha, deb field checks"
+else
+  fail "grok-bot-release helper: $(tail -5 "$gt/rel.log")"
+fi
+# 公钥: 与官方 deb postinst 内嵌的同一把 (指纹写在文件头)
+if grep -q '380F F4BC DC34 A4BD 92A3  5653 42A1 772E 62E4 92D6' tools/grok-bot-archive-key.asc \
+   && [[ "$(grep -vE '^(#|-----|=|$)' tools/grok-bot-archive-key.asc | base64 -d | wc -c)" -gt 1000 ]]; then
+  pass "grok-bot archive key present (dearmor ok)"
+else
+  fail "grok-bot archive key"
+fi
+# 钩子: Server / 不支持的架构跳过; 失败只 SKIP (exit 0) 并写原因
+if EDITION=server bash software/39-grok-bot.sh >"$gt/s.log" 2>&1 && grep -q '^skip: Grok Bot 仅在 Desktop' "$gt/s.log" \
+   && EDITION=desktop GROK_BOT_ARCH=riscv64 bash software/39-grok-bot.sh >"$gt/a.log" 2>&1 && grep -q '^skip:' "$gt/a.log" \
+   && EDITION=desktop OFFLINE=1 OFFLINE_ROOT="$gt/no-bundle" AIB_TARGET_ROOT="$gt/t1" bash software/39-grok-bot.sh >"$gt/o.log" 2>&1 \
+   && grep -q '^SKIP: Grok Bot 未安装: 离线安装失败' "$gt/o.log" && grep -q '离线' "$gt/t1/var/log/autoinstall/grok-bot.skip" \
+   && EDITION=desktop OFFLINE=0 GROK_BOT_FEED_BASE=file:///nonexistent AIB_TARGET_ROOT="$gt/t2" bash software/39-grok-bot.sh >"$gt/n.log" 2>&1 \
+   && grep -q '^SKIP: Grok Bot 未安装: 在线下载或安装失败' "$gt/n.log" && grep -q 'downloads.cursor.com' "$gt/n.log"; then
+  pass "39-grok-bot: skips on server / unsupported arch; offline/online failure = SKIP + reason, exit 0"
+else
+  fail "39-grok-bot skip paths: $(tail -3 "$gt/s.log" "$gt/a.log" "$gt/o.log" "$gt/n.log" 2>/dev/null)"
+fi
+# 钩子: 离线时把 postinst 写的 grok-bot.sources 挪进 offline-bak (restore-online-apt 挪回); 在线保留; AppArmor 兜底
+_gbprep() {
+  mkdir -p "$1/opt/Grok Bot/resources" "$1/etc/apparmor.d" "$1/etc/apt/sources.list.d"
+  printf 'profile "grok-bot" "/opt/Grok Bot/grok-bot" flags=(unconfined) { userns, }\n' > "$1/opt/Grok Bot/resources/apparmor-profile"
+  printf 'Types: deb\nURIs: https://downloads.cursor.com/aptrepo\nSuites: grok-bot\nComponents: main\nSigned-By: /usr/share/keyrings/grok-bot.gpg\n' > "$1/etc/apt/sources.list.d/grok-bot.sources"
+}
+_gbprep "$gt/t3"; mkdir -p "$gt/t3/etc/apt/sources.list.d.offline-bak"
+_gbprep "$gt/t4"
+if EDITION=desktop OFFLINE=1 AIB_TARGET_ROOT="$gt/t3" AIB_SKIP_PKG=1 bash software/39-grok-bot.sh >"$gt/t3.log" 2>&1 \
+   && [[ ! -e "$gt/t3/etc/apt/sources.list.d/grok-bot.sources" && -f "$gt/t3/etc/apt/sources.list.d.offline-bak/grok-bot.sources" ]] \
+   && [[ -f "$gt/t3/etc/apparmor.d/grok-bot" ]] \
+   && EDITION=desktop OFFLINE=0 AIB_TARGET_ROOT="$gt/t4" AIB_SKIP_PKG=1 bash software/39-grok-bot.sh >"$gt/t4.log" 2>&1 \
+   && [[ -f "$gt/t4/etc/apt/sources.list.d/grok-bot.sources" ]] && grep -q '随 apt upgrade 更新' "$gt/t4.log"; then
+  pass "39-grok-bot: offline moves grok-bot.sources into offline-bak, online keeps it; AppArmor profile fallback"
+else
+  fail "39-grok-bot apt source / apparmor: $(tail -3 "$gt/t3.log" "$gt/t4.log")"
+fi
+# restore-online-apt 把它挪回, 清华源改写不碰它
+mkdir -p "$gt/t3/etc/apt/apt.conf.d"; : > "$gt/t3/etc/apt/sources.list.d/00-offline-bundle.list"
+printf 'Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main\n' > "$gt/t3/etc/apt/sources.list.d.offline-bak/ubuntu.sources"
+cp autoinstall/restore-online-apt.sh tools/ubuntu-mirror.sh "$gt/"
+mkdir -p "$gt/apt-sources/keyrings" "$gt/apt-sources/sources.list.d"
+echo https://mirrors.tuna.tsinghua.edu.cn/ubuntu > "$gt/ubuntu-mirror.url"
+_gbsrc_before="$(cat "$gt/t3/etc/apt/sources.list.d.offline-bak/grok-bot.sources")"
+if APT_ETC="$gt/t3/etc/apt" SHARE_KEYRINGS="$gt/t3/usr/share/keyrings" bash "$gt/restore-online-apt.sh" >"$gt/r.log" 2>&1 \
+   && [[ "$(cat "$gt/t3/etc/apt/sources.list.d/grok-bot.sources" 2>/dev/null)" == "$_gbsrc_before" ]] \
+   && grep -q 'mirrors.tuna.tsinghua.edu.cn/ubuntu' "$gt/t3/etc/apt/sources.list.d/ubuntu.sources"; then
+  pass "restore-online-apt restores grok-bot.sources unchanged; Tsinghua rewrite only touches ubuntu.sources"
+else
+  fail "restore-online-apt + grok-bot.sources: $(tail -5 "$gt/r.log")"
+fi
+# 静态: 抓包 / 校验 / 收尾接线
+# shellcheck disable=SC2016
+if grep -q '"grok_bot": sys.argv\[15\]' tools/fetch-offline-bundle.sh && grep -q '"grok-bot", "apt-sources"' tools/fetch-offline-bundle.sh \
+   && grep -q 'FETCH_GROKBOT_DIR' tools/fetch-offline-bundle.sh && grep -q -- '--no-grok-bot' tools/fetch-offline-bundle.sh \
+   && grep -q '"$OUT/grok-bot"' tools/fetch-offline-bundle.sh && grep -q '"grok_bot": grok_bot_meta' tools/fetch-offline-bundle.sh \
+   && grep -q -- '--require-grok-bot' tools/validate-offline-bundle.sh && grep -q -- '--require-grok-bot' build-iso.sh \
+   && grep -q 'grok-bot-release.sh' build-iso.sh && grep -q 'grok-bot-archive-key.asc' build-iso.sh \
+   && grep -qE '(^|[[:space:]])grok-bot([[:space:]]|$)' software/99-cleanup.sh && grep -q 'grok-bot.skip' software/99-cleanup.sh \
+   && grep -q 'PIN_GROK_BOT' software/run-all.sh && grep -q 'PIN_GROK_BOT' scripts/aib.sh && grep -q "'PIN_GROK_BOT'" scripts/aib.ps1 \
+   && grep -q 'offline_root)/grok-bot' software/39-grok-bot.sh \
+   && ! grep -qiE 'login|token|api[_-]?key|password' software/39-grok-bot.sh; then
+  pass "grok-bot offline seed + fingerprint + validate + cleanup/run-all/wrappers wiring; hook has no login/credentials"
+else
+  fail "grok-bot wiring"
+fi
+if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
+  bash test/make-fake-iso.sh desktop "$gt/d.iso" >/dev/null 2>&1 || true
+  bash test/make-fake-iso.sh server "$gt/s.iso" >/dev/null 2>&1 || true
+  _gx() { xorriso -osirrox on -indev "$1" -extract /provision "$2" >/dev/null 2>&1; }
+  _ph="$(openssl passwd -6 x)"
+  if bash build-iso.sh --iso "$gt/d.iso" --out "$gt/o1.iso" --password-hash "$_ph" >"$gt/o1.log" 2>&1 && _gx "$gt/o1.iso" "$gt/p1" \
+     && [[ -x "$gt/p1/39-grok-bot.sh" && -f "$gt/p1/grok-bot-release.sh" && -f "$gt/p1/grok-bot-archive-key.asc" ]] \
+     && grep -qx 'PIN_GROK_BOT=latest' "$gt/p1/provision.env" && grep -qx "GROK_BOT_DEB_URL=''" "$gt/p1/provision.env" \
+     && ! grep -q '39-grok-bot' "$gt/p1/provision.env" \
+     && grep -q 'Grok Bot 桌面版: 预装 latest' "$gt/o1.log" && grep -q '国内可能很慢' "$gt/o1.log"; then
+    pass "desktop default: Grok Bot on (latest), helper + key shipped, online China warning"
+  else
+    fail "build-iso grok-bot default: $(tail -5 "$gt/o1.log")"
+  fi
+  _gs=cf0fd0032249cf08e75f6dff045766b5195078dd878d1eeed60a68c4d31a7a5a
+  if bash build-iso.sh --iso "$gt/d.iso" --out "$gt/o2.iso" --password-hash "$_ph" --grok-bot-version 0.79.4 \
+       --grok-bot-url https://mirror.example/gb/grok-bot_0.79.4_amd64.deb --grok-bot-sha256 "${_gs^^}" >"$gt/o2.log" 2>&1 && _gx "$gt/o2.iso" "$gt/p2" \
+     && grep -qx 'PIN_GROK_BOT=0.79.4' "$gt/p2/provision.env" \
+     && grep -qx 'GROK_BOT_DEB_URL=https://mirror.example/gb/grok-bot_0.79.4_amd64.deb' "$gt/p2/provision.env" \
+     && grep -qx "GROK_BOT_SHA256=$_gs" "$gt/p2/provision.env" \
+     && bash build-iso.sh --iso "$gt/d.iso" --out "$gt/o3.iso" --password-hash "$_ph" --no-grok-bot >"$gt/o3.log" 2>&1 && _gx "$gt/o3.iso" "$gt/p3" \
+     && grep -q '^PROVISION_SKIP=.*39-grok-bot' "$gt/p3/provision.env" && grep -q 'Grok Bot 桌面版: 不装' "$gt/o3.log" \
+     && bash build-iso.sh --iso "$gt/s.iso" --out "$gt/o4.iso" --password-hash "$_ph" --grok-bot-version 0.79.4 >"$gt/o4.log" 2>&1 \
+     && grep -q -- '--grok-bot-version / --grok-bot-url / --grok-bot-sha256 只用于 Desktop' "$gt/o4.log" && ! grep -q 'Grok Bot 桌面版: 预装' "$gt/o4.log"; then
+    pass "--grok-bot-version/--grok-bot-url/--grok-bot-sha256 written (sha lowercased); --no-grok-bot skips 39; server warns"
+  else
+    fail "build-iso grok-bot flags: $(tail -3 "$gt/o2.log" "$gt/o3.log" "$gt/o4.log")"
+  fi
+  for bad in "--grok-bot-version 0.79;rm" "--grok-bot-version v1" "--grok-bot-url https://m.example/x.deb" \
+             "--grok-bot-url ftp://m.example/x.deb --grok-bot-sha256 $_gs" "--grok-bot-url https://m.example/a\$(id).deb --grok-bot-sha256 $_gs" \
+             "--grok-bot-sha256 1234"; do
+    # shellcheck disable=SC2086
+    if bash build-iso.sh --iso "$gt/d.iso" --out "$gt/c.iso" --password x $bad --dry-run >/dev/null 2>&1; then
+      fail "should reject: $bad"
+    else
+      pass "rejects: $bad"
+    fi
+  done
+else
+  echo "(xorriso/openssl missing, grok-bot build test skipped)"
+fi
+rm -rf "$gt"
 
 echo "== jenkins zero-config script + offline plugins + build flags =="
 if [[ -x software/30-jenkins.sh ]] \
@@ -2064,6 +2210,31 @@ if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$_vskip_no37 3
 else
   fail "validate accepted bundle without flclash"
 fi
+# --require-grok-bot (Desktop 默认 Grok Bot): grok-bot/ deb + sha256, grok-bot 与直接依赖在池里; 版本 / sha256 钉扎; --skip 39 不要求
+_gbv() { bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "${GBV_SKIP:-$vskip 30}" --require-grok-bot "$@"; }
+if ! _gbv >"$vb.gb.log" 2>&1 && grep -q 'grok-bot/' "$vb.gb.log" && GBV_SKIP="$vskip 30 39" _gbv >/dev/null 2>&1; then
+  mkdir -p "$vb/grok-bot"; echo deb > "$vb/grok-bot/grok-bot_0.79.4_amd64.deb"
+  echo grok-bot_0.79.4_amd64.deb > "$vb/grok-bot/deb.name"; echo 0.79.4 > "$vb/grok-bot/version"
+  _gbsha="$(sha256sum "$vb/grok-bot/grok-bot_0.79.4_amd64.deb" | cut -d' ' -f1)"; echo "$_gbsha" > "$vb/grok-bot/sha256"
+  printf 'Package: grok-bot\nVersion: 0.79.4\nDepends: libgtk-3-0, libnss3, libasound2t64 | libasound2\n\n' >> "$vb/apt/Packages"
+  printf 'Package: libgtk-3-0t64\nVersion: 1\nProvides: libgtk-3-0 (= 1)\n\nPackage: libasound2t64\nVersion: 1\n\n' >> "$vb/apt/Packages"
+  if ! _gbv >"$vb.gb.log" 2>&1 && grep -q 'apt 缺包: libnss3' "$vb.gb.log"; then
+    printf 'Package: libnss3\nVersion: 1\n\n' >> "$vb/apt/Packages"
+    if _gbv --grok-bot-version 0.79.4 --grok-bot-sha256 "${_gbsha^^}" >/dev/null 2>&1 \
+       && ! _gbv --grok-bot-version 0.79.5 >/dev/null 2>&1 \
+       && ! _gbv --grok-bot-sha256 "$(printf 'a%.0s' {1..64})" >/dev/null 2>&1 \
+       && echo tampered >> "$vb/grok-bot/grok-bot_0.79.4_amd64.deb" && ! _gbv >/dev/null 2>&1; then
+      pass "validate --require-grok-bot: dir + sha256 + version/sha pins + pool deps (Provides ok); --skip 39 not required"
+    else
+      fail "validate --require-grok-bot pins / tamper"
+    fi
+  else
+    fail "validate --require-grok-bot missing dep: $(head -3 "$vb.gb.log")"
+  fi
+else
+  fail "validate --require-grok-bot missing dir: $(head -3 "$vb.gb.log")"
+fi
+rm -f "$vb.gb.log"
 rm -rf "$vb"
 
 echo "== apt deb reuse helper (fake debs) =="

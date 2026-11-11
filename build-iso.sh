@@ -80,6 +80,11 @@ RUSTDESK_PASSWORD=""
 RUSTDESK_SERVER=""
 PIN_RUSTDESK="${PIN_RUSTDESK:-}"   # 空 = tools/rustdesk-release.sh 的 RUSTDESK_DEFAULT_VERSION
 NO_FLCLASH=0
+# Grok Bot 桌面版 (39-grok-bot.sh, 仅 Desktop): 默认装 feed 当前版本; --grok-bot-version / --grok-bot-url + --grok-bot-sha256 钉扎
+NO_GROK_BOT=0
+PIN_GROK_BOT="${PIN_GROK_BOT:-latest}"
+GROK_BOT_DEB_URL="${GROK_BOT_DEB_URL:-}"
+GROK_BOT_SHA256="${GROK_BOT_SHA256:-}"
 # NVIDIA 驱动 (24-nvidia-driver.sh): 默认每台机器都装, 不做硬件检测
 NO_NVIDIA_DRIVER=0
 PIN_NVIDIA_DRIVER="${PIN_NVIDIA_DRIVER:-595}"
@@ -143,6 +148,12 @@ usage() {
   --pin-gitea VER       Gitea 版本 (如 28.3.0), 默认 latest (PIN_GITEA)
   --no-flclash          不预装 FlClash (等价于 --skip 37 / --skip 37-flclash);
                         Desktop 默认预装最新稳定版 (官方 GitHub Release + SHA256SUMS)
+  --no-grok-bot         不预装 Grok Bot 桌面版 (等价于 --skip 39 / --skip 39-grok-bot)。
+                        Desktop 默认预装官方 .deb (发布 feed 当前版本, sha256 取自签名的 apt 仓库索引),
+                        保留它自带的 apt 源 (随 apt 更新); 不登录、不做任何配置, 装完用户自己登录
+  --grok-bot-version V  Grok Bot 版本, 默认 latest (PIN_GROK_BOT); X.Y.Z 只能是 feed 当前版本或内置版本
+  --grok-bot-url URL    完全钉扎: Grok Bot .deb 的 URL (可指向内网镜像), 必须同时给 --grok-bot-sha256
+  --grok-bot-sha256 H   Grok Bot .deb 的期望 sha256 (GROK_BOT_SHA256)
   --no-nvidia-driver    不装 NVIDIA 驱动 (等价于 --skip 24 / --skip 24-nvidia-driver)。
                         默认每台机器都装 (不检测硬件): nvidia-driver-<N>-open + Canonical 签名的
                         预编译模块 linux-modules-nvidia-<N>-open-<flavour> + 同版本内核 meta,
@@ -256,6 +267,10 @@ while [[ $# -gt 0 ]]; do
     --pin-unity-cli)  PIN_UNITY_CLI="$2"; shift 2 ;;
     --pin-gitea)      PIN_GITEA="$2"; shift 2 ;;
     --no-flclash)     NO_FLCLASH=1; shift ;;
+    --no-grok-bot)    NO_GROK_BOT=1; shift ;;
+    --grok-bot-version) PIN_GROK_BOT="$2"; shift 2 ;;
+    --grok-bot-url)   GROK_BOT_DEB_URL="$2"; shift 2 ;;
+    --grok-bot-sha256) GROK_BOT_SHA256="$2"; shift 2 ;;
     --no-nvidia-driver) NO_NVIDIA_DRIVER=1; shift ;;
     --nvidia-driver-version) PIN_NVIDIA_DRIVER="$2"; shift 2 ;;
     --nvidia-kernel-flavour) NVIDIA_KERNEL_FLAVOUR="$2"; shift 2 ;;
@@ -342,6 +357,21 @@ if [[ "${NO_FLCLASH:-0}" -eq 1 ]]; then
   case " $PROVISION_SKIP " in
     *" 37 "*|*" 37-flclash "*) ;;
     *) PROVISION_SKIP="${PROVISION_SKIP:+$PROVISION_SKIP }37-flclash" ;;
+  esac
+fi
+# Grok Bot: 格式校验与 tools/grok-bot-release.sh 同一套
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/tools/grok-bot-release.sh"
+grokbot_valid_version "$PIN_GROK_BOT" || die "非法 --grok-bot-version: $PIN_GROK_BOT (latest 或 X.Y.Z, 如 0.79.4)"
+[[ -z "$GROK_BOT_DEB_URL" ]] || grokbot_valid_url "$GROK_BOT_DEB_URL" \
+  || die "非法 --grok-bot-url: $GROK_BOT_DEB_URL (http(s)://主机[:端口]/路径/xxx.deb, 路径只能含 A-Za-z0-9._~%/+-)"
+GROK_BOT_SHA256="$(printf '%s' "$GROK_BOT_SHA256" | tr '[:upper:]' '[:lower:]')"
+[[ -z "$GROK_BOT_SHA256" ]] || grokbot_valid_sha256 "$GROK_BOT_SHA256" || die "非法 --grok-bot-sha256 (64 位 hex)"
+[[ -z "$GROK_BOT_DEB_URL" || -n "$GROK_BOT_SHA256" ]] || die "--grok-bot-url 必须同时给 --grok-bot-sha256 (保证可复现)"
+if [[ "${NO_GROK_BOT:-0}" -eq 1 ]]; then
+  case " $PROVISION_SKIP " in
+    *" 39 "*|*" 39-grok-bot "*) ;;
+    *) PROVISION_SKIP="${PROVISION_SKIP:+$PROVISION_SKIP }39-grok-bot" ;;
   esac
 fi
 [[ "$PIN_NVIDIA_DRIVER" =~ ^[0-9]{3,4}$ ]] || die "非法 --nvidia-driver-version: $PIN_NVIDIA_DRIVER (驱动分支号, 如 595)"
@@ -674,6 +704,13 @@ if [[ "${FETCH_OFFLINE:-0}" -eq 1 ]]; then
     FETCH_ARGS+=(--nvidia-driver-version "$PIN_NVIDIA_DRIVER")
     [[ -n "$NVIDIA_KERNEL_FLAVOUR" ]] && FETCH_ARGS+=(--nvidia-kernel-flavours "$NVIDIA_KERNEL_FLAVOUR")
   fi
+  if should_skip_script 39-grok-bot; then
+    FETCH_ARGS+=(--no-grok-bot)
+  else
+    FETCH_ARGS+=(--grok-bot-version "$PIN_GROK_BOT")
+    [[ -n "$GROK_BOT_DEB_URL" ]] && FETCH_ARGS+=(--grok-bot-url "$GROK_BOT_DEB_URL")
+    [[ -n "$GROK_BOT_SHA256" ]] && FETCH_ARGS+=(--grok-bot-sha256 "$GROK_BOT_SHA256")
+  fi
   [[ "${FORCE_FETCH:-0}" -eq 1 ]] && FETCH_ARGS+=(--force)
   bash "$SCRIPT_DIR/tools/fetch-offline-bundle.sh" "${FETCH_ARGS[@]}"
   OFFLINE_BUNDLE="$OB_OUT"
@@ -704,6 +741,11 @@ if [[ -n "$OFFLINE_BUNDLE" ]]; then
     [[ "$X11VNC" -eq 1 ]] && VAL_ARGS+=(--require-x11vnc)
     # Desktop 默认 RustDesk: 捆绑必须带 rustdesk/ (同版本 deb + sha256) 且 apt 池能装 (validate 自己处理 --skip 38)
     [[ "$REMOTE_DESKTOP" == "rustdesk" ]] && VAL_ARGS+=(--require-rustdesk --pin-rustdesk "$PIN_RUSTDESK")
+    # Desktop 默认 Grok Bot: 捆绑必须带 grok-bot/ (deb + sha256) 且 apt 池能装 (validate 自己处理 --skip 39)
+    if [[ "$EDITION" == "desktop" ]]; then
+      VAL_ARGS+=(--require-grok-bot --grok-bot-version "$PIN_GROK_BOT")
+      [[ -n "$GROK_BOT_SHA256" ]] && VAL_ARGS+=(--grok-bot-sha256 "$GROK_BOT_SHA256")
+    fi
     # Server 预装 Gitea / Jenkins: <hostname>.local 要 Avahi (Desktop 自带); 2026-11 之前的捆绑没有 → --force-fetch
     [[ "$EDITION" == "server" && "$MDNS_AVAHI" -eq 1 ]] && VAL_ARGS+=(--require-mdns)
     bash "$SCRIPT_DIR/tools/validate-offline-bundle.sh" "${VAL_ARGS[@]}"       || die "离线捆绑校验失败 (见上)。重建: ./tools/fetch-offline-bundle.sh --force ..."
@@ -829,8 +871,9 @@ if [[ "$PROVISION" -eq 1 ]]; then
   chmod 0755 "$WORK/provision/ubuntu-mirror.sh"
   # Jenkins 插件解析器 (30-jenkins.sh 在线路径用; 与 fetch-offline-bundle 同一份)
   cp "$SCRIPT_DIR/tools/resolve-jenkins-plugins.py" "$WORK/provision/"
-  cp "$SCRIPT_DIR/tools/flclash-release.sh" "$SCRIPT_DIR/tools/rustdesk-release.sh" "$WORK/provision/"
-  chmod 0755 "$WORK/provision/flclash-release.sh" "$WORK/provision/rustdesk-release.sh"
+  cp "$SCRIPT_DIR/tools/flclash-release.sh" "$SCRIPT_DIR/tools/rustdesk-release.sh" "$SCRIPT_DIR/tools/grok-bot-release.sh" "$WORK/provision/"
+  chmod 0755 "$WORK/provision/flclash-release.sh" "$WORK/provision/rustdesk-release.sh" "$WORK/provision/grok-bot-release.sh"
+  cp "$SCRIPT_DIR/tools/grok-bot-archive-key.asc" "$WORK/provision/"
   # 逐行 %q 写入, 保证 source 安全 (旧写法 EXTRA_APT_PACKAGES=vim, htop 会把 htop 当命令执行)
   {
     echo "# 由 build-iso.sh 生成 (printf %q; 请勿手改未加引号的值)"
@@ -876,6 +919,9 @@ if [[ "$PROVISION" -eq 1 ]]; then
     printf 'RUSTDESK_SERVER=%q\n' "$RUSTDESK_SERVER"
     printf 'PIN_NVIDIA_DRIVER=%q\n' "$PIN_NVIDIA_DRIVER"
     printf 'NVIDIA_KERNEL_FLAVOUR=%q\n' "$NVIDIA_KERNEL_FLAVOUR"
+    printf 'PIN_GROK_BOT=%q\n' "$PIN_GROK_BOT"
+    printf 'GROK_BOT_DEB_URL=%q\n' "$GROK_BOT_DEB_URL"
+    printf 'GROK_BOT_SHA256=%q\n' "$GROK_BOT_SHA256"
     printf 'OFFLINE=%q
 ' "$FULL_OFFLINE"
     printf 'OFFLINE_ROOT=%q
@@ -922,6 +968,20 @@ if [[ "$PROVISION" -eq 1 ]]; then
     log "NVIDIA 驱动: 不装 (--no-nvidia-driver / --skip 24)"
   else
     log "NVIDIA 驱动: 每台机器都装 (不检测硬件) nvidia-driver-${PIN_NVIDIA_DRIVER}-open + 预编译签名模块 (内核 flavour ${NVIDIA_KERNEL_FLAVOUR:-自动}); 关闭: --no-nvidia-driver"
+  fi
+fi
+if [[ "$PROVISION" -eq 1 ]]; then
+  if [[ "$EDITION" != "desktop" ]]; then
+    if [[ "$PIN_GROK_BOT" != "latest" || -n "$GROK_BOT_DEB_URL$GROK_BOT_SHA256" ]]; then
+      warn "--grok-bot-version / --grok-bot-url / --grok-bot-sha256 只用于 Desktop (当前 edition=$EDITION), 忽略"
+    fi
+  elif should_skip_script 39-grok-bot; then
+    log "Grok Bot 桌面版: 不装 (--no-grok-bot / --skip 39)"
+  else
+    log "Grok Bot 桌面版: 预装 ${GROK_BOT_DEB_URL:+钉扎 URL }${PIN_GROK_BOT}${GROK_BOT_SHA256:+ sha256=${GROK_BOT_SHA256:0:12}…} (只装应用, 不登录; 失败只跳过); 关闭: --no-grok-bot"
+    if [[ "$FULL_OFFLINE" -ne 1 && -z "$GROK_BOT_DEB_URL" ]]; then
+      warn "Grok Bot 在线装机要访问 api2.cursor.sh / downloads.cursor.com (国内可能很慢或被拦截, 失败只跳过); 稳妥做法: --fetch-offline 离线捆绑"
+    fi
   fi
 fi
 

@@ -67,6 +67,12 @@ out="$(PIN_NVIDIA_DRIVER=580 bash "$AIB" --dry-run build --iso u.iso --out o.iso
 expect "--no-nvidia-driver 透传" "$out" "--no-nvidia-driver --nvidia-driver-version 580 --nvidia-kernel-flavour generic"
 expect "PIN_NVIDIA_DRIVER 透传" "$out" "-e PIN_NVIDIA_DRIVER=580"
 
+out="$(PIN_GROK_BOT=0.79.4 GROK_BOT_SHA256=cf0fd0032249cf08e75f6dff045766b5195078dd878d1eeed60a68c4d31a7a5a bash "$AIB" --dry-run build --iso u.iso --out o.iso --no-grok-bot --grok-bot-version 0.79.4 --grok-bot-url https://mirror.example/grok-bot_0.79.4_amd64.deb --grok-bot-sha256 cf0fd0032249cf08e75f6dff045766b5195078dd878d1eeed60a68c4d31a7a5a)"
+expect "--no-grok-bot 透传" "$out" "--no-grok-bot --grok-bot-version 0.79.4 --grok-bot-url https://mirror.example/grok-bot_0.79.4_amd64.deb --grok-bot-sha256 cf0fd003"
+reject "--grok-bot-url 不当路径改写" "$out" "/work/https"
+expect "PIN_GROK_BOT 透传" "$out" "-e PIN_GROK_BOT=0.79.4"
+expect "GROK_BOT_SHA256 透传" "$out" "-e GROK_BOT_SHA256=cf0fd003"
+
 out="$(bash "$AIB" --dry-run build --iso u.iso --out o.iso --hostname node07 --service-url-host 192.168.1.20)"
 expect "--service-url-host 透传" "$out" "--hostname node07 --service-url-host 192.168.1.20"
 reject "--service-url-host 不当路径改写" "$out" "/work/192.168.1.20"

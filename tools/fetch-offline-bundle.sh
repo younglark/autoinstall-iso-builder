@@ -14,6 +14,7 @@
 #     gitea/               # Gitea linux-amd64 二进制 + version/sha256 (官方 dl.gitea.com 校验和)
 #     flclash/             # FlClash linux .deb + version/sha256 (官方 GitHub Release SHA256SUMS)
 #     rustdesk/            # RustDesk linux .deb (钉扎版本) + version/sha256 (官方 GitHub Release digest)
+#     grok-bot/            # Grok Bot 桌面版 .deb + version/sha256/url (发布 feed + 签名 apt 索引); 依赖闭包在 apt/
 #     nvidia/              # driver (分支号) + flavours ("<flavour> <模块/内核 meta 版本> <内核 ABI>"/行);
 #                          # 对应 deb (驱动 + 预编译模块 + 同版本内核) 在 apt/ 池里
 #     package-list.txt
@@ -31,7 +32,7 @@
 #     把「文件名、大小相同且哈希与 Packages 索引一致」的放进 apt 的 archives 目录 (apt 跳过下载前
 #     还会按索引里最强的哈希再校验一次),
 #     apt 只下载缺的。新下的 deb 回写缓存。缓存默认只增不删 (--prune-apt-cache 清掉本次不用的)。
-#   * Unity CLI / Gitea / Godot / FlClash / RustDesk / Jenkins 插件 / Node tarball: 版本不变且校验和一致时复用旧捆绑里的文件。
+#   * Unity CLI / Gitea / Godot / FlClash / RustDesk / Grok Bot / Jenkins 插件 / Node tarball: 版本不变且校验和一致时复用旧捆绑里的文件。
 #   指纹只描述捆绑内容/参数, 与缓存无关。
 # =============================================================================
 set -Eeuo pipefail
@@ -58,6 +59,11 @@ PIN_RUSTDESK="${PIN_RUSTDESK:-}"   # 空 = tools/rustdesk-release.sh 的 RUSTDES
 PIN_NVIDIA_DRIVER="${PIN_NVIDIA_DRIVER:-595}"
 NVIDIA_KERNEL_FLAVOURS="${NVIDIA_KERNEL_FLAVOURS:-}"
 NO_NVIDIA_DRIVER=0
+# Grok Bot 桌面版 (39-grok-bot.sh): latest = 发布 feed 当前版本; URL + sha256 完全钉扎
+PIN_GROK_BOT="${PIN_GROK_BOT:-latest}"
+GROK_BOT_DEB_URL="${GROK_BOT_DEB_URL:-}"
+GROK_BOT_SHA256="${GROK_BOT_SHA256:-}"
+NO_GROK_BOT=0
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger}"
 # Jenkins 插件解析器 (纯 Python 标准库; 与 software/30-jenkins.sh 在线路径同一份)
 RESOLVER="$SCRIPT_DIR/resolve-jenkins-plugins.py"
@@ -96,6 +102,10 @@ usage() {
   --nvidia-kernel-flavours "a b"
                         内核 flavour, 默认 noble: "generic-hwe-24.04 generic", jammy: "generic-hwe-22.04 generic"
   --no-nvidia-driver    不捆绑 NVIDIA 驱动 / 内核 (配合 build-iso --no-nvidia-driver)
+  --grok-bot-version V  Grok Bot 桌面版版本, 默认 latest (发布 feed 当前版本; PIN_GROK_BOT)
+  --grok-bot-url URL    完全钉扎 Grok Bot .deb URL (必须同时给 --grok-bot-sha256)
+  --grok-bot-sha256 H   Grok Bot .deb 期望 sha256
+  --no-grok-bot         不捆绑 Grok Bot (配合 build-iso --no-grok-bot)
   --ubuntu-mirror URL   抓包时的 Ubuntu 源; 默认清华
                         https://mirrors.tuna.tsinghua.edu.cn/ubuntu
                         (非 amd64/i386 默认 .../ubuntu-ports)。含 -security。
@@ -134,6 +144,10 @@ while [[ $# -gt 0 ]]; do
     --nvidia-driver-version) PIN_NVIDIA_DRIVER="$2"; shift 2 ;;
     --nvidia-kernel-flavours|--nvidia-kernel-flavour) NVIDIA_KERNEL_FLAVOURS="$2"; shift 2 ;;
     --no-nvidia-driver) NO_NVIDIA_DRIVER=1; shift ;;
+    --grok-bot-version) PIN_GROK_BOT="$2"; shift 2 ;;
+    --grok-bot-url) GROK_BOT_DEB_URL="$2"; shift 2 ;;
+    --grok-bot-sha256) GROK_BOT_SHA256="$2"; shift 2 ;;
+    --no-grok-bot) NO_GROK_BOT=1; shift ;;
     --ubuntu-mirror) UBUNTU_MIRROR="$2"; shift 2 ;;
     --skip-npm) SKIP_NPM=1; shift ;;
     --force) FORCE=1; shift ;;
@@ -189,6 +203,16 @@ fi
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/rustdesk-release.sh"
 [[ -n "$PIN_RUSTDESK" ]] || PIN_RUSTDESK="$RUSTDESK_DEFAULT_VERSION"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/grok-bot-release.sh"
+grokbot_valid_version "$PIN_GROK_BOT" || die "非法 --grok-bot-version: $PIN_GROK_BOT"
+GROK_BOT_SHA256="$(printf '%s' "$GROK_BOT_SHA256" | tr '[:upper:]' '[:lower:]')"
+[[ -z "$GROK_BOT_DEB_URL" ]] || grokbot_valid_url "$GROK_BOT_DEB_URL" || die "非法 --grok-bot-url: $GROK_BOT_DEB_URL"
+[[ -z "$GROK_BOT_SHA256" ]] || grokbot_valid_sha256 "$GROK_BOT_SHA256" || die "非法 --grok-bot-sha256"
+[[ -z "$GROK_BOT_DEB_URL" || -n "$GROK_BOT_SHA256" ]] || die "--grok-bot-url 必须同时给 --grok-bot-sha256"
+# 指纹: 不捆绑记为 none; latest 不随 feed 变化 (同 FlClash: 复用已有捆绑, 要新版用 --force)
+GROKBOT_FP="none"
+[[ "$NO_GROK_BOT" -eq 1 ]] || GROKBOT_FP="${PIN_GROK_BOT}|${GROK_BOT_DEB_URL}|${GROK_BOT_SHA256}"
 rustdesk_valid_version "$PIN_RUSTDESK" || die "非法 --pin-rustdesk: $PIN_RUSTDESK"
 JENKINS_PLUGINS="$(printf '%s' "$JENKINS_PLUGINS" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
 [[ -n "$JENKINS_PLUGINS" ]] || die "--jenkins-plugins 不能为空"
@@ -230,7 +254,7 @@ case "$APT_RUNNER" in
 esac
 
 # 计算期望指纹; 已有捆绑指纹一致才复用 (否则提示 --force)
-expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$RESOLVER_SHA" "$PIN_RUSTDESK" "$NVIDIA_FP_DRIVER" "$NVIDIA_FP_FLAVOURS" <<'FP'
+expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$RESOLVER_SHA" "$PIN_RUSTDESK" "$NVIDIA_FP_DRIVER" "$NVIDIA_FP_FLAVOURS" "$GROKBOT_FP" <<'FP'
 import hashlib, json, sys
 payload = {
   "schema": 3,
@@ -248,6 +272,7 @@ payload = {
     "rustdesk": sys.argv[12],
     "nvidia_driver": sys.argv[13],
     "nvidia_kernel_flavours": sorted(set(sys.argv[14].split())),
+    "grok_bot": sys.argv[15],
   },
   "extra_packages": [p for p in sys.argv[8].split(",") if p],
   "jenkins_plugins": sorted(set(sys.argv[10].split())),
@@ -256,7 +281,7 @@ payload = {
     "git", "ripgrep", "openssh-server", "gh",
     "docker-ce", "nvidia-container-toolkit", "jenkins", "nodejs",
     "microsoft-edge-stable", "x11vnc", "xauth",
-    "unity-cli", "godot", "gitea", "flclash", "rustdesk", "apt-sources",
+    "unity-cli", "godot", "gitea", "flclash", "rustdesk", "grok-bot", "apt-sources",
     "fontconfig", "libharfbuzz0b", "python3-bcrypt", "jenkins-plugins",
     "nvidia-driver", "intel-media-va-driver-non-free", "vainfo",
     # avahi-daemon / libnss-mdns (Server 上 Gitea / Jenkins 的 <hostname>.local) 故意不进指纹:
@@ -524,6 +549,27 @@ if [ -n "$RUSTDESK_DEB" ]; then
     [ -n "$first" ] && printf '%s\n' "$first"
   done)
 fi
+# Grok Bot 官方 deb (宿主机已校验): 同 FlClash, Depends 并入种子 (libgtk-3-0, libnss3, libsecret-1-0, …)
+GROKBOT_DEB=""
+GROKBOT_IN="${FETCH_GROKBOT_DIR:-/grok-bot-in}"
+if [ -z "${FETCH_MINIMAL_SEEDS:-}" ] && [ -d "$GROKBOT_IN" ]; then
+  for _f in "$GROKBOT_IN"/*.deb; do
+    [ -f "$_f" ] || continue
+    GROKBOT_DEB="$_f"
+    break
+  done
+fi
+if [ -n "$GROKBOT_DEB" ]; then
+  echo "Grok Bot local deb: $GROKBOT_DEB ($(dpkg-deb -f "$GROKBOT_DEB" Package) $(dpkg-deb -f "$GROKBOT_DEB" Version))"
+  while IFS= read -r _d; do
+    [ -n "$_d" ] || continue
+    SEEDS+=("$_d")
+  done < <(dpkg-deb -f "$GROKBOT_DEB" Depends 2>/dev/null | tr ',' '\n' | while IFS= read -r dep; do
+    first="${dep%%|*}"
+    first="$(printf '%s' "$first" | sed 's/([^)]*)//g; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "$first" ] && printf '%s\n' "$first"
+  done)
+fi
 # NVIDIA 驱动 + Canonical 预编译签名模块 + 同版本内核 (24-nvidia-driver.sh 离线路径)
 # 每个 flavour: 模块 meta 的版本必须能找到同版本的 linux-<flavour> / linux-image-<flavour> /
 # linux-headers-<flavour>, 否则不收这个 flavour (装机时会按 "版本不匹配" 跳过)。
@@ -660,6 +706,14 @@ if [ -n "$RUSTDESK_DEB" ]; then
     exit 1
   }
   cp -a "$RUSTDESK_DEB" "$ARCHIVES/$(basename "$RUSTDESK_DEB")"
+fi
+if [ -n "$GROKBOT_DEB" ]; then
+  echo "apt download-only for local Grok Bot deb (resolve Depends against $RELEASE)"
+  apt-get install -y --download-only --no-install-recommends -o Dir::Cache::archives="$ARCHIVES" "$GROKBOT_DEB" || {
+    echo "ERROR: 无法解析/下载 Grok Bot 的 apt 依赖: $GROKBOT_DEB" >&2
+    exit 1
+  }
+  cp -a "$GROKBOT_DEB" "$ARCHIVES/$(basename "$GROKBOT_DEB")"
 fi
 
 # linux-firmware* 是内核 meta 拉进来的 (容器里没有); 目标机已装, 不进捆绑 (FETCH_KEEP_LINUX_FIRMWARE=1 保留)
@@ -801,6 +855,29 @@ else
   RUSTDESK_DEB_NAME=""
 fi
 
+# --------------- Grok Bot deb (host; 发布 feed + 签名 apt 索引 / 钉扎 sha256) ---------------
+GROK_BOT_VERSION="" GROK_BOT_SHA256_OUT="" GROK_BOT_DEB_NAME="" GROK_BOT_URL_OUT="" GROK_BOT_SHA_SOURCE=""
+if [[ "$NO_GROK_BOT" -eq 1 ]]; then
+  log "Grok Bot: 不捆绑 (--no-grok-bot)"
+elif [[ "$ARCH" == "amd64" || "$ARCH" == "arm64" ]]; then
+  log "Grok Bot ${PIN_GROK_BOT}${GROK_BOT_DEB_URL:+ (钉扎 URL)} (linux-$ARCH)"
+  grokbot_resolve "$PIN_GROK_BOT" "$ARCH" "$GROK_BOT_DEB_URL" "$GROK_BOT_SHA256" \
+    || die "无法解析 Grok Bot $PIN_GROK_BOT (发布 feed / apt 仓库不可达? 国内可能要代理; 不要 Grok Bot 用 --no-grok-bot)"
+  mkdir -p "$WORK/grok-bot-in"
+  # 优先复用旧捆绑里校验和一致的 deb (约 110MB)
+  if [[ -f "$OUT/grok-bot/$GROK_BOT_DEB_NAME" ]] \
+     && grokbot_verify_deb "$OUT/grok-bot/$GROK_BOT_DEB_NAME" "$GROK_BOT_SHA256" "$GROK_BOT_VERSION" "$ARCH" 2>/dev/null; then
+    cp -p "$OUT/grok-bot/$GROK_BOT_DEB_NAME" "$WORK/grok-bot-in/$GROK_BOT_DEB_NAME"
+    ok "复用旧捆绑 grok-bot/$GROK_BOT_DEB_NAME (sha256 一致)"
+  fi
+  grokbot_download_to "$WORK/grok-bot-in" "$ARCH" || die "下载/校验 Grok Bot 失败: $GROK_BOT_DEB_URL"
+  GROK_BOT_SHA256_OUT="$GROK_BOT_SHA256"
+  GROK_BOT_URL_OUT="$GROK_BOT_DEB_URL"
+  ok "Grok Bot $GROK_BOT_VERSION ($GROK_BOT_DEB_NAME, $(du -h "$WORK/grok-bot-in/$GROK_BOT_DEB_NAME" | cut -f1), sha256 来源 $GROK_BOT_SHA_SOURCE)"
+else
+  warn "Grok Bot 官方 linux deb 不支持 arch=$ARCH, 跳过"
+fi
+
 NVIDIA_IN_DRIVER=""
 [[ "$NO_NVIDIA_DRIVER" -eq 1 ]] || NVIDIA_IN_DRIVER="$PIN_NVIDIA_DRIVER"
 log "在 $IMG 中解析并下载 apt 依赖闭包"
@@ -814,6 +891,7 @@ if [[ "$APT_RUNNER" == "direct" ]]; then
     FETCH_PRUNE_APT_CACHE="$PRUNE_APT_CACHE" \
     FETCH_FLCLASH_DIR="$WORK/flclash-in" \
     FETCH_RUSTDESK_DIR="$WORK/rustdesk-in" \
+    FETCH_GROKBOT_DIR="$WORK/grok-bot-in" \
     FETCH_NVIDIA_DRIVER="$NVIDIA_IN_DRIVER" FETCH_NVIDIA_FLAVOURS="$NVIDIA_FP_FLAVOURS" \
     FETCH_KEEP_LINUX_FIRMWARE="${FETCH_KEEP_LINUX_FIRMWARE:-0}" \
     bash "$WORK/fetch-debs.sh" "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES"
@@ -829,6 +907,9 @@ else
   fi
   if [[ -d "$WORK/rustdesk-in" ]] && compgen -G "$WORK/rustdesk-in"/rustdesk-*.deb >/dev/null; then
     REUSE_ARGS+=(-v "$(cd -- "$WORK/rustdesk-in" && pwd):/rustdesk-in:ro" -e FETCH_RUSTDESK_DIR=/rustdesk-in)
+  fi
+  if [[ -d "$WORK/grok-bot-in" ]] && compgen -G "$WORK/grok-bot-in"/*.deb >/dev/null; then
+    REUSE_ARGS+=(-v "$(cd -- "$WORK/grok-bot-in" && pwd):/grok-bot-in:ro" -e FETCH_GROKBOT_DIR=/grok-bot-in)
   fi
   docker run --rm --network host \
     --dns 8.8.8.8 --dns 1.1.1.1 \
@@ -873,7 +954,7 @@ reuse_prev() { # sub name dest algo(sha256|sha512) hex
 }
 
 # 同步到 OUT (保留可复用)
-rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/flclash" "$OUT/rustdesk" "$OUT/nvidia" "$OUT/jenkins-plugins" "$OUT/jenkins-version.txt" "$OUT/package-list.txt" "$OUT/java-package.txt"
+rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/flclash" "$OUT/rustdesk" "$OUT/grok-bot" "$OUT/nvidia" "$OUT/jenkins-plugins" "$OUT/jenkins-version.txt" "$OUT/package-list.txt" "$OUT/java-package.txt"
 mkdir -p "$OUT"
 cp -a "$WORK/out/." "$OUT/"
 if [[ -n "${FLCLASH_DEB_NAME:-}" && -f "$WORK/flclash-in/$FLCLASH_DEB_NAME" ]]; then
@@ -890,6 +971,15 @@ if [[ -n "${RUSTDESK_DEB_NAME:-}" && -f "$WORK/rustdesk-in/$RUSTDESK_DEB_NAME" ]
   printf '%s\n' "$RUSTDESK_VERSION" > "$OUT/rustdesk/version"
   printf '%s\n' "$RUSTDESK_SHA256" > "$OUT/rustdesk/sha256"
   printf '%s\n' "$RUSTDESK_DEB_NAME" > "$OUT/rustdesk/deb.name"
+fi
+if [[ -n "${GROK_BOT_DEB_NAME:-}" && -f "$WORK/grok-bot-in/$GROK_BOT_DEB_NAME" ]]; then
+  mkdir -p "$OUT/grok-bot"
+  cp -p "$WORK/grok-bot-in/$GROK_BOT_DEB_NAME" "$OUT/grok-bot/$GROK_BOT_DEB_NAME"
+  printf '%s\n' "$GROK_BOT_VERSION" > "$OUT/grok-bot/version"
+  printf '%s\n' "$GROK_BOT_SHA256_OUT" > "$OUT/grok-bot/sha256"
+  printf '%s\n' "$GROK_BOT_DEB_NAME" > "$OUT/grok-bot/deb.name"
+  printf '%s\n' "$GROK_BOT_URL_OUT" > "$OUT/grok-bot/url"
+  printf '%s\n' "$GROK_BOT_SHA_SOURCE" > "$OUT/grok-bot/sha256.source"
 fi
 
 # --------------- Jenkins 插件 (宿主机 python3; update center sha256 校验) ---------------
@@ -1098,6 +1188,20 @@ if rd.exists():
       "filename": (rd/"deb.name").read_text().strip() if (rd/"deb.name").exists() else None,
       "present": any(rd.glob("rustdesk-*.deb")),
     }
+grok_bot_meta = None
+gb = out/"grok-bot"
+if gb.is_dir():
+    _gbr = lambda n: (gb/n).read_text().strip() if (gb/n).exists() else None
+    _gbf = gb/(_gbr("deb.name") or "-")
+    grok_bot_meta = {
+      "version": _gbr("version"),
+      "sha256": _gbr("sha256"),
+      "sha256_source": _gbr("sha256.source"),
+      "filename": _gbr("deb.name"),
+      "url": _gbr("url"),
+      "size_bytes": _gbf.stat().st_size if _gbf.is_file() else None,
+      "present": _gbf.is_file(),
+    }
 nvidia_meta = None
 nv = out/"nvidia"
 if nv.is_dir():
@@ -1150,6 +1254,7 @@ manifest = {
     "rustdesk": "${PIN_RUSTDESK}",
     "nvidia_driver": "${NVIDIA_FP_DRIVER}",
     "nvidia_kernel_flavours": sorted(set("${NVIDIA_FP_FLAVOURS}".split())),
+    "grok_bot": "${GROKBOT_FP}",
   },
   "extra_packages": [p.strip() for p in "${PACKAGES}".split(",") if p.strip()],
   "apt_deb_count": len(debs),
@@ -1163,6 +1268,7 @@ manifest = {
   "gitea": gitea_meta or None,
   "flclash": flclash_meta or None,
   "rustdesk": rustdesk_meta or None,
+  "grok_bot": grok_bot_meta,
   "nvidia": nvidia_meta,
   "jenkins_plugins": jenkins_plugins_meta,
   "apt_sources": apt_sources_meta,
