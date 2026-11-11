@@ -74,6 +74,15 @@ _manifest_ver() {
         echo "(not found)"
       fi
       ;;
+    nvidia-driver)
+      _nv="$(dpkg-query -W -f='${Package} ${Version} ${Status}\n' 'nvidia-driver-*-open' 2>/dev/null | awk '/install ok installed/ {print $1, $2; exit}' || true)"
+      if [ -n "$_nv" ]; then
+        _km="$(dpkg-query -W -f='${Package} ${Version} ${Status}\n' 'linux-modules-nvidia-*-open-*' 2>/dev/null | awk '/install ok installed/ && $1 !~ /-[0-9]+\.[0-9]+\.[0-9]+-/ {print $1, $2; exit}' || true)"
+        echo "${_nv}${_km:+ ($_km)}"
+      else
+        echo "(not found)"
+      fi
+      ;;
     *)
       # shellcheck disable=SC2086
       if command -v $1 >/dev/null 2>&1 || [ "$1" = "docker compose" ]; then
@@ -90,7 +99,7 @@ mkdir -p /var/log/autoinstall
   echo "# provisioned at $(date -u +%FT%TZ)"
   echo "# host: $(cat /etc/hostname 2>/dev/null)"
   echo
-  for c in git gh rg docker "docker compose" nvidia-ctk java node npm grok opencode openmausbot unity godot gitea jenkins microsoft-edge-stable FlClash rustdesk x11vnc sshd; do
+  for c in git gh rg docker "docker compose" nvidia-driver nvidia-ctk java node npm grok opencode openmausbot unity godot gitea jenkins microsoft-edge-stable FlClash rustdesk x11vnc sshd; do
     printf '%-18s ' "$c"
     _manifest_ver "$c" || echo "(not found)"
   done

@@ -80,6 +80,10 @@ RUSTDESK_PASSWORD=""
 RUSTDESK_SERVER=""
 PIN_RUSTDESK="${PIN_RUSTDESK:-}"   # 空 = tools/rustdesk-release.sh 的 RUSTDESK_DEFAULT_VERSION
 NO_FLCLASH=0
+# NVIDIA 驱动 (24-nvidia-driver.sh): 默认每台机器都装, 不做硬件检测
+NO_NVIDIA_DRIVER=0
+PIN_NVIDIA_DRIVER="${PIN_NVIDIA_DRIVER:-595}"
+NVIDIA_KERNEL_FLAVOUR="${NVIDIA_KERNEL_FLAVOUR:-}"   # 空 = 装机时按已装内核 meta 自动判断
 # Gitea / Jenkins 对外 URL 主机: 默认 <hostname>.local (mDNS); --service-url-host 覆盖 (IP / FQDN / localhost)
 SERVICE_URL_HOST=""
 MDNS_AVAHI=0        # 内部: Gitea 或 Jenkins 未被 --skip 时为 1 (12-avahi-mdns.sh 装 Avahi)
@@ -139,6 +143,14 @@ usage() {
   --pin-gitea VER       Gitea 版本 (如 28.3.0), 默认 latest (PIN_GITEA)
   --no-flclash          不预装 FlClash (等价于 --skip 37 / --skip 37-flclash);
                         Desktop 默认预装最新稳定版 (官方 GitHub Release + SHA256SUMS)
+  --no-nvidia-driver    不装 NVIDIA 驱动 (等价于 --skip 24 / --skip 24-nvidia-driver)。
+                        默认每台机器都装 (不检测硬件): nvidia-driver-<N>-open + Canonical 签名的
+                        预编译模块 linux-modules-nvidia-<N>-open-<flavour> + 同版本内核 meta,
+                        以及 intel-media-va-driver-non-free / vainfo
+  --nvidia-driver-version N
+                        NVIDIA 驱动分支, 默认 595 (PIN_NVIDIA_DRIVER)
+  --nvidia-kernel-flavour F
+                        内核 flavour (如 generic-hwe-24.04 / generic), 默认装机时按已装内核自动判断
   --gitea-admin-user U  Gitea 管理员用户名, 默认 = --username
   --gitea-admin-password P
                         Gitea 管理员密码 (>=8 位), 默认 = --password 明文;
@@ -244,6 +256,9 @@ while [[ $# -gt 0 ]]; do
     --pin-unity-cli)  PIN_UNITY_CLI="$2"; shift 2 ;;
     --pin-gitea)      PIN_GITEA="$2"; shift 2 ;;
     --no-flclash)     NO_FLCLASH=1; shift ;;
+    --no-nvidia-driver) NO_NVIDIA_DRIVER=1; shift ;;
+    --nvidia-driver-version) PIN_NVIDIA_DRIVER="$2"; shift 2 ;;
+    --nvidia-kernel-flavour) NVIDIA_KERNEL_FLAVOUR="$2"; shift 2 ;;
     --gitea-admin-user) GITEA_ADMIN_USER="$2"; shift 2 ;;
     --gitea-admin-password) GITEA_ADMIN_PASSWORD="$2"; shift 2 ;;
     --gitea-admin-email) GITEA_ADMIN_EMAIL="$2"; shift 2 ;;
@@ -327,6 +342,15 @@ if [[ "${NO_FLCLASH:-0}" -eq 1 ]]; then
   case " $PROVISION_SKIP " in
     *" 37 "*|*" 37-flclash "*) ;;
     *) PROVISION_SKIP="${PROVISION_SKIP:+$PROVISION_SKIP }37-flclash" ;;
+  esac
+fi
+[[ "$PIN_NVIDIA_DRIVER" =~ ^[0-9]{3,4}$ ]] || die "非法 --nvidia-driver-version: $PIN_NVIDIA_DRIVER (驱动分支号, 如 595)"
+[[ -z "$NVIDIA_KERNEL_FLAVOUR" || "$NVIDIA_KERNEL_FLAVOUR" =~ ^[a-z0-9][a-z0-9.-]*$ ]] \
+  || die "非法 --nvidia-kernel-flavour: $NVIDIA_KERNEL_FLAVOUR (如 generic-hwe-24.04 / generic)"
+if [[ "${NO_NVIDIA_DRIVER:-0}" -eq 1 ]]; then
+  case " $PROVISION_SKIP " in
+    *" 24 "*|*" 24-nvidia-driver "*) ;;
+    *) PROVISION_SKIP="${PROVISION_SKIP:+$PROVISION_SKIP }24-nvidia-driver" ;;
   esac
 fi
 
@@ -644,6 +668,12 @@ if [[ "${FETCH_OFFLINE:-0}" -eq 1 ]]; then
     --ubuntu-mirror "$MIRROR")
   [[ -n "$PIN_UNITY_CLI" ]] && FETCH_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
   FETCH_ARGS+=(--pin-gitea "$PIN_GITEA" --jenkins-plugins "$JENKINS_PLUGINS" --pin-rustdesk "$PIN_RUSTDESK")
+  if should_skip_script 24-nvidia-driver; then
+    FETCH_ARGS+=(--no-nvidia-driver)
+  else
+    FETCH_ARGS+=(--nvidia-driver-version "$PIN_NVIDIA_DRIVER")
+    [[ -n "$NVIDIA_KERNEL_FLAVOUR" ]] && FETCH_ARGS+=(--nvidia-kernel-flavours "$NVIDIA_KERNEL_FLAVOUR")
+  fi
   [[ "${FORCE_FETCH:-0}" -eq 1 ]] && FETCH_ARGS+=(--force)
   bash "$SCRIPT_DIR/tools/fetch-offline-bundle.sh" "${FETCH_ARGS[@]}"
   OFFLINE_BUNDLE="$OB_OUT"
@@ -667,6 +697,9 @@ if [[ -n "$OFFLINE_BUNDLE" ]]; then
     [[ -n "$REL_FOR_V" ]] && VAL_ARGS+=(--release "$REL_FOR_V")
     [[ -n "$PIN_UNITY_CLI" ]] && VAL_ARGS+=(--pin-unity-cli "$PIN_UNITY_CLI")
     VAL_ARGS+=(--pin-gitea "$PIN_GITEA" --jenkins-plugins "$JENKINS_PLUGINS")
+    # NVIDIA 驱动 (validate 自己处理 --skip 24): 捆绑里模块 meta 与内核 meta 版本必须一致
+    VAL_ARGS+=(--nvidia-driver-version "$PIN_NVIDIA_DRIVER")
+    [[ -n "$NVIDIA_KERNEL_FLAVOUR" ]] && VAL_ARGS+=(--nvidia-kernel-flavour "$NVIDIA_KERNEL_FLAVOUR")
     # --remote-desktop x11vnc: 捆绑必须带 x11vnc + xauth (validate 自己处理 --skip 36)
     [[ "$X11VNC" -eq 1 ]] && VAL_ARGS+=(--require-x11vnc)
     # Desktop 默认 RustDesk: 捆绑必须带 rustdesk/ (同版本 deb + sha256) 且 apt 池能装 (validate 自己处理 --skip 38)
@@ -841,6 +874,8 @@ if [[ "$PROVISION" -eq 1 ]]; then
     printf 'REMOTE_DESKTOP=%q\n' "$REMOTE_DESKTOP"
     printf 'PIN_RUSTDESK=%q\n' "$PIN_RUSTDESK"
     printf 'RUSTDESK_SERVER=%q\n' "$RUSTDESK_SERVER"
+    printf 'PIN_NVIDIA_DRIVER=%q\n' "$PIN_NVIDIA_DRIVER"
+    printf 'NVIDIA_KERNEL_FLAVOUR=%q\n' "$NVIDIA_KERNEL_FLAVOUR"
     printf 'OFFLINE=%q
 ' "$FULL_OFFLINE"
     printf 'OFFLINE_ROOT=%q
@@ -883,6 +918,11 @@ if [[ "$PROVISION" -eq 1 ]]; then
   SCRIPT_COUNT=$(find "$WORK/provision" -maxdepth 1 -name '[0-9][0-9]-*.sh' | wc -l)
   ok "已打包 $SCRIPT_COUNT 个软件预装脚本 (node>=$PIN_NODE_MAJOR grok=$PIN_GROK)"
   [[ -n "$PROVISION_SKIP" ]] && warn "跳过: $PROVISION_SKIP"
+  if should_skip_script 24-nvidia-driver; then
+    log "NVIDIA 驱动: 不装 (--no-nvidia-driver / --skip 24)"
+  else
+    log "NVIDIA 驱动: 每台机器都装 (不检测硬件) nvidia-driver-${PIN_NVIDIA_DRIVER}-open + 预编译签名模块 (内核 flavour ${NVIDIA_KERNEL_FLAVOUR:-自动}); 关闭: --no-nvidia-driver"
+  fi
 fi
 
 # ------------------------------------------------------- 2. 取出并修补 grub

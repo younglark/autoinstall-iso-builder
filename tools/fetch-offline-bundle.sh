@@ -14,6 +14,8 @@
 #     gitea/               # Gitea linux-amd64 二进制 + version/sha256 (官方 dl.gitea.com 校验和)
 #     flclash/             # FlClash linux .deb + version/sha256 (官方 GitHub Release SHA256SUMS)
 #     rustdesk/            # RustDesk linux .deb (钉扎版本) + version/sha256 (官方 GitHub Release digest)
+#     nvidia/              # driver (分支号) + flavours ("<flavour> <模块/内核 meta 版本> <内核 ABI>"/行);
+#                          # 对应 deb (驱动 + 预编译模块 + 同版本内核) 在 apt/ 池里
 #     package-list.txt
 #
 # 依赖: docker (推荐), 宿主机 node/npm (打 npm 包)。无 docker 时退出并提示。
@@ -52,6 +54,10 @@ PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 PIN_GITEA="${PIN_GITEA:-latest}"
 PIN_RUSTDESK="${PIN_RUSTDESK:-}"   # 空 = tools/rustdesk-release.sh 的 RUSTDESK_DEFAULT_VERSION
+# NVIDIA 驱动 (24-nvidia-driver.sh): 分支号; 空 flavours = 按发行版默认 (HWE + GA 两套内核)
+PIN_NVIDIA_DRIVER="${PIN_NVIDIA_DRIVER:-595}"
+NVIDIA_KERNEL_FLAVOURS="${NVIDIA_KERNEL_FLAVOURS:-}"
+NO_NVIDIA_DRIVER=0
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger}"
 # Jenkins 插件解析器 (纯 Python 标准库; 与 software/30-jenkins.sh 在线路径同一份)
 RESOLVER="$SCRIPT_DIR/resolve-jenkins-plugins.py"
@@ -84,6 +90,12 @@ usage() {
   --jenkins-plugins "a b"
                         预装 Jenkins 插件 (按捆绑里同一 Jenkins 版本的 update center 解析全部必需依赖)
                         默认: workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger
+  --nvidia-driver-version N
+                        NVIDIA 驱动分支, 默认 595 (PIN_NVIDIA_DRIVER)。捆绑 nvidia-driver-N-open、
+                        预编译签名模块 meta 和同版本内核 meta (版本一致才收), 以及 Intel VA-API
+  --nvidia-kernel-flavours "a b"
+                        内核 flavour, 默认 noble: "generic-hwe-24.04 generic", jammy: "generic-hwe-22.04 generic"
+  --no-nvidia-driver    不捆绑 NVIDIA 驱动 / 内核 (配合 build-iso --no-nvidia-driver)
   --ubuntu-mirror URL   抓包时的 Ubuntu 源; 默认清华
                         https://mirrors.tuna.tsinghua.edu.cn/ubuntu
                         (非 amd64/i386 默认 .../ubuntu-ports)。含 -security。
@@ -119,6 +131,9 @@ while [[ $# -gt 0 ]]; do
     --pin-gitea) PIN_GITEA="$2"; shift 2 ;;
     --pin-rustdesk) PIN_RUSTDESK="$2"; shift 2 ;;
     --jenkins-plugins) JENKINS_PLUGINS="$2"; shift 2 ;;
+    --nvidia-driver-version) PIN_NVIDIA_DRIVER="$2"; shift 2 ;;
+    --nvidia-kernel-flavours|--nvidia-kernel-flavour) NVIDIA_KERNEL_FLAVOURS="$2"; shift 2 ;;
+    --no-nvidia-driver) NO_NVIDIA_DRIVER=1; shift ;;
     --ubuntu-mirror) UBUNTU_MIRROR="$2"; shift 2 ;;
     --skip-npm) SKIP_NPM=1; shift ;;
     --force) FORCE=1; shift ;;
@@ -152,6 +167,23 @@ UBUNTU_MIRROR="$(aib_normalize_mirror "$UBUNTU_MIRROR")"
 
 [[ "$PIN_GITEA" == "latest" || "$PIN_GITEA" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] \
   || die "非法 --pin-gitea: $PIN_GITEA"
+[[ "$PIN_NVIDIA_DRIVER" =~ ^[0-9]{3,4}$ ]] || die "非法 --nvidia-driver-version: $PIN_NVIDIA_DRIVER (如 595)"
+if [[ -z "$NVIDIA_KERNEL_FLAVOURS" ]]; then
+  case "$RELEASE" in
+    noble) NVIDIA_KERNEL_FLAVOURS="generic-hwe-24.04 generic" ;;
+    jammy) NVIDIA_KERNEL_FLAVOURS="generic-hwe-22.04 generic" ;;
+  esac
+fi
+NVIDIA_KERNEL_FLAVOURS="$(printf '%s' "$NVIDIA_KERNEL_FLAVOURS" | tr -s '[:space:],' ' ' | sed 's/^ //; s/ $//')"
+for _fl in $NVIDIA_KERNEL_FLAVOURS; do
+  [[ "$_fl" =~ ^[a-z0-9][a-z0-9.-]*$ ]] || die "非法 --nvidia-kernel-flavours 项: $_fl"
+done
+# 指纹 / 容器里用: 不捆绑时分支记为 none
+NVIDIA_FP_DRIVER="$PIN_NVIDIA_DRIVER"
+NVIDIA_FP_FLAVOURS="$NVIDIA_KERNEL_FLAVOURS"
+if [[ "$NO_NVIDIA_DRIVER" -eq 1 ]]; then
+  NVIDIA_FP_DRIVER="none"; NVIDIA_FP_FLAVOURS=""
+fi
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/flclash-release.sh"
 # shellcheck disable=SC1091
@@ -198,7 +230,7 @@ case "$APT_RUNNER" in
 esac
 
 # 计算期望指纹; 已有捆绑指纹一致才复用 (否则提示 --force)
-expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$RESOLVER_SHA" "$PIN_RUSTDESK" <<'FP'
+expected_fp="$(python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$RESOLVER_SHA" "$PIN_RUSTDESK" "$NVIDIA_FP_DRIVER" "$NVIDIA_FP_FLAVOURS" <<'FP'
 import hashlib, json, sys
 payload = {
   "schema": 3,
@@ -214,6 +246,8 @@ payload = {
     "gitea": sys.argv[9],
     "flclash": "latest",
     "rustdesk": sys.argv[12],
+    "nvidia_driver": sys.argv[13],
+    "nvidia_kernel_flavours": sorted(set(sys.argv[14].split())),
   },
   "extra_packages": [p for p in sys.argv[8].split(",") if p],
   "jenkins_plugins": sorted(set(sys.argv[10].split())),
@@ -224,6 +258,7 @@ payload = {
     "microsoft-edge-stable", "x11vnc", "xauth",
     "unity-cli", "godot", "gitea", "flclash", "rustdesk", "apt-sources",
     "fontconfig", "libharfbuzz0b", "python3-bcrypt", "jenkins-plugins",
+    "nvidia-driver", "intel-media-va-driver-non-free", "vainfo",
     # avahi-daemon / libnss-mdns (Server 上 Gitea / Jenkins 的 <hostname>.local) 故意不进指纹:
     # Desktop 自带, 旧捆绑仍可复用; Server 用旧捆绑时 validate --require-mdns 报缺包 → --force-fetch
   ],
@@ -284,6 +319,9 @@ APT_CACHE_DIR="${FETCH_APT_CACHE:-}"
 PREV_APT_DIR="${FETCH_PREV_APT:-}"
 PREV_NODE_DIR="${FETCH_PREV_NODE:-}"
 PRUNE_APT_CACHE="${FETCH_PRUNE_APT_CACHE:-0}"
+NVIDIA_DRIVER="${FETCH_NVIDIA_DRIVER:-}"          # 空 = 不捆绑
+NVIDIA_FLAVOURS="${FETCH_NVIDIA_FLAVOURS:-}"
+KEEP_LINUX_FIRMWARE="${FETCH_KEEP_LINUX_FIRMWARE:-0}"
 ARCHIVES=/var/cache/apt/archives
 
 echo "== container: $(. /etc/os-release && echo "$PRETTY_NAME") arch=$ARCH =="
@@ -327,7 +365,7 @@ chmod a+r /etc/apt/keyrings/docker.asc
 echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${RELEASE} stable" \
   > /etc/apt/sources.list.d/docker.list
 
-# NVIDIA Container Toolkit (toolkit only; no GPU driver)
+# NVIDIA Container Toolkit (toolkit; GPU driver: 24-nvidia-driver.sh, Ubuntu restricted)
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
   -o /etc/apt/keyrings/nvidia-container-toolkit.asc
 chmod a+r /etc/apt/keyrings/nvidia-container-toolkit.asc
@@ -486,8 +524,46 @@ if [ -n "$RUSTDESK_DEB" ]; then
     [ -n "$first" ] && printf '%s\n' "$first"
   done)
 fi
+# NVIDIA 驱动 + Canonical 预编译签名模块 + 同版本内核 (24-nvidia-driver.sh 离线路径)
+# 每个 flavour: 模块 meta 的版本必须能找到同版本的 linux-<flavour> / linux-image-<flavour> /
+# linux-headers-<flavour>, 否则不收这个 flavour (装机时会按 "版本不匹配" 跳过)。
+# 种子写成 pkg=ver 锁定版本; 记录到 nvidia/flavours 供 validate 和装机核对。
+NV_SEEDS=()
+if [ -z "${FETCH_MINIMAL_SEEDS:-}" ] && [ -n "$NVIDIA_DRIVER" ]; then
+  nv_cand() { apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2; exit}' | grep -v '^(none)$' || true; }
+  nv_has()  { apt-cache madison "$1" 2>/dev/null | awk -F'|' '{gsub(/[[:space:]]/,"",$2); print $2}' | grep -qxF "$2"; }
+  mkdir -p "$OUTDIR/nvidia"
+  printf '%s\n' "$NVIDIA_DRIVER" > "$OUTDIR/nvidia/driver"
+  : > "$OUTDIR/nvidia/flavours"
+  if [ -n "$(nv_cand "nvidia-driver-${NVIDIA_DRIVER}-open")" ]; then
+    NV_SEEDS+=("nvidia-driver-${NVIDIA_DRIVER}-open" nvidia-settings nvidia-prime vainfo)
+    [ "$ARCH" = "amd64" ] && NV_SEEDS+=(intel-media-va-driver-non-free)
+    for _fl in $NVIDIA_FLAVOURS; do
+      _mm="linux-modules-nvidia-${NVIDIA_DRIVER}-open-${_fl}"
+      _mv="$(nv_cand "$_mm")"
+      if [ -z "$_mv" ]; then echo "WARN: nvidia: 没有 $_mm, 跳过 flavour $_fl"; continue; fi
+      _abi="$(apt-cache show "$_mm=$_mv" 2>/dev/null | sed -n 's/^Depends: //p' | head -1 | tr ',' '\n' \
+        | sed -n "s/^[[:space:]]*linux-modules-nvidia-${NVIDIA_DRIVER}-open-\([0-9][^ (]*\).*/\1/p" | head -1)"
+      if [ -z "$_abi" ]; then echo "WARN: nvidia: 读不出 $_mm $_mv 的内核 ABI, 跳过 flavour $_fl"; continue; fi
+      if nv_has "linux-$_fl" "$_mv" && nv_has "linux-image-$_fl" "$_mv" && nv_has "linux-headers-$_fl" "$_mv"; then
+        NV_SEEDS+=("$_mm=$_mv" "linux-modules-nvidia-${NVIDIA_DRIVER}-open-$_abi=$_mv"
+                   "linux-$_fl=$_mv" "linux-image-$_fl=$_mv" "linux-headers-$_fl=$_mv")
+        printf '%s %s %s\n' "$_fl" "$_mv" "$_abi" >> "$OUTDIR/nvidia/flavours"
+        echo "nvidia: flavour $_fl → 模块/内核 meta $_mv, 内核 $_abi"
+      else
+        echo "WARN: nvidia: $_mm=$_mv 没有同版本的 linux-$_fl / linux-image-$_fl / linux-headers-$_fl, 跳过 flavour $_fl"
+      fi
+    done
+  else
+    echo "WARN: nvidia: $RELEASE 没有 nvidia-driver-${NVIDIA_DRIVER}-open, 不捆绑 NVIDIA 驱动"
+  fi
+  SEEDS+=("${NV_SEEDS[@]}")
+fi
 
 echo "seed packages (${#SEEDS[@]}): ${SEEDS[*]}"
+# apt-cache depends 不认 pkg=ver: 递归依赖按包名解析 (锁定版本就是当前候选)
+SEED_NAMES=()
+for _s in "${SEEDS[@]}"; do SEED_NAMES+=("${_s%%=*}"); done
 
 # ---- deb 复用: 先按空 archives 解析出本次需要的全部文件 (名 + 大小 + 索引哈希) ----
 NEED_LIST="$(mktemp)"
@@ -504,11 +580,13 @@ print_uris() {
 mapfile -t _dep_pkgs < <(
   apt-cache depends --recurse --no-recommends --no-suggests \
     --no-conflicts --no-breaks --no-replaces --no-enhances \
-    "${SEEDS[@]}" 2>/dev/null \
+    "${SEED_NAMES[@]}" 2>/dev/null \
     | awk '/^[A-Za-z0-9]/{print $1}' | sort -u
 )
 _dl=()
 for _p in "${_dep_pkgs[@]}"; do
+  # linux-firmware* (~600MB) 不进捆绑: 目标机装机时已带 linux-firmware, 内核 meta 的依赖不带版本约束
+  case "$_p" in linux-firmware|linux-firmware-*) [ "$KEEP_LINUX_FIRMWARE" = "1" ] || continue ;; esac
   # 跳过虚拟包 / 不存在的名字
   if apt-cache show "$_p" >/dev/null 2>&1; then
     _dl+=("$_p")
@@ -582,6 +660,15 @@ if [ -n "$RUSTDESK_DEB" ]; then
     exit 1
   }
   cp -a "$RUSTDESK_DEB" "$ARCHIVES/$(basename "$RUSTDESK_DEB")"
+fi
+
+# linux-firmware* 是内核 meta 拉进来的 (容器里没有); 目标机已装, 不进捆绑 (FETCH_KEEP_LINUX_FIRMWARE=1 保留)
+if [ "$KEEP_LINUX_FIRMWARE" != "1" ]; then
+  _fw="$(find "$ARCHIVES" -maxdepth 1 \( -name 'linux-firmware_*.deb' -o -name 'linux-firmware-*.deb' \) | wc -l)"
+  if [ "$_fw" -gt 0 ]; then
+    echo "drop $_fw linux-firmware deb(s) ($(du -ch "$ARCHIVES"/linux-firmware*.deb | tail -1 | cut -f1)): 目标机自带"
+    rm -f "$ARCHIVES"/linux-firmware_*.deb "$ARCHIVES"/linux-firmware-*.deb
+  fi
 fi
 
 # 统计 + 回写缓存
@@ -714,6 +801,8 @@ else
   RUSTDESK_DEB_NAME=""
 fi
 
+NVIDIA_IN_DRIVER=""
+[[ "$NO_NVIDIA_DRIVER" -eq 1 ]] || NVIDIA_IN_DRIVER="$PIN_NVIDIA_DRIVER"
 log "在 $IMG 中解析并下载 apt 依赖闭包"
 mkdir -p "$WORK/out"
 if [[ "$APT_RUNNER" == "direct" ]]; then
@@ -725,6 +814,8 @@ if [[ "$APT_RUNNER" == "direct" ]]; then
     FETCH_PRUNE_APT_CACHE="$PRUNE_APT_CACHE" \
     FETCH_FLCLASH_DIR="$WORK/flclash-in" \
     FETCH_RUSTDESK_DIR="$WORK/rustdesk-in" \
+    FETCH_NVIDIA_DRIVER="$NVIDIA_IN_DRIVER" FETCH_NVIDIA_FLAVOURS="$NVIDIA_FP_FLAVOURS" \
+    FETCH_KEEP_LINUX_FIRMWARE="${FETCH_KEEP_LINUX_FIRMWARE:-0}" \
     bash "$WORK/fetch-debs.sh" "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES"
 else
   REUSE_ARGS=()
@@ -747,6 +838,8 @@ else
     -v "$WORK/out:/out" \
     "${REUSE_ARGS[@]+"${REUSE_ARGS[@]}"}" \
     -e FETCH_PRUNE_APT_CACHE="$PRUNE_APT_CACHE" \
+    -e FETCH_NVIDIA_DRIVER="$NVIDIA_IN_DRIVER" -e FETCH_NVIDIA_FLAVOURS="$NVIDIA_FP_FLAVOURS" \
+    -e FETCH_KEEP_LINUX_FIRMWARE="${FETCH_KEEP_LINUX_FIRMWARE:-0}" \
     -e DEBIAN_FRONTEND=noninteractive \
     "$IMG" bash /fetch-debs.sh "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$UBUNTU_MIRROR" "$PACKAGES"
 fi
@@ -780,7 +873,7 @@ reuse_prev() { # sub name dest algo(sha256|sha512) hex
 }
 
 # 同步到 OUT (保留可复用)
-rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/flclash" "$OUT/rustdesk" "$OUT/jenkins-plugins" "$OUT/jenkins-version.txt" "$OUT/package-list.txt" "$OUT/java-package.txt"
+rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/flclash" "$OUT/rustdesk" "$OUT/nvidia" "$OUT/jenkins-plugins" "$OUT/jenkins-version.txt" "$OUT/package-list.txt" "$OUT/java-package.txt"
 mkdir -p "$OUT"
 cp -a "$WORK/out/." "$OUT/"
 if [[ -n "${FLCLASH_DEB_NAME:-}" && -f "$WORK/flclash-in/$FLCLASH_DEB_NAME" ]]; then
@@ -1005,6 +1098,20 @@ if rd.exists():
       "filename": (rd/"deb.name").read_text().strip() if (rd/"deb.name").exists() else None,
       "present": any(rd.glob("rustdesk-*.deb")),
     }
+nvidia_meta = None
+nv = out/"nvidia"
+if nv.is_dir():
+    fl = []
+    if (nv/"flavours").exists():
+        for line in (nv/"flavours").read_text().splitlines():
+            parts = line.split()
+            if len(parts) == 3:
+                fl.append({"flavour": parts[0], "version": parts[1], "kernel_abi": parts[2]})
+    nvidia_meta = {
+      "driver": (nv/"driver").read_text().strip() if (nv/"driver").exists() else None,
+      "flavours": fl,
+      "linux_firmware_bundled": any((out/"apt").glob("linux-firmware_*.deb")),
+    }
 jenkins_plugins_meta = None
 jp = out/"jenkins-plugins"
 if jp.is_dir():
@@ -1041,6 +1148,8 @@ manifest = {
     "gitea": "${PIN_GITEA}",
     "flclash": "latest",
     "rustdesk": "${PIN_RUSTDESK}",
+    "nvidia_driver": "${NVIDIA_FP_DRIVER}",
+    "nvidia_kernel_flavours": sorted(set("${NVIDIA_FP_FLAVOURS}".split())),
   },
   "extra_packages": [p.strip() for p in "${PACKAGES}".split(",") if p.strip()],
   "apt_deb_count": len(debs),
@@ -1054,6 +1163,7 @@ manifest = {
   "gitea": gitea_meta or None,
   "flclash": flclash_meta or None,
   "rustdesk": rustdesk_meta or None,
+  "nvidia": nvidia_meta,
   "jenkins_plugins": jenkins_plugins_meta,
   "apt_sources": apt_sources_meta,
 }

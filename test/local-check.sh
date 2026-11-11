@@ -672,6 +672,206 @@ else
   fail "EDITION exported via provision.env / run-all"
 fi
 
+echo "== nvidia driver hook (24) + 25 comments + offline seed + build flags =="
+if [[ -x software/24-nvidia-driver.sh ]] && bash -n software/24-nvidia-driver.sh \
+  && grep -q 'linux-modules-nvidia-' software/24-nvidia-driver.sh \
+  && grep -q 'DRIVER_PKG="nvidia-driver-' software/24-nvidia-driver.sh \
+  && grep -q 'intel-media-va-driver-non-free' software/24-nvidia-driver.sh \
+  && grep -q 'vainfo' software/24-nvidia-driver.sh \
+  && grep -q 'Canonical' software/24-nvidia-driver.sh \
+  && ! grep -qE 'mokutil[[:space:]]+--import|dkms[[:space:]]+(build|install)|lspci' software/24-nvidia-driver.sh \
+  && ! grep -qE '/WaylandEnable=true/|WaylandEnable[[:space:]]+true"[[:space:]]*>' software/24-nvidia-driver.sh \
+  && ! grep -qE '不装 GPU 驱动|未安装 GPU 驱动|no GPU driver' software/25-nvidia-container-toolkit.sh tools/fetch-offline-bundle.sh \
+  && grep -q '24-nvidia-driver' software/25-nvidia-container-toolkit.sh \
+  && grep -q 'nvidia/flavours' tools/fetch-offline-bundle.sh \
+  && grep -q 'linux-firmware' tools/fetch-offline-bundle.sh \
+  && grep -q '"nvidia_driver"' tools/fetch-offline-bundle.sh \
+  && grep -q -- '--nvidia-driver-version' tools/validate-offline-bundle.sh \
+  && grep -q -- '--no-nvidia-driver' build-iso.sh \
+  && grep -q -- '--no-nvidia-driver' tools/fetch-offline-bundle.sh \
+  && grep -q 'PIN_NVIDIA_DRIVER' software/run-all.sh \
+  && grep -q 'nvidia-driver' software/99-cleanup.sh; then
+  pass "nvidia hook static checks (no hw detection, no MOK/DKMS, 25 comments updated)"
+else
+  fail "nvidia hook static checks"
+fi
+
+# 行为测试: PATH 替身 apt-cache / apt-get / dpkg-query, 包数据库 db: "pkg version [Depends…]"
+nv="$tmp/nv"
+mkdir -p "$nv/bin" "$nv/root/etc"
+cat > "$nv/bin/apt-cache" <<'STUB'
+#!/bin/bash
+db="${FAKE_APT_DB:?}"
+case "$1" in
+  policy)  v="$(awk -v p="$2" '$1==p {print $2}' "$db" | tail -1)"; echo "$2:"; echo "  Candidate: ${v:-(none)}" ;;
+  madison) awk -v p="$2" '$1==p {print " " p " | " $2 " | fake"}' "$db" ;;
+  show)    p="${2%%=*}"; v="${2#*=}"
+           awk -v p="$p" -v v="$v" '$1==p && $2==v {print "Package: " p; print "Version: " v; $1=""; $2=""; sub(/^ +/,""); print "Depends: " $0}' "$db" ;;
+esac
+STUB
+cat > "$nv/bin/apt-get" <<'STUB'
+#!/bin/bash
+echo "apt-get $*" >> "${FAKE_APT_LOG:?}"
+case " $* " in
+  *" -s "*)
+    for a in "$@"; do case "$a" in -*|install) ;; *) echo "Inst ${a%%=*} (fake)" ;; esac; done
+    [ -n "${FAKE_SIM_EXTRA:-}" ] && echo "$FAKE_SIM_EXTRA"
+    exit "${FAKE_SIM_RC:-0}" ;;
+esac
+exit 0
+STUB
+cat > "$nv/bin/dpkg-query" <<'STUB'
+#!/bin/bash
+pkg="${*: -1}"; v="$(awk -v p="$pkg" '$1==p {print $2}' "${FAKE_INSTALLED:-/dev/null}")"
+[ -n "$v" ] || exit 1
+case "$*" in *Status*) echo "install ok installed" ;; *Version*) echo "$v" ;; esac
+STUB
+chmod +x "$nv/bin/"*
+printf 'VERSION_ID="24.04"\n' > "$nv/root/etc/os-release"
+K=7.0.0-42.42~24.04.1
+G=6.8.0-149.149
+cat > "$nv/db.ok" <<DB
+linux-modules-nvidia-595-open-generic-hwe-24.04 $K linux-modules-nvidia-595-open-7.0.0-42-generic (= $K), nvidia-kernel-common-595 (>= 595.99.02)
+linux-generic-hwe-24.04 $K
+linux-image-generic-hwe-24.04 $K
+linux-headers-generic-hwe-24.04 $K
+linux-image-7.0.0-42-generic $K
+linux-modules-nvidia-595-open-generic $G linux-modules-nvidia-595-open-6.8.0-149-generic (= $G), nvidia-kernel-common-595 (>= 595.99.02)
+linux-generic $G
+linux-image-6.8.0-149-generic $G
+nvidia-driver-595-open 595.99.02-0ubuntu0.24.04.1
+nvidia-settings 595.99.02-0ubuntu0.24.04.1
+nvidia-prime 0.8.17.2
+intel-media-va-driver-non-free 24.1.0+ds1-1
+vainfo 2.12.0+ds1-1
+DB
+# 运行 24 钩子: nv_run <case> <db> <installed> [ENV=val ...]
+nv_run() {
+  local c="$1" db="$2" inst="$3"; shift 3
+  printf '%s' "$inst" > "$nv/$c.inst"
+  : > "$nv/$c.apt"
+  env PATH="$nv/bin:$PATH" FAKE_APT_DB="$db" FAKE_APT_LOG="$nv/$c.apt" FAKE_INSTALLED="$nv/$c.inst" \
+    AIB_TARGET_ROOT="$nv/root" NVIDIA_ARCH=amd64 EDITION=desktop DISABLE_WAYLAND=0 OFFLINE=0 "$@" \
+    bash software/24-nvidia-driver.sh > "$nv/$c.log" 2>&1
+}
+# a) 一致: Desktop HWE → 内核 meta + 模块 meta + 驱动 + settings/prime 同一事务, 不带 DKMS; VA-API 另装
+if nv_run a "$nv/db.ok" $'linux-generic-hwe-24.04 6.17.0-14.14~24.04.1\n' \
+  && grep -q '^apt-get install -y --no-install-recommends linux-generic-hwe-24.04 linux-modules-nvidia-595-open-generic-hwe-24.04 nvidia-driver-595-open nvidia-settings nvidia-prime$' "$nv/a.apt" \
+  && grep -q '^apt-get install -y --no-install-recommends intel-media-va-driver-non-free vainfo$' "$nv/a.apt" \
+  && grep -q 'kernel-flavour=generic-hwe-24.04' "$nv/a.log" \
+  && grep -q '7.0.0-42-generic' "$nv/a.log" \
+  && grep -q 'Canonical' "$nv/a.log" && ! grep -q 'SKIP' "$nv/a.log"; then
+  pass "nvidia: HWE kernel meta + prebuilt module meta + driver installed together"
+else
+  fail "nvidia HWE install: $(cat "$nv/a.log" "$nv/a.apt" 2>/dev/null | tail -12)"
+fi
+# b) Server + GA 内核 → generic flavour, 不装 settings/prime
+if nv_run b "$nv/db.ok" $'linux-generic 6.8.0-31.31\n' EDITION=server \
+  && grep -q '^apt-get install -y --no-install-recommends linux-generic linux-modules-nvidia-595-open-generic nvidia-driver-595-open$' "$nv/b.apt"; then
+  pass "nvidia: GA kernel detected on server (generic flavour)"
+else
+  fail "nvidia GA flavour: $(cat "$nv/b.log" "$nv/b.apt" 2>/dev/null | tail -8)"
+fi
+# c) 内核 meta 候选比模块新, 但仓库里有同版本 → 锁定 =版本
+sed "s/^linux-generic-hwe-24.04 $K\$/linux-generic-hwe-24.04 $K\nlinux-generic-hwe-24.04 7.0.0-43.43~24.04.1/" "$nv/db.ok" > "$nv/db.lag"
+if nv_run c "$nv/db.lag" "" \
+  && grep -q "linux-generic-hwe-24.04=$K linux-image-generic-hwe-24.04=$K linux-headers-generic-hwe-24.04=$K linux-modules-nvidia-595-open-generic-hwe-24.04 nvidia-driver-595-open" "$nv/c.apt"; then
+  pass "nvidia: kernel meta pinned to module meta version when candidate is newer"
+else
+  fail "nvidia kernel pin: $(cat "$nv/c.log" "$nv/c.apt" 2>/dev/null | tail -8)"
+fi
+# d) 版本不匹配且没有同版本内核 meta → SKIP, rc=0, 不装驱动
+grep -v '^linux-generic-hwe-24.04 \|^linux-image-generic-hwe-24.04 \|^linux-headers-generic-hwe-24.04 ' "$nv/db.ok" > "$nv/db.mis"
+printf 'linux-generic-hwe-24.04 7.0.0-43.43~24.04.1\n' >> "$nv/db.mis"
+if nv_run d "$nv/db.mis" "" && grep -q 'nvidia-driver: SKIP: 内核与 NVIDIA 模块版本不匹配' "$nv/d.log" \
+  && ! grep -q 'install -y' "$nv/d.apt"; then
+  pass "nvidia: kernel/module mismatch skips with clear log (rc=0)"
+else
+  fail "nvidia mismatch skip: $(cat "$nv/d.log" "$nv/d.apt" 2>/dev/null | tail -8)"
+fi
+# e) 已装内核比模块新 → SKIP (不降级)
+if nv_run e "$nv/db.ok" $'linux-generic-hwe-24.04 7.1.0-1.1~24.04.1\n' && grep -q 'SKIP: 已装 linux-generic-hwe-24.04' "$nv/e.log" \
+  && ! grep -q 'install -y' "$nv/e.apt"; then
+  pass "nvidia: newer installed kernel is not downgraded (skip)"
+else
+  fail "nvidia newer kernel: $(tail -5 "$nv/e.log")"
+fi
+# f) 该 flavour 没有预编译模块 / 模拟会拉 DKMS / 不支持的架构 / 离线无池 → 都是 SKIP rc=0
+nv_run f1 "$nv/db.ok" "" NVIDIA_KERNEL_FLAVOUR=lowlatency; _f1=$?
+nv_run f2 "$nv/db.ok" "" FAKE_SIM_EXTRA="Inst dkms (3.0.11)"; _f2=$?
+nv_run f3 "$nv/db.ok" "" NVIDIA_ARCH=riscv64; _f3=$?
+nv_run f4 "$nv/db.ok" "" OFFLINE=1 OFFLINE_ROOT="$nv/no-bundle"; _f4=$?
+nv_run f5 "$nv/db.ok" "" FAKE_SIM_RC=100; _f5=$?
+if [[ "$_f1$_f2$_f3$_f4$_f5" == "00000" ]] \
+  && grep -q 'SKIP: 仓库里没有 linux-modules-nvidia-595-open-lowlatency' "$nv/f1.log" \
+  && grep -q 'SKIP: apt 计划安装 DKMS' "$nv/f2.log" \
+  && grep -q 'SKIP: 架构 riscv64' "$nv/f3.log" \
+  && grep -q 'SKIP: 离线模式但没有本地 apt 池' "$nv/f4.log" \
+  && grep -q 'SKIP: apt 无法解析' "$nv/f5.log" \
+  && ! grep -q 'install -y' "$nv/f1.apt" "$nv/f2.apt" "$nv/f3.apt" "$nv/f4.apt" "$nv/f5.apt"; then
+  pass "nvidia: missing module flavour / DKMS / arch / offline-no-pool / apt failure all skip cleanly"
+else
+  fail "nvidia skip cases: rc=$_f1$_f2$_f3$_f4$_f5 $(tail -2 "$nv"/f*.log)"
+fi
+# g) Wayland 兜底: 真实 61-gdm.rules (只会写 WaylandEnable false) 不动; 若有规则写 WaylandEnable true 就屏蔽
+mkdir -p "$nv/root/usr/lib/udev/rules.d" "$nv/root/etc/gdm3"
+printf '[daemon]\nWaylandEnable=false\n' > "$nv/root/etc/gdm3/custom.conf"
+cat > "$nv/root/usr/lib/udev/rules.d/61-gdm.rules" <<'RULES'
+ACTION=="bind", ENV{GDM_PREFER_WAYLAND}!="1", GOTO="gdm_prefer_xorg"
+LABEL="gdm_prefer_xorg"
+RUN+="/usr/libexec/gdm-runtime-config set daemon PreferredDisplayServer xorg"
+LABEL="gdm_disable_wayland"
+RUN+="/usr/libexec/gdm-runtime-config set daemon WaylandEnable false"
+RULES
+nv_run g1 "$nv/db.ok" "" DISABLE_WAYLAND=1; _g1=$?
+_g1ok=0; [[ "$_g1" -eq 0 && ! -e "$nv/root/etc/udev/rules.d/61-gdm.rules" ]] && _g1ok=1
+printf 'RUN+="/usr/libexec/gdm-runtime-config set daemon WaylandEnable true"\n' >> "$nv/root/usr/lib/udev/rules.d/61-gdm.rules"
+nv_run g2 "$nv/db.ok" "" DISABLE_WAYLAND=1; _g2=$?
+if [[ "$_g1ok" -eq 1 && "$_g2" -eq 0 && -f "$nv/root/etc/udev/rules.d/61-gdm.rules" ]] \
+  && ! grep -q 'WaylandEnable true' "$nv/root/etc/udev/rules.d/61-gdm.rules" \
+  && grep -q 'WaylandEnable false' "$nv/root/etc/udev/rules.d/61-gdm.rules" \
+  && grep -q '^WaylandEnable=false$' "$nv/root/etc/gdm3/custom.conf"; then
+  pass "nvidia: gdm udev rules cannot re-enable Wayland (WaylandEnable=false kept)"
+else
+  fail "nvidia wayland guard: g1=$_g1/$_g1ok g2=$_g2 $(tail -3 "$nv/g2.log")"
+fi
+rm -rf "$nv/root/usr" "$nv/root/etc/udev" "$nv/root/etc/gdm3"
+
+echo "== validate-offline-bundle nvidia (module/kernel version match) =="
+nb="$tmp/nvb"
+mkdir -p "$nb/apt" "$nb/apt-sources/keyrings" "$nb/apt-sources/sources.list.d" "$nb/nvidia"
+for p in git ripgrep openssh-server ca-certificates curl; do printf 'Package: %s\nVersion: 1\n\n' "$p" >> "$nb/apt/Packages"; done
+for f in docker.asc githubcli-archive-keyring.gpg nvidia-container-toolkit.asc jenkins-keyring.asc nodesource.gpg microsoft-edge.gpg; do : > "$nb/apt-sources/keyrings/$f"; done
+for f in docker.list github-cli.list nvidia-container-toolkit.list jenkins.list nodesource.sources microsoft-edge.sources; do : > "$nb/apt-sources/sources.list.d/$f"; done
+echo '{"schema":3,"release":"noble","arch":"amd64","fingerprint":"x","pins":{}}' > "$nb/manifest.json"
+printf '595\n' > "$nb/nvidia/driver"
+printf 'generic-hwe-24.04 %s 7.0.0-42-generic\n' "$K" > "$nb/nvidia/flavours"
+{
+  printf 'Package: linux-modules-nvidia-595-open-generic-hwe-24.04\nVersion: %s\nDepends: linux-modules-nvidia-595-open-7.0.0-42-generic (= %s), nvidia-kernel-common-595 (>= 595.99.02)\n\n' "$K" "$K"
+  for p in linux-modules-nvidia-595-open-7.0.0-42-generic linux-generic-hwe-24.04 linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 linux-image-7.0.0-42-generic; do
+    printf 'Package: %s\nVersion: %s\n\n' "$p" "$K"
+  done
+  for p in nvidia-driver-595-open intel-media-va-driver-non-free vainfo; do printf 'Package: %s\nVersion: 1\n\n' "$p"; done
+} >> "$nb/apt/Packages"
+nskip="15 20 25 30 35 37 40 45 50 60 70 80 85"
+cp "$nb/apt/Packages" "$nb/Packages.good"
+_v1=1; bash tools/validate-offline-bundle.sh --bundle "$nb" --skip "$nskip" > "$nb/v1.log" 2>&1 && _v1=0
+# 内核 meta 版本和模块不一致 → 失败
+sed "/^Package: linux-generic-hwe-24.04\$/{n;s/^Version: .*/Version: 7.0.0-43.43~24.04.1/}" "$nb/Packages.good" > "$nb/apt/Packages"
+_v2=0; bash tools/validate-offline-bundle.sh --bundle "$nb" --skip "$nskip" > "$nb/v2.log" 2>&1 || _v2=1
+cp "$nb/Packages.good" "$nb/apt/Packages"
+_v3=0; bash tools/validate-offline-bundle.sh --bundle "$nb" --skip "$nskip" --nvidia-driver-version 580 > /dev/null 2>&1 || _v3=1
+_v4=0; bash tools/validate-offline-bundle.sh --bundle "$nb" --skip "$nskip" --nvidia-kernel-flavour generic > /dev/null 2>&1 || _v4=1
+_v5=1; bash tools/validate-offline-bundle.sh --bundle "$nb" --skip "$nskip 24" > /dev/null 2>&1 && _v5=0
+rm -rf "$nb/nvidia"
+_v6=0; bash tools/validate-offline-bundle.sh --bundle "$nb" --skip "$nskip" > /dev/null 2>&1 || _v6=1
+if [[ "$_v1$_v2$_v3$_v4$_v5$_v6" == "011101" ]] && grep -q 'linux-generic-hwe-24.04 没有版本' "$nb/v2.log"; then
+  pass "validate: nvidia module meta / kernel meta / ABI must match; --skip 24 bypasses; old bundle rejected"
+else
+  fail "validate nvidia: $_v1$_v2$_v3$_v4$_v5$_v6 $(cat "$nb/v1.log" "$nb/v2.log" | tail -6)"
+fi
+rm -rf "$nb"
+
 echo "== flclash script + offline seed + build flags =="
 if [[ -x software/37-flclash.sh ]] && [[ -f tools/flclash-release.sh ]] \
   && grep -q 'chen08209/FlClash' software/37-flclash.sh \
@@ -1366,6 +1566,48 @@ else
   echo "(xorriso/openssl missing, gitea build test skipped)"
 fi
 
+echo "== build-iso nvidia flags (fake ISO) =="
+if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
+  nf="$(mktemp -d)"
+  bash test/make-fake-iso.sh server "$nf/src.iso" >/dev/null 2>&1 || true
+  if [[ -f "$nf/src.iso" ]]; then
+    if bash build-iso.sh --iso "$nf/src.iso" --out "$nf/a.iso" --password-hash "$(openssl passwd -6 x)" >"$nf/a.log" 2>&1 \
+       && xorriso -osirrox on -indev "$nf/a.iso" -extract /provision "$nf/a" >/dev/null 2>&1 \
+       && [[ -x "$nf/a/24-nvidia-driver.sh" ]] \
+       && grep -qx 'PIN_NVIDIA_DRIVER=595' "$nf/a/provision.env" \
+       && grep -q '^NVIDIA_KERNEL_FLAVOUR=' "$nf/a/provision.env" \
+       && ! grep -q '24-nvidia-driver' "$nf/a/provision.env" \
+       && grep -q 'NVIDIA 驱动: 每台机器都装' "$nf/a.log"; then
+      pass "nvidia driver on by default (server too), PIN_NVIDIA_DRIVER=595 in provision.env"
+    else
+      fail "build-iso nvidia default: $(tail -5 "$nf/a.log" 2>/dev/null)"
+    fi
+    if bash build-iso.sh --iso "$nf/src.iso" --out "$nf/b.iso" --password-hash "$(openssl passwd -6 x)" \
+         --no-nvidia-driver --nvidia-driver-version 580 --nvidia-kernel-flavour generic >"$nf/b.log" 2>&1 \
+       && xorriso -osirrox on -indev "$nf/b.iso" -extract /provision "$nf/b" >/dev/null 2>&1 \
+       && grep -q '^PROVISION_SKIP=.*24-nvidia-driver' "$nf/b/provision.env" \
+       && grep -qx 'PIN_NVIDIA_DRIVER=580' "$nf/b/provision.env" \
+       && grep -qx 'NVIDIA_KERNEL_FLAVOUR=generic' "$nf/b/provision.env"; then
+      pass "--no-nvidia-driver adds 24-nvidia-driver to PROVISION_SKIP; version/flavour overrides written"
+    else
+      fail "build-iso --no-nvidia-driver: $(grep -E 'PROVISION_SKIP|NVIDIA' "$nf/b/provision.env" 2>/dev/null; tail -3 "$nf/b.log")"
+    fi
+    for bad in "--nvidia-driver-version 59x" "--nvidia-driver-version 595;rm" "--nvidia-kernel-flavour Generic" "--nvidia-kernel-flavour a;b"; do
+      # shellcheck disable=SC2086
+      if bash build-iso.sh --iso "$nf/src.iso" --out "$nf/c.iso" --password x $bad --dry-run >/dev/null 2>&1; then
+        fail "should reject: $bad"
+      else
+        pass "rejects: $bad"
+      fi
+    done
+  else
+    fail "make-fake-iso for nvidia test"
+  fi
+  rm -rf "$nf"
+else
+  echo "(xorriso/openssl missing, nvidia build test skipped)"
+fi
+
 echo "== build-iso flclash flags (fake ISO) =="
 if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
   fc="$(mktemp -d)"
@@ -1713,7 +1955,7 @@ for p in git scm-api timestamper; do
 done
 printf 'git\ntimestamper\n' > "$vb/jenkins-plugins/requested.txt"
 printf '2.580.2' > "$vb/jenkins-plugins/jenkins-version"
-vskip="15 20 25 37 40 45 50 60 70 80 85"
+vskip="15 20 24 25 37 40 45 50 60 70 80 85"
 if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "timestamper git" >/dev/null 2>&1; then
   pass "validate accepts complete jenkins-plugins"
 else
@@ -1798,7 +2040,7 @@ else
   fail "validate --require-x11vnc logic"
 fi
 # FlClash: 未 skip 时必须有 flclash/ + sha256 一致 + Packages 含 FlClash
-_vskip_no37="15 20 25 40 45 50 60 70 80 85"
+_vskip_no37="15 20 24 25 40 45 50 60 70 80 85"
 if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$_vskip_no37 30" >/dev/null 2>&1; then
   mkdir -p "$vb/flclash"
   printf 'dummy-flclash-deb' > "$vb/flclash/FlClash-0.9.3-linux-amd64.deb"

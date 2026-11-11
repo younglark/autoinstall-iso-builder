@@ -7,6 +7,8 @@
 #       [--require-rustdesk] [--pin-rustdesk VER]
 #                            (build-iso Desktop 默认 RustDesk 时: 捆绑里必须有 rustdesk/ 同版本 deb + sha256, apt 池可装)
 #       [--require-mdns]     (build-iso Server 预装 Gitea / Jenkins 时: 捆绑里必须有 avahi-daemon + libnss-mdns)
+#       [--nvidia-driver-version N] [--nvidia-kernel-flavour F]
+#                            (未 --skip 24 时: nvidia/ 记录的每个 flavour, 模块 meta / 内核 meta / 内核 ABI 版本必须一致)
 set -Eeuo pipefail
 
 BUNDLE=""
@@ -23,6 +25,8 @@ REQUIRE_X11VNC=0
 REQUIRE_MDNS=0
 REQUIRE_RUSTDESK=0
 PIN_RUSTDESK="${PIN_RUSTDESK:-}"
+PIN_NVIDIA_DRIVER="${PIN_NVIDIA_DRIVER:-595}"
+NVIDIA_KERNEL_FLAVOUR="${NVIDIA_KERNEL_FLAVOUR:-}"
 JENKINS_PLUGINS="${JENKINS_PLUGINS:-workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger}"
 
 die()  { printf '[fail] %s\n' "$*" >&2; exit 1; }
@@ -56,6 +60,8 @@ while [[ $# -gt 0 ]]; do
     --require-mdns) REQUIRE_MDNS=1; shift ;;
     --require-rustdesk) REQUIRE_RUSTDESK=1; shift ;;
     --pin-rustdesk) PIN_RUSTDESK="$2"; shift 2 ;;
+    --nvidia-driver-version) PIN_NVIDIA_DRIVER="$2"; shift 2 ;;
+    --nvidia-kernel-flavour) NVIDIA_KERNEL_FLAVOUR="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,10p' "$0"; exit 0 ;;
     *) die "未知参数: $1" ;;
@@ -206,6 +212,54 @@ if [[ "$REQUIRE_RUSTDESK" -eq 1 ]] && ! should_skip 38-rustdesk; then
     fi
     if ! awk '/^Package: / && $2=="rustdesk" { f=1; exit } END { exit f?0:1 }' "$PACKAGES_FILE"; then
       missing+=("rustdesk")
+    fi
+  fi
+fi
+# NVIDIA 驱动 (24-nvidia-driver.sh): 预编译模块必须和同一个内核版本配套, 否则装机会跳过驱动
+if ! should_skip 24-nvidia-driver; then
+  [[ "$PIN_NVIDIA_DRIVER" =~ ^[0-9]{3,4}$ ]] || die "非法 --nvidia-driver-version: $PIN_NVIDIA_DRIVER"
+  NVD="$BUNDLE/nvidia"
+  if [[ ! -f "$NVD/driver" || ! -f "$NVD/flavours" ]]; then
+    missing_dirs+=("nvidia/{driver,flavours} (加入 NVIDIA 驱动之前的旧捆绑)")
+  else
+    _nvd="$(tr -d '[:space:]' < "$NVD/driver")"
+    if [[ "$_nvd" != "$PIN_NVIDIA_DRIVER" ]]; then
+      jp_errs+=("nvidia/driver=$_nvd != --nvidia-driver-version $PIN_NVIDIA_DRIVER")
+    else
+      # 包 → 池里所有版本
+      nv_vers() { awk -v p="$1" '/^Package: /{cur=$2} /^Version: /{ if (cur==p) print $2 }' "$PACKAGES_FILE"; }
+      nv_has()  { nv_vers "$1" | grep -qxF "$2"; }
+      nv_any()  { [[ -n "$(nv_vers "$1")" ]]; }
+      nv_any "nvidia-driver-${PIN_NVIDIA_DRIVER}-open" || missing+=("nvidia-driver-${PIN_NVIDIA_DRIVER}-open")
+      nv_any vainfo || missing+=(vainfo)
+      _march="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('arch',''))" "$BUNDLE/manifest.json" 2>/dev/null || true)"
+      if [[ "${_march:-amd64}" == "amd64" ]]; then
+        nv_any intel-media-va-driver-non-free || missing+=(intel-media-va-driver-non-free)
+      fi
+      _nfl=0
+      while read -r _fl _ver _abi _rest; do
+        [[ -n "${_fl:-}" ]] || continue
+        _nfl=$((_nfl + 1))
+        if [[ -z "${_ver:-}" || -z "${_abi:-}" || -n "${_rest:-}" ]]; then
+          jp_errs+=("nvidia/flavours 格式错误: $_fl ${_ver:-} ${_abi:-}"); continue
+        fi
+        _mm="linux-modules-nvidia-${PIN_NVIDIA_DRIVER}-open-$_fl"
+        for _p in "$_mm" "linux-modules-nvidia-${PIN_NVIDIA_DRIVER}-open-$_abi" "linux-$_fl" "linux-image-$_fl" "linux-headers-$_fl"; do
+          nv_has "$_p" "$_ver" || jp_errs+=("nvidia: $_p 没有版本 $_ver (flavour $_fl 的模块与内核版本不一致)")
+        done
+        nv_any "linux-image-$_abi" || nv_any "linux-image-unsigned-$_abi" \
+          || jp_errs+=("nvidia: 缺内核 linux-image-$_abi (flavour $_fl)")
+        # 模块 meta 必须精确依赖同一个内核 ABI 的模块
+        _dep="$(awk -v p="$_mm" -v v="$_ver" '/^Package: /{cur=$2; ver=""} /^Version: /{ver=$2} /^Depends: / { if (cur==p && ver==v) { print; exit } }' "$PACKAGES_FILE")"
+        [[ "$_dep" == *"linux-modules-nvidia-${PIN_NVIDIA_DRIVER}-open-$_abi (= $_ver)"* ]] \
+          || jp_errs+=("nvidia: $_mm $_ver 的依赖不是内核 $_abi")
+      done < "$NVD/flavours"
+      if [[ "$_nfl" -eq 0 ]]; then
+        jp_errs+=("nvidia/flavours 为空: 抓包时没有版本一致的预编译模块 + 内核 (或发行版没有 nvidia-driver-${PIN_NVIDIA_DRIVER}-open); 换 --nvidia-driver-version 或 --no-nvidia-driver")
+      fi
+      if [[ -n "$NVIDIA_KERNEL_FLAVOUR" ]] && ! grep -q "^${NVIDIA_KERNEL_FLAVOUR} " "$NVD/flavours"; then
+        jp_errs+=("nvidia/flavours 没有 --nvidia-kernel-flavour $NVIDIA_KERNEL_FLAVOUR")
+      fi
     fi
   fi
 fi
