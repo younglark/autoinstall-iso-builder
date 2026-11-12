@@ -34,6 +34,7 @@
 | `00-base.sh` | 基础依赖 | `policy-rc.d` 拦住 chroot 里的服务启动；修 `resolv.conf`；apt 非交互；含 **git**、**ripgrep**（`rg`） |
 | `10-openssh.sh` | openssh-server | 幂等兜底，启用 `ssh.service` |
 | `12-avahi-mdns.sh` | Avahi（mDNS） | 预装了 Gitea 或 Jenkins 时启用：装 `avahi-daemon` + `libnss-mdns`（Desktop 自带则跳过 apt；Server 补装，离线走捆绑），enable `avahi-daemon`，让局域网能用 `<主机名>.local` 访问本机；ufw **已启用**时放行 `5353/udp`，不会主动启用 ufw。详见下文「Gitea / Jenkins 的访问地址」 |
+| `13-no-dist-upgrade-prompt.sh` | 关闭大版本升级提示 | **Desktop / Server 默认生效**（无开关）。把 `/etc/update-manager/release-upgrades` 的 `Prompt=` 写成 `never`，不再提示升级到下一个 LTS（例如 24.04 → 26.04）。日常更新弹窗、update-notifier、unattended-upgrades、重启提示和 MOTD **保持原样**。`--no-provision` 或 `--skip 13` 时不改 |
 | `15-github-cli.sh` | GitHub CLI (`gh`) | 官方 apt 源（cli.github.com）；**不**执行 `gh auth` |
 | `20-docker.sh` | Docker CE | 官方仓库（非 `docker.io`），含 compose v2 / buildx，**配了日志轮转** |
 | `24-nvidia-driver.sh` | NVIDIA 驱动 595（open）+ Intel VA-API | **每台机器都装，不检测硬件**（`--no-nvidia-driver` 或 `--skip 24` 关闭）。Ubuntu 官方 `nvidia-driver-595-open` + Canonical 签名的预编译模块 `linux-modules-nvidia-595-open-<flavour>` + **同版本**内核 meta（不走 DKMS，Secure Boot 下可直接加载，不登记 MOK）；另装 `intel-media-va-driver-non-free`、`vainfo`。模块和内核版本对不上时**跳过并记日志**，不让装机失败。详见下文 |
@@ -305,6 +306,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 - 目标盘预留 **≥ 25 GB**（Docker 镜像 + Jenkins workspace 很吃空间）；这套预装本身约占 1.2–1.5 GB（另加 Godot 解压约 140 MB、Gitea 二进制约 115 MB、FlClash deb 约 40 MB、RustDesk deb 约 25 MB、Grok Bot deb 约 110 MB（装后约 370 MB），数据目录随后增长）。
 - OpenMausBot 是 Electron 应用，npm 包会拉下较大体积的运行时；服务器上只用 `openmausbot serve`，不需要 X11。
 - 首次开机后要跑一次 `apt-get update`——`99-cleanup.sh` 为了缩体积清掉了 `/var/lib/apt/lists`。
+- 默认关闭**大版本发行版升级**提示（`/etc/update-manager/release-upgrades` 的 `Prompt=never`），避免弹出「可升级到 26.04」这类窗口。日常 Software Updater、安全更新自动安装和重启提示不受影响。若以后要升级发行版，把 `Prompt=` 改回 `lts` 或 `normal`，再运行 `do-release-upgrade`。
 
 ### 增删软件
 
