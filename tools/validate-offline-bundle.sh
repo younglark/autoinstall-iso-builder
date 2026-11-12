@@ -8,7 +8,7 @@
 #                            (build-iso Desktop 默认 RustDesk 时: 捆绑里必须有 rustdesk/ 同版本 deb + sha256, apt 池可装)
 #       [--require-grok-bot] [--grok-bot-version V] [--grok-bot-sha256 H]
 #                            (build-iso Desktop 默认 Grok Bot 时: 捆绑里必须有 grok-bot/ deb + sha256, 且它和直接依赖都在 apt 池)
-#       [--require-mdns]     (build-iso Server 预装 Gitea / Jenkins 时: 捆绑里必须有 avahi-daemon + libnss-mdns)
+#       [--require-mdns]     (build-iso Server 预装 Gitea / Jenkins / OpenCode Web 时: 捆绑里必须有 avahi-daemon + libnss-mdns)
 #       [--nvidia-driver-version N] [--nvidia-kernel-flavour F]
 #                            (未 --skip 24 时: nvidia/ 记录的每个 flavour, 模块 meta / 内核 meta / 内核 ABI 版本必须一致)
 set -Eeuo pipefail
@@ -99,7 +99,7 @@ if [[ "$REQUIRE_X11VNC" -eq 1 ]] && ! should_skip 36-x11vnc-xorg; then
   NEED_PKGS+=(x11vnc xauth)
 fi
 # Server 上 Gitea / Jenkins 的 <hostname>.local 要 Avahi (Desktop 自带, 不要求); 旧捆绑没有 → --force-fetch
-if [[ "$REQUIRE_MDNS" -eq 1 ]] && ! should_skip 12-avahi-mdns && { ! should_skip 30-jenkins || ! should_skip 45-gitea; }; then
+if [[ "$REQUIRE_MDNS" -eq 1 ]] && ! should_skip 12-avahi-mdns && { ! should_skip 30-jenkins || ! should_skip 45-gitea || ! should_skip 60-opencode; }; then
   NEED_PKGS+=(avahi-daemon libnss-mdns)
 fi
 
@@ -355,6 +355,25 @@ if ! should_skip 24-nvidia-driver; then
 fi
 if [[ "$need_npm" -eq 1 ]]; then
   [[ -f "$BUNDLE/npm/prefix.tar.gz" ]] || missing_dirs+=("npm/prefix.tar.gz")
+  if [[ -f "$BUNDLE/npm/prefix.tar.gz" ]] && ! should_skip 60-opencode; then
+    if ! tar -tzf "$BUNDLE/npm/prefix.tar.gz" | grep -q '/@opencode/cli/'; then
+      missing_dirs+=("npm/prefix.tar.gz 缺少 @opencode/cli (旧捆绑是 opencode-ai, 请 --force-fetch 重建)")
+    else
+      # postinstall 后的真正二进制应远大于桩
+      _oc_sz="$(python3 -c '
+import tarfile, sys
+sz = 0
+with tarfile.open(sys.argv[1], "r:gz") as t:
+    for m in t.getmembers():
+        if "/@opencode/cli/bin/opencode.exe" in m.name:
+            sz = max(sz, m.size)
+print(sz)
+' "$BUNDLE/npm/prefix.tar.gz")"
+      if [[ "${_oc_sz:-0}" -lt 10000000 ]]; then
+        missing_dirs+=("npm 里的 opencode 二进制过小 (${_oc_sz:-0} 字节, 可能没跑 postinstall); 请 --force-fetch 重建")
+      fi
+    fi
+  fi
 fi
 
 # 第三方 apt 源种子 (装完 restore-online-apt 写回; 捆绑内有则全部校验)

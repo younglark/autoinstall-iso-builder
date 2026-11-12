@@ -1638,6 +1638,101 @@ else
   fail "gitea admin password leak path"
 fi
 
+echo "== opencode 2.x + web service (60-opencode.sh) =="
+if [[ -x software/60-opencode.sh ]] \
+  && grep -q '@opencode/cli' software/60-opencode.sh \
+  && ! grep -q 'opencode-ai' software/60-opencode.sh \
+  && ! grep -E '^[^#]*--ignore-scripts' software/60-opencode.sh | grep -q . \
+  && grep -q 'OPENCODE_PASSWORD' software/60-opencode.sh \
+  && grep -q 'serve --hostname 0.0.0.0 --port' software/60-opencode.sh \
+  && grep -q 'After=network-online.target' software/60-opencode.sh \
+  && grep -q 'Wants=network-online.target' software/60-opencode.sh \
+  && grep -q 'Restart=on-failure' software/60-opencode.sh \
+  && grep -q 'EnvironmentFile=' software/60-opencode.sh \
+  && grep -q '"update": "disable"' software/60-opencode.sh \
+  && grep -q 'opencode-web.secret' software/60-opencode.sh \
+  && grep -q '/root/opencode-web-password' software/60-opencode.sh \
+  && grep -q 'opencode-web.secret' build-iso.sh \
+  && grep -q 'opencode-web.secret' software/run-all.sh \
+  && grep -q 'opencode-web.secret' software/99-cleanup.sh \
+  && grep -q '@opencode/cli' tools/fetch-offline-bundle.sh \
+  && grep -q 'opencode_package' tools/fetch-offline-bundle.sh \
+  && grep -q '"schema": 4' tools/fetch-offline-bundle.sh \
+  && ! grep -q 'opencode-ai' tools/fetch-offline-bundle.sh \
+  && ! grep -E '^[^#]*--ignore-scripts' tools/fetch-offline-bundle.sh | grep -q . \
+  && grep -q '@opencode/cli' tools/validate-offline-bundle.sh \
+  && grep -q 'aib_prune_opencode_cli_platform' software/lib-offline.sh \
+  && grep -q 'aib_opencode_cli_postinstall' software/lib-offline.sh; then
+  pass "60-opencode: @opencode/cli, serve 0.0.0.0:4096, secret wiring, schema 4, no ignore-scripts"
+else
+  fail "60-opencode script / offline wiring"
+fi
+
+oc="$(mktemp -d)"
+mkdir -p "$oc/src" "$oc/t1/etc" "$oc/t1/root"
+cp software/60-opencode.sh software/lib-offline.sh software/lib-service-url.sh "$oc/src/"
+chmod 0755 "$oc/src"/*.sh
+printf 'ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n' > "$oc/t1/etc/passwd"
+printf 'desk-01\n' > "$oc/hostname"
+( umask 077; printf 'OPENCODE_WEB_PASSWORD=%q\n' 'Pl@in#99x' > "$oc/src/opencode-web.secret" )
+if EDITION=server TARGET_USER=ubuntu AIB_TARGET_ROOT="$oc/t1" AIB_SKIP_PKG=1 \
+     AIB_HOSTNAME_FILE="$oc/hostname" bash "$oc/src/60-opencode.sh" >"$oc/t1.log" 2>&1 \
+   && [[ ! -e "$oc/src/opencode-web.secret" ]] \
+   && ! grep -Fq 'Pl@in#99x' "$oc/t1.log" \
+   && [[ "$(stat -c %a "$oc/t1/etc/opencode/web.env")" == 600 ]] \
+   && [[ ! -e "$oc/t1/root/opencode-web-password" ]] \
+   && grep -q '^OPENCODE_PASSWORD=' "$oc/t1/etc/opencode/web.env" \
+   && python3 -c 'from pathlib import Path; import sys
+p=Path(sys.argv[1]); t=p.read_text()
+assert "OPENCODE_PASSWORD=" in t and "Pl@in#99x" in t
+assert p.stat().st_mode & 0o777 == 0o600' "$oc/t1/etc/opencode/web.env" \
+   && grep -q '^User=ubuntu$' "$oc/t1/etc/systemd/system/opencode-web.service" \
+   && ! grep -q 'User=root' "$oc/t1/etc/systemd/system/opencode-web.service" \
+   && grep -q 'WorkingDirectory=/home/ubuntu' "$oc/t1/etc/systemd/system/opencode-web.service" \
+   && grep -q 'ExecStart=/usr/local/bin/opencode serve --hostname 0.0.0.0 --port 4096' "$oc/t1/etc/systemd/system/opencode-web.service" \
+   && grep -q '^After=network-online.target$' "$oc/t1/etc/systemd/system/opencode-web.service" \
+   && grep -q '^Wants=network-online.target$' "$oc/t1/etc/systemd/system/opencode-web.service" \
+   && grep -q '^Restart=on-failure$' "$oc/t1/etc/systemd/system/opencode-web.service" \
+   && grep -q '^EnvironmentFile=/etc/opencode/web.env$' "$oc/t1/etc/systemd/system/opencode-web.service" \
+   && ! grep -E '^ExecStart=' "$oc/t1/etc/systemd/system/opencode-web.service" | grep -qE -- '--service|pair --remote' \
+   && grep -q '"update": "disable"' "$oc/t1/etc/opencode/opencode.json" \
+   && grep -q 'http://desk-01.local:4096/' "$oc/t1.log" \
+   && [[ -L "$oc/t1/etc/systemd/system/multi-user.target.wants/opencode-web.service" ]]; then
+  pass "60-opencode hook (server): unit as ubuntu not root, env 0600, secret deleted, URL logged, no plaintext"
+else
+  fail "60-opencode hook: $(tail -8 "$oc/t1.log" 2>/dev/null)"
+fi
+
+# 只给了 hash / 无 secret → 随机密码写入 /root/opencode-web-password (0600), 不进日志
+mkdir -p "$oc/t2/etc" "$oc/t2/root"
+printf 'ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n' > "$oc/t2/etc/passwd"
+if EDITION=desktop TARGET_USER=ubuntu AIB_TARGET_ROOT="$oc/t2" AIB_SKIP_PKG=1 \
+     bash "$oc/src/60-opencode.sh" >"$oc/t2.log" 2>&1 \
+   && [[ -f "$oc/t2/root/opencode-web-password" ]] \
+   && [[ "$(stat -c %a "$oc/t2/root/opencode-web-password")" == 600 ]] \
+   && [[ "$(stat -c %a "$oc/t2/etc/opencode/web.env")" == 600 ]] \
+   && rp="$(cat "$oc/t2/root/opencode-web-password")" \
+   && [[ ${#rp} -ge 16 ]] \
+   && ! grep -Fq "$rp" "$oc/t2.log" \
+   && grep -q '/root/opencode-web-password' "$oc/t2.log" \
+   && grep -q '^User=ubuntu$' "$oc/t2/etc/systemd/system/opencode-web.service"; then
+  pass "60-opencode hash-only: random password file 0600, not logged"
+else
+  fail "60-opencode hash-only: $(tail -5 "$oc/t2.log" 2>/dev/null)"
+fi
+
+# TARGET_USER=root / 缺用户 → 失败, 删除 secret
+( umask 077; printf 'OPENCODE_WEB_PASSWORD=%q\n' 'ShouldNotRemain' > "$oc/src/opencode-web.secret" )
+mkdir -p "$oc/t3"
+if TARGET_USER=root AIB_TARGET_ROOT="$oc/t3" AIB_SKIP_PKG=1 bash "$oc/src/60-opencode.sh" >"$oc/t3.log" 2>&1; then
+  fail "60-opencode should reject TARGET_USER=root"
+elif [[ ! -e "$oc/src/opencode-web.secret" ]] && grep -q '不能是 root' "$oc/t3.log"; then
+  pass "60-opencode rejects root and deletes secret"
+else
+  fail "60-opencode root reject: $(tail -3 "$oc/t3.log" 2>/dev/null)"
+fi
+rm -rf "$oc"
+
 echo "== build-iso default credentials (ubuntu / ubuntu1990) =="
 if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
   dc="$(mktemp -d)"
@@ -1667,6 +1762,14 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
       pass "gitea admin follows default credentials"
     else
       fail "gitea admin default credentials"
+    fi
+    if [[ -f "$dc/pv/opencode-web.secret" ]] && [[ "$(stat -c %a "$dc/pv/opencode-web.secret")" == 600 ]] \
+       && ! grep -q 'OPENCODE' "$dc/pv/provision.env" && ! grep -q 'ubuntu1990' "$dc/pv/provision.env" \
+       && ( # shellcheck disable=SC1091
+            . "$dc/pv/opencode-web.secret"; [[ "$OPENCODE_WEB_PASSWORD" == ubuntu1990 ]] ); then
+      pass "opencode web password follows default credentials, not in provision.env"
+    else
+      fail "opencode web default credentials"
     fi
     # 显式密码时不告警
     if bash build-iso.sh --iso "$dc/src.iso" --out "$dc/e.iso" --password 'Other#Pass9' >"$dc/e.log" 2>&1 \
@@ -1708,8 +1811,9 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
          --gitea-admin-user boss --gitea-admin-email boss@example.com >"$gt/b.log" 2>&1 \
        && xorriso -osirrox on -indev "$gt/b.iso" -extract /provision "$gt/b" >/dev/null 2>&1 \
        && [[ ! -e "$gt/b/gitea-admin.secret" ]] && grep -qx 'GITEA_ADMIN_USER=boss' "$gt/b/provision.env" \
-       && grep -q '/root/gitea-admin-password' "$gt/b.log"; then
-      pass "gitea hash-only: no secret file, random password notice"
+       && grep -q '/root/gitea-admin-password' "$gt/b.log" \
+       && [[ ! -e "$gt/b/opencode-web.secret" ]] && grep -q '/root/opencode-web-password' "$gt/b.log"; then
+      pass "gitea hash-only: no secret file, random password notice (opencode-web likewise)"
     else
       fail "gitea hash-only build"
     fi
@@ -2254,10 +2358,11 @@ fi
 if grep -q 'aib_service_url_host' software/45-gitea.sh && grep -q 'aib_gitea_set_url' software/45-gitea.sh \
    && grep -q 'aib_service_url_host' software/30-jenkins.sh && grep -q 'aib_jenkins_set_url' software/30-jenkins.sh \
    && grep -q 'jenkins.model.JenkinsLocationConfiguration.xml' software/30-jenkins.sh \
-   && ! grep -qi 'configuration-as-code' software/30-jenkins.sh; then
-  pass "gitea / jenkins hooks wired to lib-service-url (no JCasC)"
+   && ! grep -qi 'configuration-as-code' software/30-jenkins.sh \
+   && grep -q 'aib_service_url_host' software/60-opencode.sh; then
+  pass "gitea / jenkins / opencode hooks wired to lib-service-url (no JCasC)"
 else
-  fail "gitea / jenkins hooks wiring"
+  fail "gitea / jenkins / opencode hooks wiring"
 fi
 # Jenkins: 新建 / 更新 JenkinsLocationConfiguration.xml (保留 adminAddress)
 aib_jenkins_set_url "$su_t/loc.xml" "http://node07.local:8080/"
@@ -2305,6 +2410,7 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
      && grep -qx 'MDNS_AVAHI=1' "$su_t/p1/provision.env" \
      && [[ -f "$su_t/p1/12-avahi-mdns.sh" && -f "$su_t/p1/lib-service-url.sh" ]] \
      && grep -q 'http://ubuntu-node.local:3000/' "$su_t/o1.log" && grep -q 'http://ubuntu-node.local:8080/' "$su_t/o1.log" \
+     && grep -q 'http://ubuntu-node.local:4096/' "$su_t/o1.log" \
      && grep -q '每台机器要用不同的 --hostname' "$su_t/o1.log" \
      && [[ "$(env -i PATH="$PATH" AIB_HOSTNAME_FILE="$su_t/none" bash -c ". '$su_t/p1/provision.env'; . '$su_t/p1/lib-service-url.sh'; aib_service_url_host" 2>/dev/null)" == "ubuntu-node.local" ]]; then
     pass "server default: URLs ubuntu-node.local, MDNS_AVAHI=1, lib + avahi hook shipped"
@@ -2315,6 +2421,7 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
   if bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o2.iso" --password 'Pl@in99x' --hostname node07 --service-url-host 192.168.1.20 >"$su_t/o2.log" 2>&1 && _suenv "$su_t/o2.iso" "$su_t/p2" \
      && grep -qx 'AIB_HOSTNAME=node07' "$su_t/p2/provision.env" && grep -qx 'SERVICE_URL_HOST=192.168.1.20' "$su_t/p2/provision.env" \
      && grep -q 'http://192.168.1.20:3000/' "$su_t/o2.log" && grep -q 'http://192.168.1.20:8080/' "$su_t/o2.log" \
+     && grep -q 'http://192.168.1.20:4096/' "$su_t/o2.log" \
      && ! grep -q '每台机器要用不同的 --hostname' "$su_t/o2.log" \
      && [[ "$(env -i PATH="$PATH" AIB_HOSTNAME_FILE="$su_t/hostname" bash -c ". '$su_t/p2/provision.env'; . '$su_t/p2/lib-service-url.sh'; aib_service_url_host" 2>/dev/null)" == "192.168.1.20" ]] \
      && bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o2b.iso" --password x --service-url-host CI.Example.COM --dry-run >"$su_t/o2b.log" 2>&1 \
@@ -2323,16 +2430,21 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
   else
     fail "--service-url-host override: $(tail -3 "$su_t/o2.log")"
   fi
-  # --skip 45: 只有 Jenkins, 仍装 Avahi; --skip "30 45": 不装 Avahi, --service-url-host 告警忽略
+  # --skip 45: Jenkins + OpenCode, 仍装 Avahi; --skip "30 45" 仍有 OpenCode, 仍装 Avahi;
+  # --skip "30 45 60": 不装 Avahi, --service-url-host 告警忽略
   if bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o3.iso" --password x --skip 45 >"$su_t/o3.log" 2>&1 && _suenv "$su_t/o3.iso" "$su_t/p3" \
      && grep -qx 'MDNS_AVAHI=1' "$su_t/p3/provision.env" && ! grep -q ':3000/' "$su_t/o3.log" && grep -q 'ubuntu-node.local:8080/' "$su_t/o3.log" \
+     && grep -q 'ubuntu-node.local:4096/' "$su_t/o3.log" \
      && bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o4.iso" --password x --skip 30 >"$su_t/o4.log" 2>&1 && _suenv "$su_t/o4.iso" "$su_t/p4" \
      && grep -qx 'MDNS_AVAHI=1' "$su_t/p4/provision.env" && ! grep -q ':8080/' "$su_t/o4.log" \
-     && bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o5.iso" --password x --skip "30 45" --service-url-host 10.0.0.5 >"$su_t/o5.log" 2>&1 && _suenv "$su_t/o5.iso" "$su_t/p5" \
-     && grep -qx 'MDNS_AVAHI=0' "$su_t/p5/provision.env" && grep -q -- '--service-url-host 只用于预装的 Gitea / Jenkins' "$su_t/o5.log" \
+     && bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o4b.iso" --password x --skip "30 45" >"$su_t/o4b.log" 2>&1 && _suenv "$su_t/o4b.iso" "$su_t/p4b" \
+     && grep -qx 'MDNS_AVAHI=1' "$su_t/p4b/provision.env" && grep -q 'ubuntu-node.local:4096/' "$su_t/o4b.log" \
+     && ! grep -q ':3000/' "$su_t/o4b.log" && ! grep -q ':8080/' "$su_t/o4b.log" \
+     && bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o5.iso" --password x --skip "30 45 60" --service-url-host 10.0.0.5 >"$su_t/o5.log" 2>&1 && _suenv "$su_t/o5.iso" "$su_t/p5" \
+     && grep -qx 'MDNS_AVAHI=0' "$su_t/p5/provision.env" && grep -q -- '--service-url-host 只用于预装的 Gitea / Jenkins / OpenCode Web' "$su_t/o5.log" \
      && bash build-iso.sh --iso "$su_t/s.iso" --out "$su_t/o6.iso" --password x --skip 12 --dry-run >"$su_t/o6.log" 2>&1 \
      && grep -q '跳过了 12-avahi-mdns' "$su_t/o6.log"; then
-    pass "--skip 45 / --skip 30 keep avahi; --skip \"30 45\" disables it; --skip 12 warns"
+    pass "--skip 45 / 30 / \"30 45\" keep avahi (OpenCode); --skip \"30 45 60\" disables it; --skip 12 warns"
   else
     fail "skip handling for avahi: $(tail -2 "$su_t/o3.log" "$su_t/o5.log")"
   fi
@@ -2390,14 +2502,14 @@ if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkin
 else
   fail "validate rejects complete jenkins-plugins"
 fi
-# --require-mdns (build-iso Server + Gitea/Jenkins): 捆绑里必须有 avahi-daemon + libnss-mdns; skip 12 或两者都 skip 时不要求
+# --require-mdns (build-iso Server + Gitea/Jenkins/OpenCode): 捆绑里必须有 avahi-daemon + libnss-mdns; skip 12 或三者都 skip 时不要求
 if ! bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "timestamper git" --require-mdns >"$vb.mdns.log" 2>&1 \
    && grep -q 'avahi-daemon libnss-mdns' "$vb.mdns.log" && grep -q -- '--force' "$vb.mdns.log" \
    && bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip 12" --jenkins-plugins "timestamper git" --require-mdns >/dev/null 2>&1 \
    && bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip 30" --require-mdns >/dev/null 2>&1; then
   printf 'Package: avahi-daemon\nVersion: 1\n\nPackage: libnss-mdns\nVersion: 1\n\n' >> "$vb/apt/Packages"
   if bash tools/validate-offline-bundle.sh --bundle "$vb" --skip "$vskip" --jenkins-plugins "timestamper git" --require-mdns >/dev/null 2>&1; then
-    pass "validate: avahi required only with --require-mdns and Gitea/Jenkins kept (hint --force)"
+    pass "validate: avahi required only with --require-mdns and Gitea/Jenkins/OpenCode kept (hint --force)"
   else
     fail "validate --require-mdns with avahi present"
   fi
@@ -2849,7 +2961,7 @@ if grep -q 'apt-sources' tools/fetch-offline-bundle.sh \
   && grep -q 'microsoft-edge.sources' tools/validate-offline-bundle.sh \
   && grep -q 'third-party apt sources' autoinstall/restore-online-apt.sh \
   && grep -q 'SHARE_KEYRINGS' autoinstall/restore-online-apt.sh \
-  && grep -q '"schema": 3' tools/fetch-offline-bundle.sh; then
+  && grep -q '"schema": 4' tools/fetch-offline-bundle.sh; then
   pass "apt-sources fetch/validate/restore wired"
 else
   fail "apt-sources fetch/validate/restore wired"
@@ -2940,6 +3052,7 @@ if grep -q '/usr/sbin' test/qemu-smoke.sh \
   && grep -qE '^[[:space:]]+unity$' test/qemu-smoke.sh \
   && grep -qE '^[[:space:]]+godot$' test/qemu-smoke.sh \
   && grep -qE '^[[:space:]]+gitea$' test/qemu-smoke.sh \
+  && grep -q 'opencode-web.service' test/qemu-smoke.sh \
   && grep -q 'INSTALL_LOCK' test/qemu-smoke.sh \
   && grep -q -- '--guard-only' test/qemu-smoke.sh; then
   pass "qemu-smoke paths + new tools + guard-only"

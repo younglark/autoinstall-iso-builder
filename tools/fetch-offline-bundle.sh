@@ -89,7 +89,7 @@ usage() {
   --cache-root DIR      捆绑缓存根目录, 默认 ./cache/offline-bundles
   --pin-node N          Node 主版本, 默认 24
   --pin-grok VER        默认 latest
-  --pin-opencode VER    默认 latest
+  --pin-opencode VER    npm 版 @opencode/cli (OpenCode 2.x), 默认 latest
   --pin-openmausbot VER 默认 latest
   --pin-unity-cli VER   Unity CLI 版本 (默认拉 latest/latest-beta)
   --pin-gitea VER       Gitea 版本 (默认 latest, 由 dl.gitea.com/gitea/version.json 解析)
@@ -274,13 +274,14 @@ bundle_fp() { # grok_bot 指纹项
   python3 - "$RELEASE" "$ARCH" "$PIN_NODE_MAJOR" "$PIN_GROK" "$PIN_OPENCODE" "$PIN_OPENMAUSBOT" "$PIN_UNITY_CLI" "$PACKAGES" "$PIN_GITEA" "$JENKINS_PLUGINS" "$RESOLVER_SHA" "$PIN_RUSTDESK" "$NVIDIA_FP_DRIVER" "$NVIDIA_FP_FLAVOURS" "$1" <<'FP'
 import hashlib, json, sys
 payload = {
-  "schema": 3,
+  "schema": 4,
   "release": sys.argv[1],
   "arch": sys.argv[2],
   "pins": {
     "node_major": sys.argv[3],
     "grok": sys.argv[4],
     "opencode": sys.argv[5],
+    "opencode_package": "@opencode/cli",
     "openmausbot": sys.argv[6],
     "unity_cli": sys.argv[7],
     "godot": "4.7.2",
@@ -1113,23 +1114,36 @@ ok "Jenkins 插件: $(wc -l < "$JP_DIR/plugins.lock") 个 ($(du -sh "$JP_DIR" | 
 # --------------- npm 全局树 (宿主机 node, 与目标 arch 一致的 linux) ---------------
 if [[ "$SKIP_NPM" -eq 0 ]]; then
   command -v npm >/dev/null || die "需要宿主机 npm 以打包全局 CLI"
-  log "打包 npm 全局树 (grok=$PIN_GROK opencode=$PIN_OPENCODE openmausbot=$PIN_OPENMAUSBOT)"
+  log "打包 npm 全局树 (grok=$PIN_GROK opencode=@opencode/cli@$PIN_OPENCODE openmausbot=$PIN_OPENMAUSBOT)"
   NPM_PREFIX="$WORK/npm-prefix"
   mkdir -p "$NPM_PREFIX"
-  npm install -g --prefix "$NPM_PREFIX" \
+  # @opencode/cli 的 postinstall 必须跑, 否则 bin 只是桩。不要 --ignore-scripts。
+  # 旧 npm 可能不认 --allow-scripts, 失败时回退到默认会执行脚本的安装。
+  if ! npm install -g --prefix "$NPM_PREFIX" \
     "@xai-official/grok@${PIN_GROK}" \
-    "opencode-ai@${PIN_OPENCODE}" \
+    "@opencode/cli@${PIN_OPENCODE}" \
     "openmausbot@${PIN_OPENMAUSBOT}" \
     --no-audit --no-fund \
-    --allow-scripts="@xai-official/grok,opencode-ai,openmausbot" || \
-  npm install -g --prefix "$NPM_PREFIX" \
-    "@xai-official/grok@${PIN_GROK}" \
-    "opencode-ai@${PIN_OPENCODE}" \
-    "openmausbot@${PIN_OPENMAUSBOT}" \
-    --no-audit --no-fund --ignore-scripts
+    --allow-scripts="@xai-official/grok,@opencode/cli,openmausbot"; then
+    npm install -g --prefix "$NPM_PREFIX" \
+      "@xai-official/grok@${PIN_GROK}" \
+      "@opencode/cli@${PIN_OPENCODE}" \
+      "openmausbot@${PIN_OPENMAUSBOT}" \
+      --no-audit --no-fund
+  fi
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/../software/lib-offline.sh"
+  _oc_arch="$(aib_opencode_node_arch "$ARCH")"
+  aib_prune_opencode_cli_platform "$NPM_PREFIX" "$_oc_arch"
+  if [ -x "$NPM_PREFIX/bin/opencode" ]; then
+    "$NPM_PREFIX/bin/opencode" --version >/dev/null \
+      || die "离线 npm 树里的 opencode --version 失败 (postinstall 可能没跑)"
+  else
+    die "离线 npm 树缺少 $NPM_PREFIX/bin/opencode"
+  fi
   mkdir -p "$OUT/npm"
   tar --owner=0 --group=0 --numeric-owner -czf "$OUT/npm/prefix.tar.gz" -C "$NPM_PREFIX" .
-  ok "npm prefix $(du -h "$OUT/npm/prefix.tar.gz" | cut -f1)"
+  ok "npm prefix $(du -h "$OUT/npm/prefix.tar.gz" | cut -f1) (opencode 已裁掉非目标平台包)"
 else
   warn "跳过 npm (--skip-npm)"
   mkdir -p "$OUT/npm"
@@ -1344,7 +1358,7 @@ if apt_src.is_dir():
       "sources": sorted(p.name for p in (apt_src/"sources.list.d").iterdir() if p.is_file()) if (apt_src/"sources.list.d").is_dir() else [],
     }
 manifest = {
-  "schema": 3,
+  "schema": 4,
   "fingerprint": "${expected_fp}",
   "release": "${RELEASE}",
   "arch": "${ARCH}",
@@ -1354,6 +1368,7 @@ manifest = {
     "node_major": "${PIN_NODE_MAJOR}",
     "grok": "${PIN_GROK}",
     "opencode": "${PIN_OPENCODE}",
+    "opencode_package": "@opencode/cli",
     "openmausbot": "${PIN_OPENMAUSBOT}",
     "unity_cli": "${PIN_UNITY_CLI}" or (unity_meta.get("version") or ""),
     "godot": "4.7.2",

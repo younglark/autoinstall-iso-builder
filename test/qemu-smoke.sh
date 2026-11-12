@@ -319,6 +319,31 @@ if command -v virt-cat >/dev/null 2>&1; then
     && echo "    [!] /opt/provision/gitea-admin.secret 仍在 (应已删除)"
 
   echo
+  echo "==> OpenCode Web (60-opencode.sh):"
+  if virt-ls -a "$DISK" /etc/systemd/system/multi-user.target.wants 2>/dev/null | grep -qx 'opencode-web.service'; then
+    echo "    opencode-web.service enabled"
+  else
+    echo "    [!] opencode-web.service 未 enable (若 --skip 60 可忽略)"
+  fi
+  _oc_unit="$(virt-cat -a "$DISK" /etc/systemd/system/opencode-web.service 2>/dev/null || true)"
+  if [[ -n "$_oc_unit" ]]; then
+    echo "$_oc_unit" | grep -E '^(User|WorkingDirectory|ExecStart|EnvironmentFile|Restart)=' | sed 's/^/    /'
+    echo "$_oc_unit" | grep -q '^User=root$' && echo "    [!] 单元 User=root (应为安装用户)"
+    echo "$_oc_unit" | grep -q 'serve --hostname 0.0.0.0 --port 4096' \
+      || echo "    [!] ExecStart 不是 opencode serve --hostname 0.0.0.0 --port 4096"
+  else
+    echo "    [!] 缺 opencode-web.service (若 --skip 60 可忽略)"
+  fi
+  if virt-cat -a "$DISK" /etc/opencode/web.env >/dev/null 2>&1; then
+    virt-cat -a "$DISK" /etc/opencode/web.env 2>/dev/null | grep -q '^OPENCODE_PASSWORD=' \
+      && echo "    /etc/opencode/web.env 含 OPENCODE_PASSWORD (不明文打印)"
+  else
+    echo "    [!] 缺 /etc/opencode/web.env (若 --skip 60 可忽略)"
+  fi
+  virt-ls -a "$DISK" /opt/provision 2>/dev/null | grep -qx 'opencode-web.secret' \
+    && echo "    [!] /opt/provision/opencode-web.secret 仍在 (应已删除)"
+
+  echo
   echo "==> Jenkins (30-jenkins.sh, 零配置):"
   if virt-ls -a "$DISK" /etc/systemd/system/multi-user.target.wants 2>/dev/null | grep -qx 'jenkins.service'; then
     echo "    jenkins.service enabled"
@@ -349,7 +374,7 @@ if command -v virt-cat >/dev/null 2>&1; then
   if virt-ls -a "$DISK" /etc/systemd/system/multi-user.target.wants 2>/dev/null | grep -qx 'avahi-daemon.service'; then
     echo "    avahi-daemon.service enabled"
   else
-    echo "    [!] avahi-daemon.service 未 enable (若 --skip 12 或 Gitea / Jenkins 都跳过可忽略)"
+    echo "    [!] avahi-daemon.service 未 enable (若 --skip 12 或 Gitea / Jenkins / OpenCode Web 都跳过可忽略)"
   fi
   virt-cat -a "$DISK" /etc/nsswitch.conf 2>/dev/null | grep '^hosts:' | sed 's/^/    /'
 
