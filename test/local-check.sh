@@ -2947,6 +2947,63 @@ else
   fail "qemu-smoke paths + new tools + guard-only"
 fi
 
+echo "== 13-no-dist-upgrade-prompt: Prompt=never 幂等 =="
+if [[ ! -x software/13-no-dist-upgrade-prompt.sh ]]; then
+  fail "13-no-dist-upgrade-prompt.sh missing or not executable"
+else
+  ru="$(mktemp -d)"
+  _ru_ok=1
+  # 文件不存在时创建 [DEFAULT] + Prompt=never；Desktop / Server 都写（无 EDITION 判断）
+  if ! EDITION=server AIB_TARGET_ROOT="$ru/a" bash software/13-no-dist-upgrade-prompt.sh >"$ru/a.log" 2>&1 \
+     || ! grep -qx '\[DEFAULT\]' "$ru/a/etc/update-manager/release-upgrades" \
+     || ! grep -qx 'Prompt=never' "$ru/a/etc/update-manager/release-upgrades" \
+     || [[ "$(stat -c %a "$ru/a/etc/update-manager/release-upgrades")" != 644 ]]; then
+    _ru_ok=0
+  fi
+  # 官方默认文件: 只改 Prompt, 注释和其它行保留; 跑两次幂等
+  mkdir -p "$ru/b/etc/update-manager" "$ru/b/var/lib/ubuntu-release-upgrader"
+  cat > "$ru/b/etc/update-manager/release-upgrades" <<'RU'
+# Default behavior for the release upgrader.
+
+[DEFAULT]
+# Default prompting and upgrade behavior, valid options:
+#
+#  never  - Never check for, or allow upgrading to, a new release.
+#  lts    - Check to see if a new LTS release is available.
+Prompt=lts
+RU
+  printf 'New release 26.04 available\n' > "$ru/b/var/lib/ubuntu-release-upgrader/release-upgrade-available"
+  for _ in 1 2; do
+    EDITION=desktop AIB_TARGET_ROOT="$ru/b" bash software/13-no-dist-upgrade-prompt.sh >"$ru/b.log" 2>&1 || _ru_ok=0
+  done
+  if [[ "$(grep -c '^Prompt=' "$ru/b/etc/update-manager/release-upgrades")" -ne 1 ]] \
+     || ! grep -qx 'Prompt=never' "$ru/b/etc/update-manager/release-upgrades" \
+     || ! grep -q 'Never check for' "$ru/b/etc/update-manager/release-upgrades" \
+     || grep -qE '^Prompt=lts' "$ru/b/etc/update-manager/release-upgrades" \
+     || [[ -e "$ru/b/var/lib/ubuntu-release-upgrader/release-upgrade-available" ]]; then
+    _ru_ok=0
+  fi
+  # 已有 [DEFAULT] 但没有 Prompt= 行
+  mkdir -p "$ru/c/etc/update-manager"
+  printf '%s\n' '[DEFAULT]' '# comment only' > "$ru/c/etc/update-manager/release-upgrades"
+  if ! AIB_TARGET_ROOT="$ru/c" bash software/13-no-dist-upgrade-prompt.sh >"$ru/c.log" 2>&1 \
+     || ! grep -qx 'Prompt=never' "$ru/c/etc/update-manager/release-upgrades" \
+     || ! grep -qx '# comment only' "$ru/c/etc/update-manager/release-upgrades"; then
+    _ru_ok=0
+  fi
+  # 最小改动: 脚本本体不碰 update-notifier 自启、apt periodic、restore-online-apt、gschema、systemctl
+  if grep -qE 'systemctl|gschema\.override|20auto-upgrades|10periodic|restore-online-apt|xdg/autostart' \
+        software/13-no-dist-upgrade-prompt.sh; then
+    _ru_ok=0
+  fi
+  if [[ "$_ru_ok" -eq 1 ]]; then
+    pass "13-no-dist-upgrade-prompt: create / replace Prompt=never, idempotent, clear stamp"
+  else
+    fail "13-no-dist-upgrade-prompt: $(tail -5 "$ru/a.log" "$ru/b.log" "$ru/c.log" 2>/dev/null)"
+  fi
+  rm -rf "$ru"
+fi
+
 echo "== shellcheck (if available) =="
 if command -v shellcheck >/dev/null; then
   if shellcheck -x build-iso.sh software/run-all.sh software/*.sh tools/fetch-offline-bundle.sh tools/ubuntu-mirror.sh tools/validate-offline-bundle.sh tools/apt-deb-reuse.sh \
