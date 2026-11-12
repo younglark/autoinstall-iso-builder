@@ -29,7 +29,6 @@ ENV_FILE="$R/etc/opencode/web.env"
 CFG_FILE="$R/etc/opencode/opencode.json"
 SECRET_FILE="$HERE/opencode-web.secret"
 RANDOM_PW_FILE="$R/root/opencode-web-password"
-NPM_PREFIX="${AIB_NPM_PREFIX:-/usr/local}"
 
 URL_HOST="localhost"
 if command -v aib_service_url_host >/dev/null 2>&1; then
