@@ -1764,7 +1764,7 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
       fail "gitea admin default credentials"
     fi
     if [[ -f "$dc/pv/opencode-web.secret" ]] && [[ "$(stat -c %a "$dc/pv/opencode-web.secret")" == 600 ]] \
-       && ! grep -q 'OPENCODE' "$dc/pv/provision.env" && ! grep -q 'ubuntu1990' "$dc/pv/provision.env" \
+       && ! grep -qE 'OPENCODE_(WEB_)?PASSWORD' "$dc/pv/provision.env" && ! grep -q 'ubuntu1990' "$dc/pv/provision.env" \
        && ( # shellcheck disable=SC1091
             . "$dc/pv/opencode-web.secret"; [[ "$OPENCODE_WEB_PASSWORD" == ubuntu1990 ]] ); then
       pass "opencode web password follows default credentials, not in provision.env"
