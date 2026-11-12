@@ -1,5 +1,5 @@
 #!/bin/bash
-# lib-service-url.sh — Gitea / Jenkins 对外 URL 的主机部分 (由 30-jenkins / 45-gitea / 12-avahi-mdns source)
+# lib-service-url.sh — Gitea / Jenkins / OpenCode Web 对外 URL 的主机部分 (由 30-jenkins / 45-gitea / 60-opencode / 12-avahi-mdns source)
 #
 # 优先级:
 #   1. SERVICE_URL_HOST (build-iso --service-url-host: IP / FQDN / localhost) 原样使用

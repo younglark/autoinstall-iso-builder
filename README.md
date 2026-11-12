@@ -33,7 +33,7 @@
 |---|---|---|
 | `00-base.sh` | 基础依赖 | `policy-rc.d` 拦住 chroot 里的服务启动；修 `resolv.conf`；apt 非交互；含 **git**、**ripgrep**（`rg`） |
 | `10-openssh.sh` | openssh-server | 幂等兜底，启用 `ssh.service` |
-| `12-avahi-mdns.sh` | Avahi（mDNS） | 预装了 Gitea 或 Jenkins 时启用：装 `avahi-daemon` + `libnss-mdns`（Desktop 自带则跳过 apt；Server 补装，离线走捆绑），enable `avahi-daemon`，让局域网能用 `<主机名>.local` 访问本机；ufw **已启用**时放行 `5353/udp`，不会主动启用 ufw。详见下文「Gitea / Jenkins 的访问地址」 |
+| `12-avahi-mdns.sh` | Avahi（mDNS） | 预装了 Gitea、Jenkins 或 OpenCode Web 时启用：装 `avahi-daemon` + `libnss-mdns`（Desktop 自带则跳过 apt；Server 补装，离线走捆绑），enable `avahi-daemon`，让局域网能用 `<主机名>.local` 访问本机；ufw **已启用**时放行 `5353/udp`，不会主动启用 ufw。详见下文「Gitea / Jenkins / OpenCode Web 的访问地址」 |
 | `13-no-dist-upgrade-prompt.sh` | 关闭大版本升级提示 | **Desktop / Server 默认生效**（无开关）。把 `/etc/update-manager/release-upgrades` 的 `Prompt=` 写成 `never`，不再提示升级到下一个 LTS（例如 24.04 → 26.04）。日常更新弹窗、update-notifier、unattended-upgrades、重启提示和 MOTD **保持原样**。`--no-provision` 或 `--skip 13` 时不改 |
 | `15-github-cli.sh` | GitHub CLI (`gh`) | 官方 apt 源（cli.github.com）；**不**执行 `gh auth` |
 | `20-docker.sh` | Docker CE | 官方仓库（非 `docker.io`），含 compose v2 / buildx，**配了日志轮转** |
@@ -48,7 +48,7 @@
 | `40-nodejs.sh` | Node.js 24 | NodeSource 优先，官方 tarball 兜底 |
 | `45-gitea.sh` | Gitea（最新稳定版，可 `--pin-gitea`） | 官方 linux-amd64 二进制（sha256 校验）→ `/usr/local/bin/gitea`；系统用户 `git`；SQLite；**装机阶段写好配置并创建管理员**，开机 `gitea.service` 自启。监听 **0.0.0.0:3000**（不与 Jenkins 8080 冲突），`ROOT_URL` 为 `http://<主机名>.local:3000/`，开放注册，LFS 开，`OFFLINE_MODE`。SSH 克隆走系统 OpenSSH：`git@host:user/repo.git` |
 | `50-grok.sh` | xAI Grok Build | `@xai-official/grok`，**官方包**，不是社区的 `@vibe-kit/grok-cli` |
-| `60-opencode.sh` | OpenCode | `opencode-ai` |
+| `60-opencode.sh` | OpenCode 2.x + Web | npm `@opencode/cli`（**不是** 1.x 的 `opencode-ai`）。开机启用 `opencode-web.service`（以安装用户运行），`opencode serve --hostname 0.0.0.0 --port 4096`；网页密码跟随 `--password`（HTTP Basic 用户名固定 `opencode`）。详见下文 |
 | `70-openmausbot.sh` | OpenMausBot | npm CLI + 一个**故意未启用**的 systemd 单元 |
 | `80-unity-cli.sh` | Unity CLI | 官方 CDN 二进制装到 `/usr/local/bin/unity`；**不含 Editor / 登录 / 许可证** |
 | `85-godot.sh` | Godot Engine 4.7.2 | 官方 Linux x86_64 标准编辑器 zip → `/opt/godot/4.7.2/` + `/usr/local/bin/godot`；**不含 export templates** |
@@ -249,17 +249,33 @@ RustDesk 在 Wayland 下连不了登录界面，会话里每次都要手动同�
 
 SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.ssh/authorized_keys`）。不要用 `--username git`（与该系统用户冲突）；若你事后在 sshd 里加了 `AllowUsers`，请把 `git` 加进去。
 
-### Gitea / Jenkins 的访问地址（`<主机名>.local`）
+### OpenCode Web：装完即可打开（需自行登录模型）
 
-装机时 `45-gitea.sh` / `30-jenkins.sh` 读取目标系统的 `/etc/hostname`（= 构建时 `--hostname`，默认 `ubuntu-node`），把对外 URL 写成：
+默认预装（`--skip 60` / `--skip 60-opencode` 可跳过），**Desktop 和 Server 都启用**。npm 包为 **`@opencode/cli`（OpenCode 2.x）**，不是 1.x 的 `opencode-ai`。`--pin-opencode` / `PIN_OPENCODE` 钉的是 `@opencode/cli` 的版本。
+
+装机时会：
+
+- 写入 `/etc/opencode/web.env`（root、0600，由 systemd `EnvironmentFile=` 读取），内容为 `OPENCODE_PASSWORD=...`（固定网页密码）。HTTP Basic 用户名固定为 `opencode`。明文来自 `--password`（都不传时为默认密码）；只给了 `--password-hash` 时生成随机密码写入 **`/root/opencode-web-password`**（root、0600）。构建时的明文单独放在 ISO 的 `/provision/opencode-web.secret`（0600，不进 `provision.env` / 构建日志），装机用完即删。
+- 写入 `/etc/opencode/opencode.json`（`{"update":"disable"}`），关闭自动更新。
+- 启用 `opencode-web.service`：系统单元，以安装用户（`--username`，**不是 root**）运行，`WorkingDirectory` 为该用户家目录，`After=` / `Wants=network-online.target`，`Restart=on-failure`。前台命令为 `opencode serve --hostname 0.0.0.0 --port 4096`。不启动远程隧道、不自动打开浏览器。防火墙规则不动。
+
+开机后浏览器打开 `http://<主机名>.local:4096/`（或 `http://<本机IP>:4096/`），用用户名 `opencode` 和上面的密码登录。**镜像不预装任何模型 API key**；首次使用请以该用户执行 `opencode auth login`，或在网页里登录模型提供商。
+
+**改网页密码**：编辑 `/etc/opencode/web.env` 里的 `OPENCODE_PASSWORD`（权限保持 0600），然后 `sudo systemctl restart opencode-web`。同时请尽快改系统用户密码（`passwd`）。若当初只给了 `--password-hash`，随机密码在 `/root/opencode-web-password`。
+
+### Gitea / Jenkins / OpenCode Web 的访问地址（`<主机名>.local`）
+
+
+装机时 `45-gitea.sh` / `30-jenkins.sh` / `60-opencode.sh` 读取目标系统的 `/etc/hostname`（= 构建时 `--hostname`，默认 `ubuntu-node`），把对外 URL 写成：
 
 | 服务 | 默认 URL | 写到哪里 |
 |---|---|---|
 | Gitea | `http://<主机名>.local:3000/` | `/etc/gitea/app.ini` `[server]` 段 `ROOT_URL`、`DOMAIN`、`SSH_DOMAIN` |
 | Jenkins | `http://<主机名>.local:8080/` | `/var/lib/jenkins/jenkins.model.JenkinsLocationConfiguration.xml` 的 `jenkinsUrl` |
+| OpenCode Web | `http://<主机名>.local:4096/` | 构建/装机日志提示；服务始终监听 `0.0.0.0:4096`，改主机名不必改单元 |
 
 - `.local` 靠 mDNS：`12-avahi-mdns.sh` 会装好并启用 Avahi（Desktop 自带；Server 补装 `avahi-daemon` + `libnss-mdns`）。macOS / iOS 原生支持；Windows 10 / 11 一般能直接解析；Linux 桌面装了 `libnss-mdns` 即可。
-- 想用 IP 或域名：构建时加 `--service-url-host 192.168.1.20`（或 `ci.example.com`、`localhost`），URL 变为 `http://192.168.1.20:3000/` 与 `http://192.168.1.20:8080/`。不要带 `http://` 或端口。
+- 想用 IP 或域名：构建时加 `--service-url-host 192.168.1.20`（或 `ci.example.com`、`localhost`），URL 变为 `http://192.168.1.20:3000/`、`:8080/` 与 `:4096/`。不要带 `http://` 或端口。
 - 服务仍监听 `0.0.0.0`，用 IP 照样能打开网页；URL 只影响页面上显示的克隆地址、Webhook / 构建链接、邮件里的链接。
 - 构建时会校验 `--hostname`：只能是小写字母、数字和中间的连字符，1–63 位，不能含点或下划线，不能以连字符开头或结尾（如 `ubuntu-node`、`node01`、`desk-01`）。不合法直接报错，不会自动改写。
 
@@ -280,12 +296,13 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
   sudo sed -i "s|<jenkinsUrl>[^<]*</jenkinsUrl>|<jenkinsUrl>http://$NEW.local:8080/</jenkinsUrl>|" \
     /var/lib/jenkins/jenkins.model.JenkinsLocationConfiguration.xml
   sudo systemctl restart jenkins
+  # OpenCode Web 只听端口，改主机名不必改服务配置；需要的话: sudo systemctl restart opencode-web
   sudo systemctl restart avahi-daemon
   ```
 
   换成 IP / 域名同理，把 `$NEW.local` 换成目标主机即可。
 - **Android、Docker 容器（包括 Jenkins 的 Docker agent）、跨网段 / VPN 访问时通常解析不了 `.local`**。流水线里克隆仓库建议用 IP，或构建时用 `--service-url-host` 指定 IP / 内网域名。
-- ufw 已启用时 `12-avahi-mdns.sh` 会放行 `5353/udp`；Gitea 3000 / Jenkins 8080 端口仍不自动放行。
+- ufw 已启用时 `12-avahi-mdns.sh` 会放行 `5353/udp`；Gitea 3000 / Jenkins 8080 / OpenCode Web 4096 端口仍不自动放行。
 
 ### 密钥一律不进镜像
 
@@ -294,7 +311,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 | 工具 | 首次使用 |
 |---|---|
 | Grok | `export XAI_API_KEY=xai-...`（CI 里走环境变量） |
-| OpenCode | `opencode auth login` |
+| OpenCode | 以安装用户执行 `opencode auth login`，或在 Web UI（`:4096`）里登录模型提供商。镜像**不**预装 API key |
 | OpenMausBot | 填 `/etc/openmausbot/env`（0600），再 `systemctl enable --now openmausbot` |
 | Unity CLI | 装机后 `unity auth login`，需要 Editor 再 `unity install <ver>`（镜像**不**预装 Editor） |
 | GitHub CLI | 装机后 `gh auth login`（镜像只预装二进制） |
@@ -303,7 +320,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 
 ### 容量与依赖提醒
 
-- 目标盘预留 **≥ 25 GB**（Docker 镜像 + Jenkins workspace 很吃空间）；这套预装本身约占 1.2–1.5 GB（另加 Godot 解压约 140 MB、Gitea 二进制约 115 MB、FlClash deb 约 40 MB、RustDesk deb 约 25 MB、Grok Bot deb 约 110 MB（装后约 370 MB），数据目录随后增长）。
+- 目标盘预留 **≥ 25 GB**（Docker 镜像 + Jenkins workspace 很吃空间）；这套预装本身约占 1.2–1.5 GB（另加 OpenCode 2 本机二进制约 250 MB；离线 npm 树会再保留同 arch 的 glibc baseline 变体，捆绑里约 500 MB。另加 Godot 解压约 140 MB、Gitea 二进制约 115 MB、FlClash deb 约 40 MB、RustDesk deb 约 25 MB、Grok Bot deb 约 110 MB（装后约 370 MB），数据目录随后增长）。
 - OpenMausBot 是 Electron 应用，npm 包会拉下较大体积的运行时；服务器上只用 `openmausbot serve`，不需要 X11。
 - 首次开机后要跑一次 `apt-get update`——`99-cleanup.sh` 为了缩体积清掉了 `/var/lib/apt/lists`。
 - 默认关闭**大版本发行版升级**提示（`/etc/update-manager/release-upgrades` 的 `Prompt=never`），避免弹出「可升级到 26.04」这类窗口。日常 Software Updater、安全更新自动安装和重启提示不受影响。若以后要升级发行版，把 `Prompt=` 改回 `lts` 或 `normal`，再运行 `do-release-upgrade`。
@@ -580,10 +597,10 @@ cat /var/log/autoinstall/20-docker.log
 | `--iso` / `--out` | 输入/输出路径，必填 |
 | `--password-hash` | **推荐**。`openssl passwd -6 '密码'` 的结果 |
 | `--password` | 明文，脚本自动哈希；会进 shell 历史，仅调试用 |
-| `--hostname` | 默认 `ubuntu-node`。必须是单个主机名标签：小写字母 / 数字 / 中间的连字符，1–63 位，不能含点或下划线（不合法直接报错）。Gitea / Jenkins URL 默认用 `<hostname>.local`，**每台机器请用不同的名字** |
-| `--service-url-host H` | 覆盖 Gitea / Jenkins URL 的主机部分（IPv4、FQDN 或 `localhost`），如 `--service-url-host 192.168.1.20` → `http://192.168.1.20:3000/` 与 `:8080/`。Gitea、Jenkins 都 `--skip` 时忽略 |
+| `--hostname` | 默认 `ubuntu-node`。必须是单个主机名标签：小写字母 / 数字 / 中间的连字符，1–63 位，不能含点或下划线（不合法直接报错）。Gitea / Jenkins / OpenCode Web URL 默认用 `<hostname>.local`，**每台机器请用不同的名字** |
+| `--service-url-host H` | 覆盖 Gitea / Jenkins / OpenCode Web URL 的主机部分（IPv4、FQDN 或 `localhost`），如 `--service-url-host 192.168.1.20` → `http://192.168.1.20:3000/`、`:8080/` 与 `:4096/`。三者都 `--skip` 时忽略 |
 | `--username` | 默认 `ubuntu`（`git` 与 Gitea 系统用户冲突，会被拒绝） |
-| （都不传密码） | `--password` / `--password-hash` 都没给时，使用**默认密码 `ubuntu1990`**（构建时告警），Gitea / Jenkins 管理员同样是 `ubuntu` / `ubuntu1990`。这是公开的默认值，**装完请立即改**：`passwd`，并在 Gitea / Jenkins 网页里改管理员密码 |
+| （都不传密码） | `--password` / `--password-hash` 都没给时，使用**默认密码 `ubuntu1990`**（构建时告警），Gitea / Jenkins 管理员以及 OpenCode Web 同样跟随该默认值。这是公开的默认值，**装完请立即改**：`passwd`，并在 Gitea / Jenkins 网页里改管理员密码；OpenCode Web 改 `/etc/opencode/web.env` 的 `OPENCODE_PASSWORD` 后 `sudo systemctl restart opencode-web` |
 | `--packages` | 逗号分隔、**不要空格**（如 `vim,curl,htop`）；走 subiquity 的 apt（第三方包走 `software/`） |
 | `--mirror` | 默认清华 `https://mirrors.tuna.tsinghua.edu.cn/ubuntu`（含 `-security`；缺 CA 时先 http 引导），写入 autoinstall `apt.primary`，**装完系统 apt 也用这个源**。内网源或官方源请显式覆盖，例如 `--mirror http://archive.ubuntu.com/ubuntu`。`build-iso.sh --fetch-offline` 会把同一 URL 传给抓包 |
 | `--no-provision` | 不执行 `software/`，只做裸装机 |
@@ -602,7 +619,7 @@ cat /var/log/autoinstall/20-docker.log
 | `--iso-sha256 HEX` | 可选源 ISO SHA256；不匹配立即失败 |
 | `--iso-sha256sums FILE` | 按 ISO basename 在 SHA256SUMS 文件中查找校验和；优先于 `--iso-sha256` |
 | `--pin-node N` | Node 主版本（默认 24）；环境变量 `PIN_NODE_MAJOR` |
-| `--pin-grok / --pin-opencode / --pin-openmausbot VER` | npm 包版本（默认 latest）；亦可用 `PIN_GROK` / `PIN_OPENCODE` / `PIN_OPENMAUSBOT` |
+| `--pin-grok / --pin-opencode / --pin-openmausbot VER` | npm 包版本（默认 latest）；`--pin-opencode` 钉的是 `@opencode/cli`（OpenCode 2.x）。亦可用 `PIN_GROK` / `PIN_OPENCODE` / `PIN_OPENMAUSBOT` |
 | `--pin-unity-cli VER` | Unity CLI 版本（默认拉 stable，若无则 beta）；亦可用 `PIN_UNITY_CLI` |
 | `--pin-gitea VER` | Gitea 版本（默认 `latest`，从 `dl.gitea.com/gitea/version.json` 解析；亦可 `PIN_GITEA=28.3.0`） |
 | `--no-flclash` | 不预装 FlClash（等价 `--skip 37` / `--skip 37-flclash`）。Desktop 默认预装最新稳定版（官方 GitHub Release + `SHA256SUMS`） |
@@ -711,7 +728,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 体积与缓存：
 
 - 捆绑按 `cache/offline-bundles/<release>-<arch>/` 存放；`manifest.json` 含 `fingerprint`（schema 3：release/arch/pins/seeds，含 `apt-sources`、Jenkins 插件列表与解析器指纹）。指纹一致才复用，否则或旧格式需 `--force` 重建。构建时 `validate-offline-bundle.sh` 会核对 apt 种子包、`apt-sources/` keyring+list，以及 `unity-cli/`、`godot/`、`gitea/`、`jenkins-plugins/`（lock 里每个插件都在且 sha256 与 lock 一致、请求列表与 `--jenkins-plugins` 一致）等目录；失败则提示 `--force` / `--force-fetch`。
-- **Avahi（2026-11 加入）**：`avahi-daemon` / `libnss-mdns` 没有计入指纹（Desktop 自带，旧捆绑照样能用）。**Server** 全离线构建且预装 Gitea 或 Jenkins 时，`build-iso.sh` 会让 validate 检查这两个包；之前抓的捆绑里没有，会报缺包，加 `--force-fetch`（或 `fetch-offline-bundle.sh --force`）重抓一次即可。
+- **Avahi（2026-11 加入）**：`avahi-daemon` / `libnss-mdns` 没有计入指纹（Desktop 自带，旧捆绑照样能用）。**Server** 全离线构建且预装 Gitea、Jenkins 或 OpenCode Web 时，`build-iso.sh` 会让 validate 检查这两个包；之前抓的捆绑里没有，会报缺包，加 `--force-fetch`（或 `fetch-offline-bundle.sh --force`）重抓一次即可。旧离线捆绑若仍含 `opencode-ai`（1.x）而不含 `@opencode/cli`，指纹 schema 已升到 4，必须 `--force-fetch` 重建。
 - **避免重复下载**（`--force` 也一样）：抓包前先按「空缓存」解析出本次需要的全部 deb（文件名 + 大小 + Packages 索引里的哈希），从本地 deb 缓存 `cache/apt-archives/<release>-<arch>/` 和旧捆绑的 `apt/` 里把**文件名、大小、哈希都一致**的直接放进 apt 的 archives 目录（apt 跳过下载前还会按索引里的 SHA256/SHA512 再校验一次，不一致就重下），apt 只下载缺的；新下的 deb 回写缓存。日志会打印「复用 N，新下载 M」。Unity CLI / Gitea / Godot / FlClash / Jenkins 插件 / Node tarball 在版本不变且校验和一致时也直接用旧捆绑里的文件。缓存只增不删，`--prune-apt-cache` 清掉本次没用到的；`--apt-cache DIR` 换位置，`--no-apt-cache` 不用缓存。指纹只看捆绑内容和参数，跟缓存无关；产出和不用缓存时一样（同一批 deb）。
 - **NVIDIA 驱动（2026-11 加入）**：捆绑多了 `nvidia/`（`driver` + `flavours`，每行 `<flavour> <模块/内核 meta 版本> <内核 ABI>`），apt 池里多了 `nvidia-driver-595-open`、`nvidia-settings`、`nvidia-prime`、预编译模块、同版本内核（默认 `generic-hwe-24.04` 和 `generic` 两套，`fetch-offline-bundle.sh --nvidia-kernel-flavours "…"` 可改）、`intel-media-va-driver-non-free`、`vainfo` 及依赖闭包，约 **+0.8–1.0 GB**。`linux-firmware*`（约 600 MB）故意不收（目标机已装；要收就设 `FETCH_KEEP_LINUX_FIRMWARE=1`）。指纹变了，旧捆绑需 `--force-fetch` 重建（deb 走缓存复用）。不要驱动：`fetch-offline-bundle.sh --no-nvidia-driver` 配合 `build-iso.sh --no-nvidia-driver`。
 - `--fetch-offline` 用 **ISO 识别到的 release**（非仅文件名）选 jammy/noble；加 `--force-fetch` 等价于给 fetch 传 `--force`。
@@ -748,7 +765,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 2. `xorriso -indev out.iso -report_el_torito plain` 里 **BIOS 与 UEFI 两个引导项都在**。
 3. 虚拟机 BIOS + UEFI 各装一次，`virt-cat` 读到的 `/var/log/autoinstall/manifest.txt` 里 git / gh / rg / docker / nvidia-ctk / node / grok / opencode / openmausbot / unity / godot / gitea 都有版本号。
 4. `provision-failed.txt` 为空。
-5. 重启后 `systemctl status docker jenkins ssh gitea` 都是 active；浏览器打开 `http://<主机名>.local:3000/`（或 `http://<IP>:3000/`）能进（开放注册），页面上的克隆地址是 `<主机名>.local`，用构建时的管理员账号即可登录；`http://<IP>:8080/` 直接是 Jenkins 登录页（无安装向导），同一账号登录后“插件管理 → 已安装”里 Pipeline / Git / Gitea 等全部启用。
+5. 重启后 `systemctl status docker jenkins ssh gitea opencode-web` 都是 active；浏览器打开 `http://<主机名>.local:3000/`（或 `http://<IP>:3000/`）能进（开放注册），页面上的克隆地址是 `<主机名>.local`，用构建时的管理员账号即可登录；`http://<IP>:8080/` 直接是 Jenkins 登录页（无安装向导），同一账号登录后“插件管理 → 已安装”里 Pipeline / Git / Gitea 等全部启用；`http://<IP>:4096/` 为 OpenCode Web（Basic 用户名 `opencode`，密码跟随系统密码），需自行 `opencode auth login` 或在网页登录模型。
 
 ---
 
@@ -771,7 +788,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 | `docker run --gpus` 失败 | 驱动没装上（`--no-nvidia-driver`，或 `24` 因版本不匹配跳过），或装完还没重启 | 看 `/var/log/autoinstall/24-nvidia-driver.log` 里的 `SKIP:` 原因；重启后 `nvidia-smi`。无 GPU 的 VM 只能验证 `nvidia-ctk --version` / daemon.json |
 | `unity` 能跑但装不了 Editor / 未登录 | **镜像只预装 CLI** | 装机后 `unity auth login`，再 `unity install <ver>`；许可证另激活 |
 | 浏览器打不开 Gitea | 服务未起或防火墙 | `systemctl status gitea`；确认本机防火墙未拦 3000 端口（脚本**不**改防火墙） |
-| `<主机名>.local` 打不开 / 解析失败 | 客户端不支持 mDNS（Android、容器、跨网段），主机名重名被 Avahi 改成 `xxx-2.local`，或装完改过主机名 | 先用 `http://<IP>:3000/` 确认服务正常；`avahi-resolve -n <主机名>.local`、`systemctl status avahi-daemon`；重名或改名按「Gitea / Jenkins 的访问地址」里的命令同步 URL；需要稳定地址时构建用 `--service-url-host` |
+| `<主机名>.local` 打不开 / 解析失败 | 客户端不支持 mDNS（Android、容器、跨网段），主机名重名被 Avahi 改成 `xxx-2.local`，或装完改过主机名 | 先用 `http://<IP>:3000/` 确认服务正常；`avahi-resolve -n <主机名>.local`、`systemctl status avahi-daemon`；重名或改名按「Gitea / Jenkins / OpenCode Web 的访问地址」里的命令同步 URL；需要稳定地址时构建用 `--service-url-host` |
 | 忘记 Gitea 管理员密码 | 只给了 `--password-hash` 构建 | 看 `/root/gitea-admin-password`（root 0600）；若用了 `--password`，密码与系统用户相同（装完请改掉） |
 | `git@host:...` SSH 克隆被拒 | `AllowUsers` 没包含 `git`，或没把公钥加到 Gitea | 系统 OpenSSH + 用户 `git`；在 Gitea 里给用户添加 SSH 公钥。sshd 默认没有 `AllowUsers` |
 | `openmausbot` 打不开窗口 | 它是 Electron 应用 | 服务器上只能用 `openmausbot serve` |
@@ -814,7 +831,7 @@ xorriso -indev ubuntu.iso -outdev out.iso \
 
 ## 落盘前最后确认
 
-- 口令是哈希，不是明文；哈希本身也别提交到公开仓库。若用 `--password` 构建，Gitea / Jenkins 管理员明文会短暂出现在 ISO 的 `/provision/gitea-admin.secret` / `jenkins-admin.secret`（0600），装机后从目标机删除；拿到 ISO 的人在安装前仍可能读到，请勿把此类 ISO 公开分发。
+- 口令是哈希，不是明文；哈希本身也别提交到公开仓库。若用 `--password` 构建，Gitea / Jenkins 管理员以及 OpenCode Web 明文会短暂出现在 ISO 的 `/provision/gitea-admin.secret` / `jenkins-admin.secret` / `opencode-web.secret`（0600），装机后从目标机删除；拿到 ISO 的人在安装前仍可能读到，请勿把此类 ISO 公开分发。
 - 没有任何 API key / 私钥进镜像。SSH **公钥**可通过 `--ssh-authorized-keys` 注入，属于公开信息；私钥绝不注入。
 - 目标机磁盘 ≥ 25 GB，且装机时能访问 cli.github.com / docker.com / nvidia.github.io / pkg.jenkins.io / deb.nodesource.com / packages.microsoft.com（Desktop 上的 Microsoft Edge） / npm registry / unity.com（install.sh）与 `public-cdn.cloud.unity3d.com`（Unity CLI 二进制）、`github.com/godotengine/godot` 或 `downloads.godotengine.org`（Godot 4.7.2），`github.com/chen08209/FlClash`（Desktop 上的 FlClash linux `.deb` 与 `SHA256SUMS`）、`github.com/rustdesk/rustdesk`（Desktop 上的 RustDesk `.deb`；非默认版本还要 `api.github.com` 查 sha256）、`api2.cursor.sh` 与 `downloads.cursor.com`（Desktop 上的 Grok Bot `.deb` 和它的签名 apt 源；国内可能慢或被拦截），以及 `dl.gitea.com`（Gitea 二进制与 sha256）与 `updates.jenkins.io` 及其下载镜像（Jenkins 插件）。全离线捆绑可免除这些外网依赖。
 

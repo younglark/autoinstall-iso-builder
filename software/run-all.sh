@@ -114,7 +114,7 @@ for s in "$HERE"/[0-9][0-9]-*.sh; do
 done
 
 # Gitea 管理员明文密码文件: 45-gitea 用后会删; 被 --skip 或失败时这里兜底删除
-rm -f "$HERE/gitea-admin.secret" "$HERE/jenkins-admin.secret" "$HERE/x11vnc.secret" "$HERE/rustdesk.secret"
+rm -f "$HERE/gitea-admin.secret" "$HERE/jenkins-admin.secret" "$HERE/x11vnc.secret" "$HERE/rustdesk.secret" "$HERE/opencode-web.secret"
 
 echo "--------------------------------------------------------------"
 echo "完成:$DONE"

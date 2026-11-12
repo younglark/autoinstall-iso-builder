@@ -93,7 +93,7 @@ PIN_NVIDIA_DRIVER="${PIN_NVIDIA_DRIVER:-595}"
 NVIDIA_KERNEL_FLAVOUR="${NVIDIA_KERNEL_FLAVOUR:-}"   # 空 = 装机时按已装内核 meta 自动判断
 # Gitea / Jenkins 对外 URL 主机: 默认 <hostname>.local (mDNS); --service-url-host 覆盖 (IP / FQDN / localhost)
 SERVICE_URL_HOST=""
-MDNS_AVAHI=0        # 内部: Gitea 或 Jenkins 未被 --skip 时为 1 (12-avahi-mdns.sh 装 Avahi)
+MDNS_AVAHI=0        # 内部: Gitea / Jenkins / OpenCode Web 未被 --skip 时为 1 (12-avahi-mdns.sh 装 Avahi)
 
 usage() {
   cat <<'USAGE'
@@ -146,7 +146,7 @@ usage() {
   --skip "30 70"        跳过脚本: 编号前缀或完整名均可 (30 或 30-jenkins)
   --pin-node N          Node 主版本, 默认 24 (也可用环境变量 PIN_NODE_MAJOR)
   --pin-grok VER        npm 版 @xai-official/grok, 默认 latest (PIN_GROK)
-  --pin-opencode VER    npm 版 opencode-ai, 默认 latest (PIN_OPENCODE)
+  --pin-opencode VER    npm 版 @opencode/cli (OpenCode 2.x), 默认 latest (PIN_OPENCODE)
   --pin-openmausbot VER npm 版 openmausbot, 默认 latest (PIN_OPENMAUSBOT)
   --pin-unity-cli VER  Unity CLI 版本, 默认拉 latest/latest-beta (PIN_UNITY_CLI)
   --pin-gitea VER       Gitea 版本 (如 28.3.0), 默认 latest (PIN_GITEA)
@@ -434,24 +434,25 @@ if ! should_skip_script 45-gitea && [[ "$USERNAME_" == "git" ]]; then
   die "--username git 与 Gitea 的系统用户 git 冲突; 换个用户名, 或 --skip 45 不装 Gitea"
 fi
 
-# Gitea / Jenkins 对外 URL (装机时由钩子按目标机 /etc/hostname 落地; 这里只决定是否装 Avahi 并提示)
-if [[ "$PROVISION" -eq 1 ]] && { ! should_skip_script 30-jenkins || ! should_skip_script 45-gitea; }; then
+# Gitea / Jenkins / OpenCode Web 对外 URL (装机时由钩子按目标机 /etc/hostname 落地; 这里只决定是否装 Avahi 并提示)
+if [[ "$PROVISION" -eq 1 ]] && { ! should_skip_script 30-jenkins || ! should_skip_script 45-gitea || ! should_skip_script 60-opencode; }; then
   if [[ -n "$SERVICE_URL_HOST" ]]; then
     _url_host="$SERVICE_URL_HOST"
   else
     _url_host="$HOSTNAME_.local"
   fi
   MDNS_AVAHI=1
-  should_skip_script 45-gitea   || log "Gitea URL: http://$_url_host:3000/"
-  should_skip_script 30-jenkins || log "Jenkins URL: http://$_url_host:8080/"
+  should_skip_script 45-gitea     || log "Gitea URL: http://$_url_host:3000/"
+  should_skip_script 30-jenkins   || log "Jenkins URL: http://$_url_host:8080/"
+  should_skip_script 60-opencode  || log "OpenCode Web URL: http://$_url_host:4096/"
   if should_skip_script 12-avahi-mdns; then
     warn "--skip 跳过了 12-avahi-mdns: 不装 / 不启用 Avahi, $HOSTNAME_.local 可能无法解析"
   fi
   if [[ -z "$SERVICE_URL_HOST" ]]; then
-    warn "Gitea / Jenkins URL 用 $HOSTNAME_.local (mDNS): 同一网络里每台机器要用不同的 --hostname (重名时 Avahi 会改成 $HOSTNAME_-2.local, URL 失效); 装完改主机名 URL 不会跟着变; Android / Docker 容器 / 跨网段通常解析不了 .local, 可用 --service-url-host 改成 IP 或域名"
+    warn "Gitea / Jenkins / OpenCode Web URL 用 $HOSTNAME_.local (mDNS): 同一网络里每台机器要用不同的 --hostname (重名时 Avahi 会改成 $HOSTNAME_-2.local, URL 失效); 装完改主机名 URL 不会跟着变; Android / Docker 容器 / 跨网段通常解析不了 .local, 可用 --service-url-host 改成 IP 或域名"
   fi
 elif [[ -n "$SERVICE_URL_HOST" ]]; then
-  warn "--service-url-host 只用于预装的 Gitea / Jenkins; 两者都没装 (--skip / --no-provision), 忽略"
+  warn "--service-url-host 只用于预装的 Gitea / Jenkins / OpenCode Web; 都没装 (--skip / --no-provision), 忽略"
 fi
 
 # SSH: allow-pw=false 且无公钥 → 装完登不进, 构建期直接拒绝
@@ -466,7 +467,7 @@ if [[ "$_ssh_allow" == "false" && "$_has_keys" -eq 0 ]]; then
 fi
 
 if [[ "$USED_DEFAULT_PASSWORD" -eq 1 ]]; then
-  warn "未传 --password / --password-hash: 使用默认密码 (用户 $USERNAME_; Gitea/Jenkins 管理员同此)。这是公开的默认值, 装完请立即修改: passwd + Gitea/Jenkins 网页改密"
+  warn "未传 --password / --password-hash: 使用默认密码 (用户 $USERNAME_; Gitea/Jenkins 管理员、OpenCode Web 同此)。这是公开的默认值, 装完请立即修改: passwd + Gitea/Jenkins/OpenCode Web 改密"
 fi
 if [[ -z "$PASS_HASH" ]]; then
   command -v openssl >/dev/null || die "缺少 openssl, 无法哈希密码"
@@ -991,6 +992,14 @@ if [[ "$PROVISION" -eq 1 ]]; then
     ok "RustDesk: 固定密码随 ISO 投递 (首次开机设置后删除明文)"
   elif [[ "$REMOTE_DESKTOP" == "rustdesk" ]] && ! should_skip_script 38-rustdesk; then
     warn "RustDesk: 无明文密码 (只给了 --password-hash), 装机生成随机密码 → /root/rustdesk-password"
+  fi
+  # OpenCode Web 明文密码同理: 0600 文件, 60-opencode.sh 写入 /etc/opencode/web.env 后删除
+  if [[ -n "$PASS_PLAIN" ]] && ! should_skip_script 60-opencode; then
+    ( umask 077; printf 'OPENCODE_WEB_PASSWORD=%q\n' "$PASS_PLAIN" > "$WORK/provision/opencode-web.secret" )
+    chmod 0600 "$WORK/provision/opencode-web.secret"
+    ok "OpenCode Web: 密码随 ISO 投递 (装机时写 /etc/opencode/web.env, 删除明文)"
+  elif ! should_skip_script 60-opencode; then
+    warn "OpenCode Web: 无明文密码 (只给了 --password-hash), 装机生成随机密码 → /root/opencode-web-password"
   fi
   SCRIPT_COUNT=$(find "$WORK/provision" -maxdepth 1 -name '[0-9][0-9]-*.sh' | wc -l)
   ok "已打包 $SCRIPT_COUNT 个软件预装脚本 (node>=$PIN_NODE_MAJOR grok=$PIN_GROK)"
