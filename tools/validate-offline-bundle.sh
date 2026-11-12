@@ -356,22 +356,54 @@ fi
 if [[ "$need_npm" -eq 1 ]]; then
   [[ -f "$BUNDLE/npm/prefix.tar.gz" ]] || missing_dirs+=("npm/prefix.tar.gz")
   if [[ -f "$BUNDLE/npm/prefix.tar.gz" ]] && ! should_skip 60-opencode; then
-    if ! tar -tzf "$BUNDLE/npm/prefix.tar.gz" | grep -q '/@opencode/cli/'; then
-      missing_dirs+=("npm/prefix.tar.gz 缺少 @opencode/cli (旧捆绑是 opencode-ai, 请 --force-fetch 重建)")
-    else
-      # postinstall 后的真正二进制应远大于桩
-      _oc_sz="$(python3 -c '
-import tarfile, sys
-sz = 0
+    # 用 Python 一次读完 tar: 避免 set -o pipefail 下 `tar | grep -q` 因 SIGPIPE (141)
+    # 把“已找到 @opencode/cli”误判成缺失。opencode.exe 在打包后常是指向
+    # cli-linux-*/bin/opencode 的硬链接, tar 里自身 size=0, 要解析 link 目标大小。
+    _oc_chk="$(python3 -c '
+import os, tarfile, sys
+
+def resolve_size(index, m, seen=None):
+    if m.size:
+        return m.size
+    if not m.islnk():
+        return 0
+    seen = seen or set()
+    if m.name in seen:
+        return 0
+    seen.add(m.name)
+    tgt = m.linkname
+    cand = index.get(tgt) or index.get(tgt.lstrip("./")) or index.get("./" + tgt.lstrip("./"))
+    if cand is None:
+        cand = index.get(os.path.normpath(os.path.join(os.path.dirname(m.name), tgt)))
+    if cand is None:
+        return 0
+    return resolve_size(index, cand, seen)
+
+has, sz = False, 0
 with tarfile.open(sys.argv[1], "r:gz") as t:
-    for m in t.getmembers():
-        if "/@opencode/cli/bin/opencode.exe" in m.name:
-            sz = max(sz, m.size)
-print(sz)
+    members = t.getmembers()
+    index = {}
+    for m in members:
+        index[m.name] = m
+        index[m.name.lstrip("./")] = m
+        index["./" + m.name.lstrip("./")] = m
+    for m in members:
+        n = m.name
+        if "/@opencode/cli/" in n or n.rstrip("/").endswith("/@opencode/cli"):
+            has = True
+        if (
+            "/@opencode/cli/bin/opencode.exe" in n
+            or ("/@opencode/cli-linux-" in n and n.endswith("/bin/opencode"))
+        ):
+            sz = max(sz, resolve_size(index, m))
+print("1" if has else "0", sz)
 ' "$BUNDLE/npm/prefix.tar.gz")"
-      if [[ "${_oc_sz:-0}" -lt 10000000 ]]; then
-        missing_dirs+=("npm 里的 opencode 二进制过小 (${_oc_sz:-0} 字节, 可能没跑 postinstall); 请 --force-fetch 重建")
-      fi
+    _oc_has="${_oc_chk%% *}"
+    _oc_sz="${_oc_chk##* }"
+    if [[ "$_oc_has" != "1" ]]; then
+      missing_dirs+=("npm/prefix.tar.gz 缺少 @opencode/cli (旧捆绑是 opencode-ai, 请 --force-fetch 重建)")
+    elif [[ "${_oc_sz:-0}" -lt 10000000 ]]; then
+      missing_dirs+=("npm 里的 opencode 二进制过小 (${_oc_sz:-0} 字节, 可能没跑 postinstall); 请 --force-fetch 重建")
     fi
   fi
 fi

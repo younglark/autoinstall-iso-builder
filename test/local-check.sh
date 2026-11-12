@@ -2949,6 +2949,86 @@ else
   fail "validate-offline-bundle helper"
 fi
 
+echo "== validate npm @opencode/cli: pipefail SIGPIPE + hardlink size =="
+ocv="$(mktemp -d)"
+# 合成 prefix: 平台二进制在前 (真实 size), opencode.exe 是硬链接 (tar 里 size=0),
+# 后面再跟一块不易压缩的填充, 让 `tar -tzf | grep -q` 在 set -o pipefail 下触发 SIGPIPE。
+mkdir -p "$ocv/prefix/lib/node_modules/@opencode/cli/bin" \
+         "$ocv/prefix/lib/node_modules/@opencode/cli/node_modules/@opencode/cli-linux-x64/bin"
+dd if=/dev/urandom of="$ocv/prefix/lib/node_modules/@opencode/cli/node_modules/@opencode/cli-linux-x64/bin/opencode" bs=1M count=12 status=none
+ln "$ocv/prefix/lib/node_modules/@opencode/cli/node_modules/@opencode/cli-linux-x64/bin/opencode" \
+   "$ocv/prefix/lib/node_modules/@opencode/cli/bin/opencode.exe"
+dd if=/dev/urandom of="$ocv/prefix/padding.bin" bs=1M count=16 status=none
+printf '{"name":"@opencode/cli","version":"2.2.7"}\n' > "$ocv/prefix/lib/node_modules/@opencode/cli/package.json"
+tar --owner=0 --group=0 --numeric-owner -czf "$ocv/prefix.tar.gz" \
+  -C "$ocv/prefix" \
+  lib/node_modules/@opencode/cli/package.json \
+  lib/node_modules/@opencode/cli/node_modules/@opencode/cli-linux-x64/bin/opencode \
+  lib/node_modules/@opencode/cli/bin/opencode.exe \
+  padding.bin
+# (1) 旧写法在 pipefail 下应非 0 (常见 141 SIGPIPE), 虽然包其实在
+_old_rc=0
+set +e
+(
+  set -euo pipefail
+  tar -tzf "$ocv/prefix.tar.gz" | grep -q '/@opencode/cli/'
+)
+_old_rc=$?
+set -e
+# (2) 只看 opencode.exe 成员的 size 应为 0 (硬链接)
+_naive_sz="$(python3 -c '
+import tarfile, sys
+sz = 0
+with tarfile.open(sys.argv[1], "r:gz") as t:
+    for m in t.getmembers():
+        if "/@opencode/cli/bin/opencode.exe" in m.name:
+            sz = max(sz, m.size)
+print(sz)
+' "$ocv/prefix.tar.gz")"
+# 假捆绑: 只测 60-opencode, 其它脚本都 skip
+mkdir -p "$ocv/b/apt" "$ocv/b/apt-sources/keyrings" "$ocv/b/apt-sources/sources.list.d" "$ocv/b/npm"
+for p in git ripgrep openssh-server ca-certificates curl; do
+  printf 'Package: %s\nVersion: 1\n\n' "$p" >> "$ocv/b/apt/Packages"
+done
+for f in docker.asc githubcli-archive-keyring.gpg nvidia-container-toolkit.asc jenkins-keyring.asc nodesource.gpg microsoft-edge.gpg; do
+  : > "$ocv/b/apt-sources/keyrings/$f"
+done
+for f in docker.list github-cli.list nvidia-container-toolkit.list jenkins.list nodesource.sources microsoft-edge.sources; do
+  : > "$ocv/b/apt-sources/sources.list.d/$f"
+done
+echo '{"schema":4,"release":"noble","fingerprint":"x","pins":{}}' > "$ocv/b/manifest.json"
+cp "$ocv/prefix.tar.gz" "$ocv/b/npm/prefix.tar.gz"
+_oc_skip="15 20 24 25 30 35 36 37 38 39 40 45 50 70 80 85"
+if [[ "$_old_rc" -ne 0 && "$_naive_sz" == 0 ]] \
+   && bash tools/validate-offline-bundle.sh --bundle "$ocv/b" --skip "$_oc_skip" >"$ocv/ok.log" 2>&1; then
+  pass "validate accepts @opencode/cli hardlink + large tarball (old tar|grep -q rc=$_old_rc, naive exe size=0)"
+else
+  fail "validate npm hardlink/SIGPIPE: old_rc=$_old_rc naive_sz=$_naive_sz log=$(tail -5 "$ocv/ok.log" 2>/dev/null)"
+fi
+# 桩二进制 (普通小文件, 无平台包) 应判过小
+mkdir -p "$ocv/stub/lib/node_modules/@opencode/cli/bin"
+printf 'stub\n' > "$ocv/stub/lib/node_modules/@opencode/cli/bin/opencode.exe"
+tar --owner=0 --group=0 --numeric-owner -czf "$ocv/b/npm/prefix.tar.gz" -C "$ocv/stub" .
+if bash tools/validate-offline-bundle.sh --bundle "$ocv/b" --skip "$_oc_skip" >"$ocv/stub.log" 2>&1; then
+  fail "validate should reject stub opencode.exe"
+elif grep -q '二进制过小' "$ocv/stub.log"; then
+  pass "validate rejects stub-sized opencode.exe"
+else
+  fail "validate stub message: $(tail -3 "$ocv/stub.log")"
+fi
+# 没有 @opencode/cli 的旧树
+mkdir -p "$ocv/old/lib/node_modules/opencode-ai"
+echo ok > "$ocv/old/lib/node_modules/opencode-ai/index.js"
+tar --owner=0 --group=0 --numeric-owner -czf "$ocv/b/npm/prefix.tar.gz" -C "$ocv/old" .
+if bash tools/validate-offline-bundle.sh --bundle "$ocv/b" --skip "$_oc_skip" >"$ocv/miss.log" 2>&1; then
+  fail "validate should reject missing @opencode/cli"
+elif grep -q '缺少 @opencode/cli' "$ocv/miss.log"; then
+  pass "validate rejects old opencode-ai npm tree"
+else
+  fail "validate missing-pkg message: $(tail -3 "$ocv/miss.log")"
+fi
+rm -rf "$ocv"
+
 echo "== apt-sources seed wiring =="
 if grep -q 'apt-sources' tools/fetch-offline-bundle.sh \
   && grep -q 'nodesource.gpg' tools/fetch-offline-bundle.sh \
