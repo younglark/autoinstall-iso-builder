@@ -34,11 +34,16 @@
 #     apt 只下载缺的。新下的 deb 回写缓存。缓存默认只增不删 (--prune-apt-cache 清掉本次不用的)。
 #   * Unity CLI / Gitea / Godot / FlClash / RustDesk / Grok Bot / Jenkins 插件 / Node tarball: 版本不变且校验和一致时复用旧捆绑里的文件。
 #   指纹只描述捆绑内容/参数, 与缓存无关。
+#   --out / --apt-cache 可以在 exFAT / FAT / NTFS (如 Ventoy 移动硬盘) 上:
+#   写入不保留 Unix 所有权, 也不依赖可执行位或软链接 (npm 树打成 prefix.tar.gz)。
+#   先在临时目录把新捆绑做完, 成功后再替换 --out, 失败时旧目录保持原样。
 # =============================================================================
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/apt-deb-reuse.sh"
 
 RELEASE="noble"          # jammy|noble
 ARCH="amd64"
@@ -84,7 +89,8 @@ usage() {
 选项:
   --release NAME        jammy (22.04) 或 noble (24.04), 默认 noble
   --arch ARCH           默认 amd64
-  --out DIR             输出目录 (建议 cache/offline-bundles/noble-amd64)
+  --out DIR             输出目录 (建议 cache/offline-bundles/noble-amd64);
+                        可放在 exFAT / FAT / NTFS (如 Ventoy 盘), 写入不保留 Unix 所有权
   --packages "a,b,c"    额外 apt 包 (与 build-iso --packages 对齐)
   --cache-root DIR      捆绑缓存根目录, 默认 ./cache/offline-bundles
   --pin-node N          Node 主版本, 默认 24
@@ -119,7 +125,8 @@ usage() {
   --force               忽略已有 manifest/fingerprint, 强制重建 (参数变更或缺件时需 --force);
                         仍会复用缓存/旧捆绑里 sha256 一致的 deb 等文件, 只下载变化的
   --apt-cache DIR       本地 deb 缓存目录, 默认 <cache-root>/../apt-archives/<release>-<arch>
-                        (默认即 cache/apt-archives/noble-amd64; 环境变量 AIB_APT_CACHE)
+                        (默认即 cache/apt-archives/noble-amd64; 环境变量 AIB_APT_CACHE);
+                        同样可放在 exFAT 等非 POSIX 卷上
   --no-apt-cache        不读写 deb 缓存 (旧捆绑 apt/ 仍会复用)
   --prune-apt-cache     抓完后删掉缓存里本次没用到的 deb (默认不删)
 USAGE
@@ -1046,11 +1053,12 @@ if [[ -f "$WORK/out/.apt-reuse-stats" ]]; then
   rm -f "$WORK/out/.apt-reuse-stats"
 fi
 
-# 旧捆绑里的大文件先挪到一边, 版本/校验和不变时直接复用 (见下方各段)
+# 旧捆绑里的大文件拷到一边复用, 不先从 OUT 删掉 (失败时旧捆绑仍完整)。
+# PREV 在宿主机临时目录 (ext4), 可用 cp -a。
 PREV="$WORK/prev"
 mkdir -p "$PREV"
 for _d in unity-cli godot gitea jenkins-plugins; do
-  [[ -d "$OUT/$_d" ]] && mv "$OUT/$_d" "$PREV/$_d"
+  [[ -d "$OUT/$_d" ]] && cp -a "$OUT/$_d" "$PREV/$_d"
 done
 # 复用文件: prev/<sub>/<name> 存在且校验和一致则拷到 dest, 返回 0
 reuse_prev() { # sub name dest algo(sha256|sha512) hex
@@ -1062,39 +1070,38 @@ reuse_prev() { # sub name dest algo(sha256|sha512) hex
   ok "复用旧捆绑 $1/$2 (${4} 一致)"
 }
 
-# 同步到 OUT (保留可复用)
-rm -rf "$OUT/apt" "$OUT/apt-sources" "$OUT/node" "$OUT/unity-cli" "$OUT/godot" "$OUT/gitea" "$OUT/flclash" "$OUT/rustdesk" "$OUT/grok-bot" "$OUT/nvidia" "$OUT/jenkins-plugins" "$OUT/jenkins-version.txt" "$OUT/package-list.txt" "$OUT/java-package.txt"
-mkdir -p "$OUT"
-cp -a "$WORK/out/." "$OUT/"
+# 容器产出已在 $WORK/out。后续 FlClash / Jenkins / npm / Unity 等也写进这个 STAGE,
+# 全部成功 (含 manifest) 后再发布到 $OUT, 避免 exFAT 上 cp -a 失败把旧捆绑删空。
+STAGE="$WORK/out"
 if [[ -n "${FLCLASH_DEB_NAME:-}" && -f "$WORK/flclash-in/$FLCLASH_DEB_NAME" ]]; then
-  mkdir -p "$OUT/flclash"
-  cp -p "$WORK/flclash-in/$FLCLASH_DEB_NAME" "$OUT/flclash/$FLCLASH_DEB_NAME"
-  [[ -f "$WORK/flclash-in/SHA256SUMS" ]] && cp -p "$WORK/flclash-in/SHA256SUMS" "$OUT/flclash/SHA256SUMS"
-  printf '%s\n' "$FLCLASH_VERSION" > "$OUT/flclash/version"
-  printf '%s\n' "$FLCLASH_SHA256" > "$OUT/flclash/sha256"
-  printf '%s\n' "$FLCLASH_DEB_NAME" > "$OUT/flclash/deb.name"
+  mkdir -p "$STAGE/flclash"
+  cp -p "$WORK/flclash-in/$FLCLASH_DEB_NAME" "$STAGE/flclash/$FLCLASH_DEB_NAME"
+  [[ -f "$WORK/flclash-in/SHA256SUMS" ]] && cp -p "$WORK/flclash-in/SHA256SUMS" "$STAGE/flclash/SHA256SUMS"
+  printf '%s\n' "$FLCLASH_VERSION" > "$STAGE/flclash/version"
+  printf '%s\n' "$FLCLASH_SHA256" > "$STAGE/flclash/sha256"
+  printf '%s\n' "$FLCLASH_DEB_NAME" > "$STAGE/flclash/deb.name"
 fi
 if [[ -n "${RUSTDESK_DEB_NAME:-}" && -f "$WORK/rustdesk-in/$RUSTDESK_DEB_NAME" ]]; then
-  mkdir -p "$OUT/rustdesk"
-  cp -p "$WORK/rustdesk-in/$RUSTDESK_DEB_NAME" "$OUT/rustdesk/$RUSTDESK_DEB_NAME"
-  printf '%s\n' "$RUSTDESK_VERSION" > "$OUT/rustdesk/version"
-  printf '%s\n' "$RUSTDESK_SHA256" > "$OUT/rustdesk/sha256"
-  printf '%s\n' "$RUSTDESK_DEB_NAME" > "$OUT/rustdesk/deb.name"
+  mkdir -p "$STAGE/rustdesk"
+  cp -p "$WORK/rustdesk-in/$RUSTDESK_DEB_NAME" "$STAGE/rustdesk/$RUSTDESK_DEB_NAME"
+  printf '%s\n' "$RUSTDESK_VERSION" > "$STAGE/rustdesk/version"
+  printf '%s\n' "$RUSTDESK_SHA256" > "$STAGE/rustdesk/sha256"
+  printf '%s\n' "$RUSTDESK_DEB_NAME" > "$STAGE/rustdesk/deb.name"
 fi
 if [[ -n "${GROK_BOT_DEB_NAME:-}" && -f "$WORK/grok-bot-in/$GROK_BOT_DEB_NAME" ]]; then
-  mkdir -p "$OUT/grok-bot"
-  cp -p "$WORK/grok-bot-in/$GROK_BOT_DEB_NAME" "$OUT/grok-bot/$GROK_BOT_DEB_NAME"
-  printf '%s\n' "$GROK_BOT_VERSION" > "$OUT/grok-bot/version"
-  printf '%s\n' "$GROK_BOT_SHA256_OUT" > "$OUT/grok-bot/sha256"
-  printf '%s\n' "$GROK_BOT_DEB_NAME" > "$OUT/grok-bot/deb.name"
-  printf '%s\n' "$GROK_BOT_URL_OUT" > "$OUT/grok-bot/url"
-  printf '%s\n' "$GROK_BOT_SHA_SOURCE" > "$OUT/grok-bot/sha256.source"
+  mkdir -p "$STAGE/grok-bot"
+  cp -p "$WORK/grok-bot-in/$GROK_BOT_DEB_NAME" "$STAGE/grok-bot/$GROK_BOT_DEB_NAME"
+  printf '%s\n' "$GROK_BOT_VERSION" > "$STAGE/grok-bot/version"
+  printf '%s\n' "$GROK_BOT_SHA256_OUT" > "$STAGE/grok-bot/sha256"
+  printf '%s\n' "$GROK_BOT_DEB_NAME" > "$STAGE/grok-bot/deb.name"
+  printf '%s\n' "$GROK_BOT_URL_OUT" > "$STAGE/grok-bot/url"
+  printf '%s\n' "$GROK_BOT_SHA_SOURCE" > "$STAGE/grok-bot/sha256.source"
 fi
 
 # --------------- Jenkins 插件 (宿主机 python3; update center sha256 校验) ---------------
-JVER="$(cat "$OUT/jenkins-version.txt")"
+JVER="$(cat "$STAGE/jenkins-version.txt")"
 log "解析 Jenkins 插件 (Jenkins $JVER): $JENKINS_PLUGINS"
-JP_DIR="$OUT/jenkins-plugins"
+JP_DIR="$STAGE/jenkins-plugins"
 mkdir -p "$JP_DIR"
 # 旧插件先放回: 解析器对 sha256 与 update center 一致的文件不重下
 [[ -d "$PREV/jenkins-plugins" ]] && find "$PREV/jenkins-plugins" -maxdepth 1 -name '*.jpi' -exec cp -p {} "$JP_DIR/" \;
@@ -1141,13 +1148,13 @@ if [[ "$SKIP_NPM" -eq 0 ]]; then
   else
     die "离线 npm 树缺少 $NPM_PREFIX/bin/opencode"
   fi
-  mkdir -p "$OUT/npm"
-  tar --owner=0 --group=0 --numeric-owner -czf "$OUT/npm/prefix.tar.gz" -C "$NPM_PREFIX" .
-  ok "npm prefix $(du -h "$OUT/npm/prefix.tar.gz" | cut -f1) (opencode 已裁掉非目标平台包)"
+  mkdir -p "$STAGE/npm"
+  tar --owner=0 --group=0 --numeric-owner -czf "$STAGE/npm/prefix.tar.gz" -C "$NPM_PREFIX" .
+  ok "npm prefix $(du -h "$STAGE/npm/prefix.tar.gz" | cut -f1) (opencode 已裁掉非目标平台包)"
 else
   warn "跳过 npm (--skip-npm)"
-  mkdir -p "$OUT/npm"
-  : > "$OUT/npm/.skipped"
+  mkdir -p "$STAGE/npm"
+  : > "$STAGE/npm/.skipped"
 fi
 
 # --------------- Unity CLI binary (host; not apt) ---------------
@@ -1155,7 +1162,7 @@ fi
 log "下载 Unity CLI (linux-x64)"
 UNITY_CDN="${UNITY_CLI_CDN_BASE:-https://public-cdn.cloud.unity3d.com/hub/prod/cli/}"
 UNITY_PLATFORM="linux-x64"
-UNITY_DIR="$OUT/unity-cli"
+UNITY_DIR="$STAGE/unity-cli"
 mkdir -p "$UNITY_DIR"
 UNITY_MANIFEST=""
 UNITY_VERSION=""
@@ -1207,7 +1214,7 @@ GODOT_VERSION="4.7.2"
 GODOT_TAG="${GODOT_VERSION}-stable"
 GODOT_ZIP="Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
 GODOT_SHA512="9aa00f7a605200940bce3027a567b782f49bd8e940dd06ae9e987bd65aee1b1467edd56ed84fcdcbdd44354bf613bdbb4e5d2913e925850368e150c59ed54c65"
-GODOT_DIR="$OUT/godot"
+GODOT_DIR="$STAGE/godot"
 mkdir -p "$GODOT_DIR"
 GODOT_URL="https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/${GODOT_ZIP}"
 GODOT_FALLBACK="https://downloads.godotengine.org/?version=${GODOT_VERSION}&flavor=stable&slug=linux.x86_64.zip&platform=linux.64"
@@ -1236,7 +1243,7 @@ fi
 [[ "$GITEA_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] || die "Gitea 版本号异常: $GITEA_VERSION"
 log "下载 Gitea $GITEA_VERSION (linux-amd64)"
 GITEA_FILE="gitea-${GITEA_VERSION}-linux-amd64"
-GITEA_DIR="$OUT/gitea"
+GITEA_DIR="$STAGE/gitea"
 mkdir -p "$GITEA_DIR"
 GITEA_SHA256="$(curl -fsSL "$GITEA_DL/$GITEA_VERSION/$GITEA_FILE.sha256" | awk '{print $1}')"
 [[ "$GITEA_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "无法获取 Gitea 官方 sha256"
@@ -1252,12 +1259,12 @@ ok "Gitea $GITEA_VERSION ($(du -h "$GITEA_DIR/$GITEA_FILE" | cut -f1))"
 
 # --------------- manifest ---------------
 APT_COUNT=0
-[[ -f "$OUT/package-list.txt" ]] && APT_COUNT=$(wc -l < "$OUT/package-list.txt")
-SIZE_BYTES=$(du -sb "$OUT" | awk '{print $1}')
-SIZE_HUMAN=$(du -sh "$OUT" | cut -f1)
+[[ -f "$STAGE/package-list.txt" ]] && APT_COUNT=$(wc -l < "$STAGE/package-list.txt")
+SIZE_BYTES=$(du -sb "$STAGE" | awk '{print $1}')
+SIZE_HUMAN=$(du -sh "$STAGE" | cut -f1)
 CREATED=$(date -u +%FT%TZ)
 
-python3 - "$OUT" <<PY
+python3 - "$STAGE" <<PY
 import json, os, sys, hashlib, pathlib
 out = pathlib.Path(sys.argv[1])
 debs = sorted(p.name for p in (out/"apt").glob("*.deb")) if (out/"apt").exists() else []
@@ -1400,4 +1407,5 @@ manifest = {
 print(json.dumps(manifest, indent=2, ensure_ascii=False))
 PY
 
+aib_publish_bundle_dir "$STAGE" "$OUT" || die "同步离线捆绑到 $OUT 失败 (旧目录已保留)"
 ok "离线捆绑完成: $OUT ($SIZE_HUMAN, ${APT_COUNT} debs)"

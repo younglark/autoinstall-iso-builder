@@ -2131,7 +2131,8 @@ fi
 # shellcheck disable=SC2016
 if grep -q '"grok_bot": sys.argv\[15\]' tools/fetch-offline-bundle.sh && grep -q '"grok-bot", "apt-sources"' tools/fetch-offline-bundle.sh \
    && grep -q 'FETCH_GROKBOT_DIR' tools/fetch-offline-bundle.sh && grep -q -- '--no-grok-bot' tools/fetch-offline-bundle.sh \
-   && grep -q '"$OUT/grok-bot"' tools/fetch-offline-bundle.sh && grep -q '"grok_bot": grok_bot_meta' tools/fetch-offline-bundle.sh \
+   && grep -q '"$OUT/grok-bot/' tools/fetch-offline-bundle.sh && grep -q '"$STAGE/grok-bot"' tools/fetch-offline-bundle.sh \
+   && grep -q '"grok_bot": grok_bot_meta' tools/fetch-offline-bundle.sh \
    && grep -q -- '--require-grok-bot' tools/validate-offline-bundle.sh && grep -q -- '--require-grok-bot' build-iso.sh \
    && grep -q 'grok-bot-release.sh' build-iso.sh && grep -q 'grok-bot-archive-key.asc' build-iso.sh \
    && grep -qE '(^|[[:space:]])grok-bot([[:space:]]|$)' software/99-cleanup.sh && grep -q 'grok-bot.skip' software/99-cleanup.sh \
@@ -2692,6 +2693,115 @@ if grep -q 'print_uris install --download-only --reinstall' tools/fetch-offline-
 else
   fail "fetch reuse wiring"
 fi
+# shellcheck disable=SC2016
+if grep -q 'aib_publish_bundle_dir "$STAGE" "$OUT"' tools/fetch-offline-bundle.sh \
+   && grep -q 'STAGE="$WORK/out"' tools/fetch-offline-bundle.sh \
+   && grep -q 'aib_cp_file "$f" "$cache/$b.tmp"' tools/apt-deb-reuse.sh \
+   && ! grep -q 'cp -a "$WORK/out/." "$OUT/"' tools/fetch-offline-bundle.sh \
+   && ! grep -q 'rm -rf "$OUT/apt"' tools/fetch-offline-bundle.sh; then
+  pass "fetch stages bundle then publishes; no destructive cp -a into --out"
+else
+  fail "fetch exFAT-safe publish wiring"
+fi
+
+echo "== bundle-fs: copy/publish onto a filesystem that rejects ownership preserve =="
+# shellcheck disable=SC1091
+. tools/apt-deb-reuse.sh
+bf="$(mktemp -d)"
+# 伪装 cp: 遇到 -a/-p/--preserve=ownership 就按 exFAT 那样失败
+mkdir -p "$bf/bin"
+cat > "$bf/bin/cp" <<'CP'
+#!/bin/bash
+for a in "$@"; do
+  case "$a" in
+    --no-preserve=*) continue ;;
+    --preserve=*ownership*|--preserve=all)
+      echo "cp: failed to preserve ownership for 'dest': Operation not permitted" >&2
+      exit 1
+      ;;
+    --*) continue ;;
+    -*)
+      case "$a" in *a*|*p*)
+        echo "cp: failed to preserve ownership for 'dest': Operation not permitted" >&2
+        exit 1
+      ;;
+      esac
+      ;;
+  esac
+done
+exec /bin/cp "$@"
+CP
+chmod +x "$bf/bin/cp"
+# 确认伪装生效
+if PATH="$bf/bin:$PATH" /bin/bash -c 'cp -a "$0" "$1"' "$bf/bin/cp" "$bf/should-fail" 2>/dev/null; then
+  fail "fake cp did not reject cp -a"
+else
+  pass "fake cp rejects cp -a / ownership preserve"
+fi
+
+mkdir -p "$bf/src/sub" "$bf/dest"
+printf 'hello\n' > "$bf/src/sub/file.txt"
+printf 'link-target\n' > "$bf/src/target"
+ln -s target "$bf/src/link"
+# chmod +x 在源上; 目标 FS 可能丢弃可执行位, 拷贝本身不能因此失败
+chmod +x "$bf/src/sub/file.txt"
+if PATH="$bf/bin:$PATH" aib_cp_tree "$bf/src" "$bf/tree"; then
+  if [[ "$(cat "$bf/tree/sub/file.txt")" == hello && -f "$bf/tree/link" && ! -L "$bf/tree/link" \
+        && "$(cat "$bf/tree/link")" == "link-target" ]]; then
+    pass "aib_cp_tree copies content and dereferences symlinks without cp -a"
+  else
+    fail "aib_cp_tree result: $(ls -la "$bf/tree" "$bf/tree/sub" 2>/dev/null)"
+  fi
+else
+  fail "aib_cp_tree failed under fake cp"
+fi
+
+# 发布成功: 旧内容被替换, 临时目录清掉
+mkdir -p "$bf/out/olddir" "$bf/stage/apt" "$bf/stage/grok-bot"
+printf 'old\n' > "$bf/out/olddir/stale.txt"
+printf 'deb\n' > "$bf/stage/apt/pkg.deb"
+printf '1.0.3\n' > "$bf/stage/grok-bot/version"
+if PATH="$bf/bin:$PATH" aib_publish_bundle_dir "$bf/stage" "$bf/out"; then
+  if [[ -f "$bf/out/apt/pkg.deb" && -f "$bf/out/grok-bot/version" && ! -e "$bf/out/olddir" \
+        && ! -e "$bf/out/../.out.aib-new" && ! -e "$bf/.out.aib-new" && ! -e "$bf/.out.aib-old" \
+        && "$(cat "$bf/out/grok-bot/version")" == 1.0.3 ]]; then
+    pass "aib_publish_bundle_dir swaps in new tree and drops stale entries"
+  else
+    fail "publish result: $(find "$bf" -mindepth 1 -printf '%P\n' | sort)"
+  fi
+else
+  fail "aib_publish_bundle_dir failed under fake cp"
+fi
+
+# 发布失败时旧目录原样保留
+mkdir -p "$bf/keep/parent/dest" "$bf/keep/src"
+printf 'keep-me\n' > "$bf/keep/parent/dest/important.txt"
+printf 'new\n' > "$bf/keep/src/file.txt"
+chmod a-w "$bf/keep/parent"
+if PATH="$bf/bin:$PATH" aib_publish_bundle_dir "$bf/keep/src" "$bf/keep/parent/dest"; then
+  chmod u+w "$bf/keep/parent" 2>/dev/null || true
+  fail "publish should fail when dest parent is not writable"
+else
+  chmod u+w "$bf/keep/parent"
+  if [[ "$(cat "$bf/keep/parent/dest/important.txt")" == keep-me && ! -e "$bf/keep/parent/dest/file.txt" ]]; then
+    pass "aib_publish_bundle_dir leaves dest intact when staging copy cannot start"
+  else
+    fail "dest mutated after failed publish: $(ls -la "$bf/keep/parent/dest")"
+  fi
+fi
+
+# deb 缓存回写也走 aib_cp_file, 在伪装 cp 下仍成功
+mkdir -p "$bf/arch" "$bf/cache"
+printf 'newdeb\n' > "$bf/arch/g_1_amd64.deb"
+: > "$bf/reused"
+if read -r syn pr < <(PATH="$bf/bin:$PATH" aib_deb_sync_cache "$bf/arch" "$bf/cache" "$bf/reused" 0) \
+   && [[ "$syn" -eq 1 && "$pr" -eq 0 && "$(cat "$bf/cache/g_1_amd64.deb")" == newdeb ]]; then
+  pass "aib_deb_sync_cache writes cache without cp -p"
+else
+  fail "sync_cache under fake cp ($syn $pr)"
+fi
+rm -rf "$bf"
+
 
 echo "== fetch: 内核类包只保留选定 flavour (NVIDIA 595-open generic / generic-hwe-24.04) =="
 # fixture: noble 上真实 apt-cache depends --recurse 输出 (recurse.txt) 与 SEEDS 求解器闭包 (closure.txt) 的内核/NVIDIA 相关部分
