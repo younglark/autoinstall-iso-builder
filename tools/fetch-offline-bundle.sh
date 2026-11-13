@@ -45,6 +45,24 @@ ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/apt-deb-reuse.sh"
 
+# AIB_GH_PROXY: GitHub 下载加速前缀 (例: AIB_GH_PROXY=https://ghfast.top)。
+# 命中 github.com / objects.githubusercontent.com / raw.githubusercontent.com 的 curl URL
+# 会被改写为 ${AIB_GH_PROXY}/<原URL>; 校验和照常比对, 文件内容不受影响。空 = 不改写。
+if [[ -n "${AIB_GH_PROXY:-}" ]]; then
+  curl() {
+    local _a _args=()
+    for _a in "$@"; do
+      case "$_a" in
+        https://github.com/*|https://objects.githubusercontent.com/*|https://raw.githubusercontent.com/*|https://codeload.github.com/*)
+          _args+=("${AIB_GH_PROXY%/}/$_a") ;;
+        *) _args+=("$_a") ;;
+      esac
+    done
+    command curl "${_args[@]}"
+  }
+  printf '\033[1;34m==>\033[0m AIB_GH_PROXY 生效: GitHub 下载走 %s\n' "$AIB_GH_PROXY"
+fi
+
 RELEASE="noble"          # jammy|noble
 ARCH="amd64"
 OUT=""

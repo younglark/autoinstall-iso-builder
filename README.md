@@ -415,6 +415,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 - `fetch-offline` 与 `build --fetch-offline` 需要容器以 root 运行（容器内 `apt-get`），结束后自动把捆绑目录 chown 回当前用户。
 - **Apple Silicon / ARM**：ISO 重打包与架构无关，`build` 原生 arm64 运行；但 `fetch-offline` 要解析 amd64 的 deb 闭包、打 linux-x64 的 npm 树，包装脚本会强制 `--platform linux/amd64`（Docker Desktop 里建议开启 “Use Rosetta for x86_64/amd64 emulation”，否则 QEMU 仿真会很慢）。
 - 默认缓存目录是挂载目录下的 `cache/offline-bundles/`（容器内 `OFFLINE_CACHE_ROOT=/work/cache/offline-bundles`），重复构建可复用。
+- **GitHub 下载慢 / 超时**：`fetch-offline` 要从 GitHub Releases 拉大量资产，直连不通的环境可设 `AIB_GH_PROXY` 加速前缀，如 `AIB_GH_PROXY=https://ghfast.top ./build-iso.sh ... --fetch-offline`（命中 `github.com` / `objects.githubusercontent.com` 等的下载 URL 会改写为 `<代理>/<原URL>`，校验和照常比对，文件内容不变）。
 - `--apt-runner direct` 只能在一次性容器里用（会改写本机 `/etc/apt`）；脚本会检查容器标记、root、发行版代号与架构，不匹配直接失败。
 
 ### 手动构建镜像（可选）
