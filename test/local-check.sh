@@ -1199,7 +1199,7 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
     fail "rustdesk password / server defaults: $(tail -3 "$xb/o2.log" "$xb/o3.log")"
   fi
   # --password-hash 已移除: 直接拒绝并提示改用 --password / 默认
-  if ! bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o4.iso" --password 'Pl99x' >"$xb/o4.log" 2>&1 \
+  if ! bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o4.iso" --password-hash '$6$x$y' >"$xb/o4.log" 2>&1 \
      && grep -q -- '--password-hash 已移除' "$xb/o4.log"; then
     pass "--password-hash rejected with removal message"
   else
@@ -1223,7 +1223,7 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
      && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o11.iso" --remote-desktop x11vnc --vnc-password 'vncpass1' >"$xb/o11.log" 2>&1 && _xenv "$xb/o11.iso" "$xb/p11" \
      && ( # shellcheck disable=SC1091
           . "$xb/p11/x11vnc.secret"; [[ "$VNC_PASSWORD" == 'vncpass1' ]] ) && ! grep -q 'vncpass1' "$xb/o11.log" \
-     && ! bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o12.iso" --remote-desktop x11vnc --password 'Pl99x' >"$xb/o12.log" 2>&1 \
+     && ! bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o12.iso" --remote-desktop x11vnc --password-hash '$6$x$y' >"$xb/o12.log" 2>&1 \
      && grep -q -- '--password-hash 已移除' "$xb/o12.log"; then
     pass "x11vnc default-password warning + --vnc-password override + --password-hash rejected"
   else
@@ -1807,7 +1807,7 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
       fail "build-iso with gitea flags: $(tail -3 "$gt/a.log")"
     fi
     # --password-hash 已移除: 拒绝; 默认构建统一投递 secret (gitea + opencode)
-    if ! bash build-iso.sh --iso "$gt/src.iso" --out "$gt/bh.iso" --password 'Pl99x' >"$gt/bh.log" 2>&1 \
+    if ! bash build-iso.sh --iso "$gt/src.iso" --out "$gt/bh.iso" --password-hash '$6$x$y' >"$gt/bh.log" 2>&1 \
        && grep -q -- '--password-hash 已移除' "$gt/bh.log" \
        && bash build-iso.sh --iso "$gt/src.iso" --out "$gt/b.iso" --gitea-admin-user boss --gitea-admin-email boss@example.com >"$gt/b.log" 2>&1 \
        && xorriso -osirrox on -indev "$gt/b.iso" -extract /provision "$gt/b" >/dev/null 2>&1 \
@@ -2158,14 +2158,14 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
     fail "build-iso grok-bot default: $(tail -5 "$gt/o1.log")"
   fi
   _gs=cf0fd0032249cf08e75f6dff045766b5195078dd878d1eeed60a68c4d31a7a5a
-  if bash build-iso.sh --iso "$gt/d.iso" --out "$gt/o2.iso" --password-hash "$_ph" --grok-bot-version 0.79.4 \
+  if bash build-iso.sh --iso "$gt/d.iso" --out "$gt/o2.iso" --grok-bot-version 0.79.4 \
        --grok-bot-url https://mirror.example/gb/grok-bot_0.79.4_amd64.deb --grok-bot-sha256 "${_gs^^}" >"$gt/o2.log" 2>&1 && _gx "$gt/o2.iso" "$gt/p2" \
      && grep -qx 'PIN_GROK_BOT=0.79.4' "$gt/p2/provision.env" \
      && grep -qx 'GROK_BOT_DEB_URL=https://mirror.example/gb/grok-bot_0.79.4_amd64.deb' "$gt/p2/provision.env" \
      && grep -qx "GROK_BOT_SHA256=$_gs" "$gt/p2/provision.env" \
-     && bash build-iso.sh --iso "$gt/d.iso" --out "$gt/o3.iso" --password-hash "$_ph" --no-grok-bot >"$gt/o3.log" 2>&1 && _gx "$gt/o3.iso" "$gt/p3" \
+     && bash build-iso.sh --iso "$gt/d.iso" --out "$gt/o3.iso" --no-grok-bot >"$gt/o3.log" 2>&1 && _gx "$gt/o3.iso" "$gt/p3" \
      && grep -q '^PROVISION_SKIP=.*39-grok-bot' "$gt/p3/provision.env" && grep -q 'Grok Bot 桌面版: 不装' "$gt/o3.log" \
-     && bash build-iso.sh --iso "$gt/s.iso" --out "$gt/o4.iso" --password-hash "$_ph" --grok-bot-version 0.79.4 >"$gt/o4.log" 2>&1 \
+     && bash build-iso.sh --iso "$gt/s.iso" --out "$gt/o4.iso" --grok-bot-version 0.79.4 >"$gt/o4.log" 2>&1 \
      && grep -q -- '--grok-bot-version / --grok-bot-url / --grok-bot-sha256 只用于 Desktop' "$gt/o4.log" && ! grep -q 'Grok Bot 桌面版: 预装' "$gt/o4.log"; then
     pass "--grok-bot-version/--grok-bot-url/--grok-bot-sha256 written (sha lowercased); --no-grok-bot skips 39; server warns"
   else
@@ -2261,7 +2261,7 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
       fail "jenkins overrides: $(tail -3 "$jt/a.log")"
     fi
     # --password-hash 已移除: 拒绝并提示
-    if ! bash build-iso.sh --iso "$jt/src.iso" --out "$jt/b.iso" --password 'Pl99x' >"$jt/b.log" 2>&1 \
+    if ! bash build-iso.sh --iso "$jt/src.iso" --out "$jt/b.iso" --password-hash '$6$x$y' >"$jt/b.log" 2>&1 \
        && grep -q -- '--password-hash 已移除' "$jt/b.log"; then
       pass "jenkins --password-hash rejected with removal message"
     else

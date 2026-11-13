@@ -123,7 +123,9 @@ aib_cp_file() {
     touch -r "$src" "$dest" 2>/dev/null || true
   fi
   mode="$(stat -c %a "$src" 2>/dev/null || stat -f %OLp "$src" 2>/dev/null || true)"
-  [[ -n "$mode" ]] && chmod -- "$mode" "$dest" 2>/dev/null || true
+  if [[ -n "$mode" ]]; then
+    chmod -- "$mode" "$dest" 2>/dev/null || true
+  fi
   return 0
 }
 
