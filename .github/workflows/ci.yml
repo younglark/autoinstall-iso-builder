@@ -42,8 +42,9 @@ jobs:
           set -euo pipefail
           for e in server desktop; do
             bash test/make-fake-iso.sh "$e" "$RUNNER_TEMP/fake-$e.iso"
+            # 不传 --password：走仓库统一默认凭据（--password-hash 已移除，勿把明文写进工作流）
             bash build-iso.sh --iso "$RUNNER_TEMP/fake-$e.iso" --out "$RUNNER_TEMP/out-$e.iso" \
-              --password-hash "$(openssl passwd -6 ci)" --auto-disk
+              --auto-disk
             bash test/qemu-smoke.sh "$RUNNER_TEMP/out-$e.iso" --guard-only
           done
 
@@ -76,8 +77,9 @@ jobs:
           for e in server desktop; do
             ../scripts/aib.sh shell -c "bash /opt/aib/test/make-fake-iso.sh $e /work/fake-$e.iso"
             mv "fake-$e.iso" "$isodir/"
+            # 不传 --password：走仓库统一默认凭据（--password-hash 已移除，勿把明文写进工作流）
             ../scripts/aib.sh build --iso "$isodir/fake-$e.iso" --out "out/$e.iso" \
-              --hostname ci-$e --password-hash "$(openssl passwd -6 ci)" \
+              --hostname ci-$e \
               --ssh-authorized-keys ../test/fixtures/authorized_keys --auto-disk
             test -s "out/$e.iso"
             test "$(stat -c %u "out/$e.iso")" = "$(id -u)"   # Linux 上产出属于当前用户
