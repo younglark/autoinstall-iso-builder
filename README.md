@@ -121,12 +121,12 @@ Desktop **默认**关闭 Wayland 并预装 [RustDesk](https://github.com/rustdes
 |---|---|
 | （默认，Desktop） | 往 `/etc/gdm3/custom.conf` 的 `[daemon]` 写 `WaylandEnable=false`（幂等，其它键保留），GDM 登录界面、锁屏和用户会话全部走 Xorg；预装 RustDesk（离线从捆绑装），开机即可连，不用先登录；关掉合盖/空闲挂起 |
 | `--remote-desktop M` | `rustdesk`（默认）/ `x11vnc`（VNC，5900，不加密）/ `none`（不装远程桌面，仍关 Wayland）。Server 上告警并忽略 |
-| `--rustdesk-password P` | RustDesk 固定密码（≥6 位）。默认 = `--password` 明文（都没给就是默认密码 `ubuntu1990`，构建时告警）；只给了 `--password-hash` 时装机生成随机密码写入 `/root/rustdesk-password`（root 0600） |
+| `--rustdesk-password P` | RustDesk 固定密码（≥6 位）。默认 = `--password` 明文（都没给就是默认密码 `ubuntu1990`，构建时告警） |
 | `--rustdesk-server H` | 自建 RustDesk 服务器（hbbs/hbbr）主机，可带端口，写入 `custom-rendezvous-server` 和 `relay-server`，可经自建服务器按 ID 连。默认不设 |
 | `--rustdesk-allow-id` | 恢复 RustDesk 公共 ID 服务器（可跨网络按 ID 连）。**默认关闭：只支持局域网 `<机器IP>:21118` 直连**，ID / 中继 / API 服务器都指向 `127.0.0.1`，不向公共服务器注册，外网无法按 ID 连入 |
 | `--pin-rustdesk VER` | RustDesk 版本，默认 `1.5.1`（真机验证过）。非默认版本用 GitHub Release API 给的官方 sha256 校验 |
 | `--wayland` | 保留 Wayland，不改合盖/空闲挂起。RustDesk 照装但告警：Wayland 下**连不了登录界面**，会话里每次连接都要在本机点同意共享屏幕。不能和 `--remote-desktop x11vnc` 同用 |
-| `--vnc-password P` | 只用于 `--remote-desktop x11vnc`：VNC 密码（≥6 位）。默认 = `--password` 明文；只给了 `--password-hash` 时装机生成随机密码写入 `/root/x11vnc-password`。其它情况告警并忽略 |
+| `--vnc-password P` | 只用于 `--remote-desktop x11vnc`：VNC 密码（≥6 位）。默认 = `--password` 明文（含默认密码）。其它情况告警并忽略 |
 | `--skip 36` / `--skip 38` | 跳过关 Wayland / 跳过 RustDesk |
 
 旧参数 `--disable-wayland` 和 `--x11vnc` **已移除**，再传会直接报错并提示改用 `--wayland` / `--remote-desktop x11vnc`。
@@ -212,7 +212,7 @@ RustDesk 在 Wayland 下连不了登录界面，会话里每次都要手动同�
 默认预装（`--skip 30` 可跳过）。装机 chroot 里就会：
 
 - **跳过安装向导**：systemd drop-in `/etc/systemd/system/jenkins.service.d/50-autoinstall.conf` 设置 `JAVA_OPTS=-Djava.awt.headless=true -Djenkins.install.runSetupWizard=false`，并写入 `jenkins.install.InstallUtil.lastExecVersion` / `jenkins.install.UpgradeWizard.state`（= 安装的 Jenkins 版本），不会出现 “Unlock Jenkins / initialAdminPassword”。
-- **管理员**：默认用户名 = `--username`（默认 `ubuntu`），密码 = `--password` 明文（都不传时为默认密码 `ubuntu1990`）；可用 `--jenkins-admin-user` / `--jenkins-admin-password` 覆盖。装机时把密码转成 **bcrypt** 哈希，写进 `/var/lib/jenkins/init.groovy.d/00-autoinstall-admin.groovy`（jenkins 0600，只含 `#jbcrypt:$2a$...`，**不含明文**）；首次启动时该脚本创建用户（Jenkins 自带用户库，**禁止自助注册**），授权为“登录用户可做任何事、匿名不可读”，成功后**自删**。只给了 `--password-hash` 时生成随机密码写入 **`/root/jenkins-admin-password`**（root、0600）。构建时的明文单独放在 ISO 的 `/provision/jenkins-admin.secret`（0600，不进 `provision.env` / 日志），装机用完即删。
+- **管理员**：默认用户名 = `--username`（默认 `ubuntu`），密码 = `--password` 明文（都不传时为默认密码 `ubuntu1990`）；可用 `--jenkins-admin-user` / `--jenkins-admin-password` 覆盖。装机时把密码转成 **bcrypt** 哈希，写进 `/var/lib/jenkins/init.groovy.d/00-autoinstall-admin.groovy`（jenkins 0600，只含 `#jbcrypt:$2a$...`，**不含明文**）；首次启动时该脚本创建用户（Jenkins 自带用户库，**禁止自助注册**），授权为“登录用户可做任何事、匿名不可读”，成功后**自删**。构建时的明文单独放在 ISO 的 `/provision/jenkins-admin.secret`（0600，不进 `provision.env` / 日志），装机用完即删。
 - **插件**（含全部必需依赖）：默认 `workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger`，可用 `--jenkins-plugins "a b c"`（可写 `name:version`）替换。默认列表：
 
   | 插件 ID | 用途 |
@@ -240,7 +240,7 @@ RustDesk 在 Wayland 下连不了登录界面，会话里每次都要手动同�
 默认预装（`--skip 45` / `--skip 45-gitea` 可跳过）。装机 chroot 里就会：
 
 - 写入 `/etc/gitea/app.ini`（`INSTALL_LOCK=true`，SQLite，每台机器独立生成 `SECRET_KEY` / `INTERNAL_TOKEN` / JWT），并 `gitea migrate`；
-- 创建管理员（默认用户名 = `--username`（默认 `ubuntu`），密码 = `--password` 明文（都不传时为默认密码 `ubuntu1990`）；可用 `--gitea-admin-user` / `--gitea-admin-password` / `--gitea-admin-email` 覆盖）。只给了 `--password-hash`、没有明文时，会生成随机密码并写入 **`/root/gitea-admin-password`**（root、0600）。构建时的明文密码单独放在 ISO 的 `/provision/gitea-admin.secret`（0600，不进 `provision.env` / 构建日志），装机用完即删。管理员 `must-change-password=false`，**装完请尽快改掉密码**；
+- 创建管理员（默认用户名 = `--username`（默认 `ubuntu`），密码 = `--password` 明文（都不传时为默认密码 `ubuntu1990`）；可用 `--gitea-admin-user` / `--gitea-admin-password` / `--gitea-admin-email` 覆盖）。构建时的明文密码单独放在 ISO 的 `/provision/gitea-admin.secret`（0600，不进 `provision.env` / 构建日志），装机用完即删。管理员 `must-change-password=false`，**装完请尽快改掉密码**；
 - `systemctl enable gitea.service`（官方单元，`After=network-online.target`）。防火墙规则不动。
 
 开机后浏览器打开 `http://<主机名>.local:3000/`（或 `http://<本机IP>:3000/`）即可（`HTTP_ADDR=0.0.0.0`，局域网可访问）。**开放注册**（`DISABLE_REGISTRATION=false`），局域网里的人都能自助注册；若只想管理员拉人，把该值改成 `true` 后 `sudo systemctl restart gitea`。
@@ -255,13 +255,13 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 
 装机时会：
 
-- 写入 `/etc/opencode/web.env`（root、0600，由 systemd `EnvironmentFile=` 读取），内容为 `OPENCODE_PASSWORD=...`（固定网页密码）。HTTP Basic 用户名固定为 `opencode`。明文来自 `--password`（都不传时为默认密码）；只给了 `--password-hash` 时生成随机密码写入 **`/root/opencode-web-password`**（root、0600）。构建时的明文单独放在 ISO 的 `/provision/opencode-web.secret`（0600，不进 `provision.env` / 构建日志），装机用完即删。
+- 写入 `/etc/opencode/web.env`（root、0600，由 systemd `EnvironmentFile=` 读取），内容为 `OPENCODE_PASSWORD=...`（固定网页密码）。HTTP Basic 用户名固定为 `opencode`。明文来自 `--password`（都不传时为默认密码）；构建时的明文单独放在 ISO 的 `/provision/opencode-web.secret`（0600，不进 `provision.env` / 构建日志），装机用完即删。
 - 写入 `/etc/opencode/opencode.json`（`{"update":"disable"}`），关闭自动更新。
 - 启用 `opencode-web.service`：系统单元，以安装用户（`--username`，**不是 root**）运行，`WorkingDirectory` 为该用户家目录，`After=` / `Wants=network-online.target`，`Restart=on-failure`。前台命令为 `opencode serve --hostname 0.0.0.0 --port 4096`。不启动远程隧道、不自动打开浏览器。防火墙规则不动。
 
 开机后浏览器打开 `http://<主机名>.local:4096/`（或 `http://<本机IP>:4096/`），用用户名 `opencode` 和上面的密码登录。**镜像不预装任何模型 API key**；首次使用请以该用户执行 `opencode auth login`，或在网页里登录模型提供商。
 
-**改网页密码**：编辑 `/etc/opencode/web.env` 里的 `OPENCODE_PASSWORD`（权限保持 0600），然后 `sudo systemctl restart opencode-web`。同时请尽快改系统用户密码（`passwd`）。若当初只给了 `--password-hash`，随机密码在 `/root/opencode-web-password`。
+**改网页密码**：编辑 `/etc/opencode/web.env` 里的 `OPENCODE_PASSWORD`（权限保持 0600），然后 `sudo systemctl restart opencode-web`。同时请尽快改系统用户密码（`passwd`）。
 
 ### Gitea / Jenkins / OpenCode Web 的访问地址（`<主机名>.local`）
 
@@ -355,7 +355,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 # macOS / Linux：子命令后面的参数与 build-iso.sh 完全一致
 ./scripts/aib.sh build --iso ~/Downloads/ubuntu-24.04.3-live-server-amd64.iso \
   --out out/node01.iso --hostname node01 --username ops \
-  --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
+  --password 'Ch@ngeMe' \
   --ssh-authorized-keys ~/.ssh/id_ed25519.pub
 
 # 最简：不传用户名/密码 → 默认 ubuntu / ubuntu1990（构建时告警，装完请改）
@@ -369,7 +369,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 # Windows PowerShell（单引号避免 $6$... 被 PowerShell 展开）
 .\scripts\aib.ps1 build --iso C:\isos\ubuntu-24.04.3-live-server-amd64.iso `
   --out out\node01.iso --hostname node01 --username ops `
-  --password-hash '$6$rounds=...$...' `
+  --password 'Ch@ngeMe' `
   --ssh-authorized-keys $HOME\.ssh\id_ed25519.pub
 ```
 
@@ -408,7 +408,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 ./scripts/aib.sh fetch-offline --release jammy --out cache/offline-bundles/jammy-amd64   # 自动构建并使用 :local-jammy
 
 ./scripts/aib.sh build --iso ubuntu-24.04.3-live-server-amd64.iso --out out/offline.iso \
-  --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
+  --password 'Ch@ngeMe' \
   --offline --offline-bundle cache/offline-bundles/noble-amd64 --packages "vim,curl"
 ```
 
@@ -458,18 +458,18 @@ chmod +x build-iso.sh test/qemu-smoke.sh tools/*.py software/*.sh
 ./build-iso.sh --iso ubuntu-24.04.1-live-server-amd64.iso \
                --out out/test.iso \
                --hostname ci-node01 --username ops \
-               --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
+               --password 'Ch@ngeMe' \
                --dry-run
 
 # 2. 正式产出
 ./build-iso.sh --iso ubuntu-24.04.1-live-server-amd64.iso \
                --out out/ubuntu-24.04.1-ci-node.iso \
                --hostname ci-node01 --username ops \
-               --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
+               --password 'Ch@ngeMe' \
                --packages "vim,tmux,net-tools"
 
 # 3. 无人值守冒烟（QEMU/CI）需加 --auto-disk，否则会停在选盘页
-./build-iso.sh --iso ubuntu-24.04.1-live-server-amd64.iso                --out out/ubuntu-24.04.1-ci-node-autodisk.iso                --hostname ci-node01 --username ops                --password-hash "$(openssl passwd -6 'Ch@ngeMe')"                --auto-disk
+./build-iso.sh --iso ubuntu-24.04.1-live-server-amd64.iso                --out out/ubuntu-24.04.1-ci-node-autodisk.iso                --hostname ci-node01 --username ops                --password 'Ch@ngeMe'                --auto-disk
 
 # 4. 先在虚拟机跑一遍（务必做，别直接上物理机）
 #    qemu-smoke 会先读 ISO 里的 user-data：若 interactive-sections 非空会立刻失败，
@@ -496,13 +496,13 @@ bash test/qemu-smoke.sh out/ubuntu-24.04.1-ci-node-autodisk.iso --uefi
   --edition desktop \
   --desktop-source minimal \
   --hostname desk01 --username alice --realname "Alice" \
-  --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
+  --password 'Ch@ngeMe' \
   --ssh-authorized-keys ~/.ssh/id_ed25519.pub
 
 # 全离线 Desktop：同一份 noble 捆绑可直接复用（见「全离线模式」）
 ./build-iso.sh --iso ubuntu-24.04.5.1-desktop-amd64.iso \
   --out out/ubuntu-24.04-desktop-offline.iso \
-  --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
+  --password 'Ch@ngeMe' \
   --offline --offline-bundle cache/offline-bundles/noble-amd64
 ```
 
@@ -595,12 +595,12 @@ cat /var/log/autoinstall/20-docker.log
 | 参数 | 说明 |
 |---|---|
 | `--iso` / `--out` | 输入/输出路径，必填 |
-| `--password-hash` | **推荐**。`openssl passwd -6 '密码'` 的结果 |
 | `--password` | 明文，脚本自动哈希；会进 shell 历史，仅调试用 |
+| `--password-hash` | **已移除**（直接报错）。旧版曾推荐传哈希，但那会让镜像里没有明文可分发，装机时 Gitea / Jenkins / OpenCode / RustDesk 只能各自生成随机密码。现在要么 `--password '密码'`，要么不传走统一默认 |
 | `--hostname` | 默认 `ubuntu-node`。必须是单个主机名标签：小写字母 / 数字 / 中间的连字符，1–63 位，不能含点或下划线（不合法直接报错）。Gitea / Jenkins / OpenCode Web URL 默认用 `<hostname>.local`，**每台机器请用不同的名字** |
 | `--service-url-host H` | 覆盖 Gitea / Jenkins / OpenCode Web URL 的主机部分（IPv4、FQDN 或 `localhost`），如 `--service-url-host 192.168.1.20` → `http://192.168.1.20:3000/`、`:8080/` 与 `:4096/`。三者都 `--skip` 时忽略 |
 | `--username` | 默认 `ubuntu`（`git` 与 Gitea 系统用户冲突，会被拒绝） |
-| （都不传密码） | `--password` / `--password-hash` 都没给时，使用**默认密码 `ubuntu1990`**（构建时告警），Gitea / Jenkins 管理员以及 OpenCode Web 同样跟随该默认值。这是公开的默认值，**装完请立即改**：`passwd`，并在 Gitea / Jenkins 网页里改管理员密码；OpenCode Web 改 `/etc/opencode/web.env` 的 `OPENCODE_PASSWORD` 后 `sudo systemctl restart opencode-web` |
+| （不传密码） | 使用**默认密码 `ubuntu1990`**（构建时告警），系统用户、Gitea / Jenkins 管理员、OpenCode Web 以及 RustDesk **统一跟随该默认值**。这是公开的默认值，**装完请立即改**：`passwd`，并在 Gitea / Jenkins 网页里改管理员密码；OpenCode Web 改 `/etc/opencode/web.env` 的 `OPENCODE_PASSWORD` 后 `sudo systemctl restart opencode-web` |
 | `--packages` | 逗号分隔、**不要空格**（如 `vim,curl,htop`）；走 subiquity 的 apt（第三方包走 `software/`） |
 | `--mirror` | 默认清华 `https://mirrors.tuna.tsinghua.edu.cn/ubuntu`（含 `-security`；缺 CA 时先 http 引导），写入 autoinstall `apt.primary`，**装完系统 apt 也用这个源**。内网源或官方源请显式覆盖，例如 `--mirror http://archive.ubuntu.com/ubuntu`。`build-iso.sh --fetch-offline` 会把同一 URL 传给抓包 |
 | `--no-provision` | 不执行 `software/`，只做裸装机 |
@@ -631,10 +631,10 @@ cat /var/log/autoinstall/20-docker.log
 | `--nvidia-driver-version N` | NVIDIA 驱动分支，默认 `595`（`PIN_NVIDIA_DRIVER`） |
 | `--nvidia-kernel-flavour F` | 内核 flavour（如 `generic-hwe-24.04` / `generic`），默认装机时按已装内核自动判断；全离线时也要求捆绑里有它 |
 | `--gitea-admin-user U` | Gitea 管理员用户名，默认 = `--username` |
-| `--gitea-admin-password P` | Gitea 管理员密码（至少 8 位），默认 = `--password` 明文；只给了 `--password-hash` 时装机写入 `/root/gitea-admin-password` |
+| `--gitea-admin-password P` | Gitea 管理员密码（至少 8 位），默认 = `--password` 明文 |
 | `--gitea-admin-email E` | Gitea 管理员邮箱，默认 `<用户名>@localhost` |
 | `--jenkins-admin-user U` | Jenkins 管理员用户名，默认 = `--username` |
-| `--jenkins-admin-password P` | Jenkins 管理员密码（≤72 字节），默认 = `--password` 明文；只给了 `--password-hash` 时装机写入 `/root/jenkins-admin-password` |
+| `--jenkins-admin-password P` | Jenkins 管理员密码（≤72 字节），默认 = `--password` 明文 |
 | `--jenkins-plugins "a b c"` | 预装 Jenkins 插件（空格分隔，可 `name:version`，自动带依赖），默认 `workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger`；全离线时需与捆绑一致（不一致会提示 `--force-fetch`） |
 | `--edition` | `auto`（默认）/ `server` / `desktop`。`auto` 读 ISO 的 `casper/install-sources.yaml`（`variant: desktop/server`），退回 `.disk/info`；显式指定优先 |
 | `--desktop-source` | 仅 desktop：`minimal`（默认，`ubuntu-desktop-minimal`）/ `standard`（`ubuntu-desktop`）/ 任意 source id；会对照 ISO 的 install-sources.yaml 校验 |
@@ -702,7 +702,7 @@ bash test/local-check.sh
 # 2) 烧进 ISO（QEMU 无人值守冒烟请加 --auto-disk；物理机不要加）
 ./build-iso.sh --iso ubuntu-24.04.x-live-server-amd64.iso \
   --out out/ubuntu-24.04-offline.iso \
-  --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
+  --password 'Ch@ngeMe' \
   --offline --offline-bundle cache/offline-bundles/noble-amd64 \
   --packages "vim,curl,htop,net-tools" \
   --auto-disk
@@ -782,7 +782,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 | 装完 SSH 登不进 | `allow-pw: false` 且无公钥 | 构建期已拒绝该组合；补 `--ssh-authorized-keys` 或 `--ssh-allow-pw true` |
 | 报 `no disk found` / 抹错盘 | 多盘/RAID，或误开 `--auto-disk` | **默认会停在选盘页**，直接在 UI 选对盘。无人值守才加 `--auto-disk`；仍自动失败时可改 `storage.layout.match`（serial/path），勿盲目依赖 `size: largest` |
 | `jenkins.service` 起不来 | Java 版本不对，或缺字体库 | 看 `/var/log/autoinstall/30-jenkins.log` 与 `journalctl -u jenkins`；确认装的是 21 或 17；`AWTProblem` / `libharfbuzz` 报错时 `apt install fontconfig libharfbuzz0b` |
-| 忘记 Jenkins 管理员密码 | 只给了 `--password-hash` 构建 | 看 `/root/jenkins-admin-password`（root 0600）；若用了 `--password`，密码与系统用户相同 |
+| 忘记 Jenkins 管理员密码 | 旧版 `--password-hash` 构建（该选项现已移除） | 看 `/root/jenkins-admin-password`（root 0600）；若用了 `--password`，密码与系统用户相同 |
 | Jenkins 匿名访问返回 403 / 无注册入口 | 设计如此 | 匿名不可读、禁止自助注册；需要开放时在“系统管理 → 安全”里调整 |
 | `npm install` 超时 / 404 | 公网 registry 不通 | 换 `registry.npmmirror.com`，或改走内网 Verdaccio |
 | `docker` 命令要 sudo | 组权限未生效 | 重新登录（组变更需新会话） |
@@ -790,7 +790,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 | `unity` 能跑但装不了 Editor / 未登录 | **镜像只预装 CLI** | 装机后 `unity auth login`，再 `unity install <ver>`；许可证另激活 |
 | 浏览器打不开 Gitea | 服务未起或防火墙 | `systemctl status gitea`；确认本机防火墙未拦 3000 端口（脚本**不**改防火墙） |
 | `<主机名>.local` 打不开 / 解析失败 | 客户端不支持 mDNS（Android、容器、跨网段），主机名重名被 Avahi 改成 `xxx-2.local`，或装完改过主机名 | 先用 `http://<IP>:3000/` 确认服务正常；`avahi-resolve -n <主机名>.local`、`systemctl status avahi-daemon`；重名或改名按「Gitea / Jenkins / OpenCode Web 的访问地址」里的命令同步 URL；需要稳定地址时构建用 `--service-url-host` |
-| 忘记 Gitea 管理员密码 | 只给了 `--password-hash` 构建 | 看 `/root/gitea-admin-password`（root 0600）；若用了 `--password`，密码与系统用户相同（装完请改掉） |
+| 忘记 Gitea 管理员密码 | 旧版 `--password-hash` 构建（该选项现已移除） | 看 `/root/gitea-admin-password`（root 0600）；若用了 `--password`，密码与系统用户相同（装完请改掉） |
 | `git@host:...` SSH 克隆被拒 | `AllowUsers` 没包含 `git`，或没把公钥加到 Gitea | 系统 OpenSSH + 用户 `git`；在 Gitea 里给用户添加 SSH 公钥。sshd 默认没有 `AllowUsers` |
 | `openmausbot` 打不开窗口 | 它是 Electron 应用 | 服务器上只能用 `openmausbot serve` |
 | 装完没有服务自启 | `policy-rc.d` 没删掉 | 确认 `99-cleanup.sh` 跑过；检查 `/usr/sbin/policy-rc.d` 不存在 |

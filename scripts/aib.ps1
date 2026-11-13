@@ -25,7 +25,7 @@
   需要 Docker Desktop (Linux containers 模式, WSL2 后端)。
 
 .EXAMPLE
-  .\scripts\aib.ps1 build --iso C:\isos\ubuntu-24.04.3-live-server-amd64.iso --out out\node01.iso --hostname node01 --password-hash '$6$...'
+  .\scripts\aib.ps1 build --iso C:\isos\ubuntu-24.04.3-live-server-amd64.iso --out out\node01.iso --hostname node01 --password 'Ch@ngeMe'
 #>
 # 注意: 故意不用 param()——子命令参数形如 --iso, 交给 $args 原样转发。
 $ErrorActionPreference = 'Stop'

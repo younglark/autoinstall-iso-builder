@@ -159,7 +159,7 @@ if [ -z "$VNC_PASSWORD" ]; then
   install -d -m 0700 "$R/root"
   ( umask 077; printf '%s\n' "$VNC_PASSWORD" > "$R$RANDOM_PW_FILE" )
   chmod 0600 "$R$RANDOM_PW_FILE"
-  echo "无明文 VNC 密码 (只给了 --password-hash): 已生成随机密码 → $RANDOM_PW_FILE"
+  echo "无明文 VNC 密码 (secret 未投递, 防御路径): 已生成随机密码 → $RANDOM_PW_FILE"
 fi
 install -d -m 0755 "$R/etc"
 if [ "$SKIP_PKG" != "1" ]; then

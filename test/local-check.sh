@@ -1198,12 +1198,12 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
   else
     fail "rustdesk password / server defaults: $(tail -3 "$xb/o2.log" "$xb/o3.log")"
   fi
-  # 只有哈希 → 无 secret, 提示随机密码
-  if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o4.iso" --password-hash "$(openssl passwd -6 x)" >"$xb/o4.log" 2>&1 && _xenv "$xb/o4.iso" "$xb/p4" \
-     && [[ ! -e "$xb/p4/rustdesk.secret" ]] && grep -q '/root/rustdesk-password' "$xb/o4.log"; then
-    pass "rustdesk hash-only: random password notice"
+  # --password-hash 已移除: 直接拒绝并提示改用 --password / 默认
+  if ! bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o4.iso" --password 'Pl99x' >"$xb/o4.log" 2>&1 \
+     && grep -q -- '--password-hash 已移除' "$xb/o4.log"; then
+    pass "--password-hash rejected with removal message"
   else
-    fail "rustdesk hash-only"
+    fail "--password-hash should be rejected"
   fi
   # --remote-desktop x11vnc: 关 Wayland + x11vnc, 密码 = --password; RustDesk 不投递
   if bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o9.iso" --password 'Pl@in99x' --remote-desktop x11vnc >"$xb/o9.log" 2>&1 && _xenv "$xb/o9.iso" "$xb/p9" \
@@ -1223,9 +1223,9 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
      && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o11.iso" --remote-desktop x11vnc --vnc-password 'vncpass1' >"$xb/o11.log" 2>&1 && _xenv "$xb/o11.iso" "$xb/p11" \
      && ( # shellcheck disable=SC1091
           . "$xb/p11/x11vnc.secret"; [[ "$VNC_PASSWORD" == 'vncpass1' ]] ) && ! grep -q 'vncpass1' "$xb/o11.log" \
-     && bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o12.iso" --remote-desktop x11vnc --password-hash "$(openssl passwd -6 x)" >"$xb/o12.log" 2>&1 && _xenv "$xb/o12.iso" "$xb/p12" \
-     && [[ ! -e "$xb/p12/x11vnc.secret" ]] && grep -q '/root/x11vnc-password' "$xb/o12.log"; then
-    pass "x11vnc default-password warning + --vnc-password override + hash-only random"
+     && ! bash build-iso.sh --iso "$xb/d.iso" --out "$xb/o12.iso" --remote-desktop x11vnc --password 'Pl99x' >"$xb/o12.log" 2>&1 \
+     && grep -q -- '--password-hash 已移除' "$xb/o12.log"; then
+    pass "x11vnc default-password warning + --vnc-password override + --password-hash rejected"
   else
     fail "x11vnc password defaults"
   fi
@@ -1806,16 +1806,17 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
     else
       fail "build-iso with gitea flags: $(tail -3 "$gt/a.log")"
     fi
-    # 只有哈希 → 不带 secret 文件
-    if bash build-iso.sh --iso "$gt/src.iso" --out "$gt/b.iso" --password-hash "$(openssl passwd -6 x)" \
-         --gitea-admin-user boss --gitea-admin-email boss@example.com >"$gt/b.log" 2>&1 \
+    # --password-hash 已移除: 拒绝; 默认构建统一投递 secret (gitea + opencode)
+    if ! bash build-iso.sh --iso "$gt/src.iso" --out "$gt/bh.iso" --password 'Pl99x' >"$gt/bh.log" 2>&1 \
+       && grep -q -- '--password-hash 已移除' "$gt/bh.log" \
+       && bash build-iso.sh --iso "$gt/src.iso" --out "$gt/b.iso" --gitea-admin-user boss --gitea-admin-email boss@example.com >"$gt/b.log" 2>&1 \
        && xorriso -osirrox on -indev "$gt/b.iso" -extract /provision "$gt/b" >/dev/null 2>&1 \
-       && [[ ! -e "$gt/b/gitea-admin.secret" ]] && grep -qx 'GITEA_ADMIN_USER=boss' "$gt/b/provision.env" \
-       && grep -q '/root/gitea-admin-password' "$gt/b.log" \
-       && [[ ! -e "$gt/b/opencode-web.secret" ]] && grep -q '/root/opencode-web-password' "$gt/b.log"; then
-      pass "gitea hash-only: no secret file, random password notice (opencode-web likewise)"
+       && [[ -e "$gt/b/gitea-admin.secret" && -e "$gt/b/opencode-web.secret" ]] \
+       && grep -qx 'GITEA_ADMIN_USER=boss' "$gt/b/provision.env" \
+       && ! grep -q 'ubuntu1990' "$gt/b.log"; then
+      pass "--password-hash rejected; default build ships gitea/opencode secrets"
     else
-      fail "gitea hash-only build"
+      fail "gitea password wiring"
     fi
     for bad in "--pin-gitea 1.2;rm" "--gitea-admin-user login" "--gitea-admin-user a/b" "--gitea-admin-password short" "--gitea-admin-email nope" "--username git"; do
       # shellcheck disable=SC2086
@@ -1838,7 +1839,7 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
   nf="$(mktemp -d)"
   bash test/make-fake-iso.sh server "$nf/src.iso" >/dev/null 2>&1 || true
   if [[ -f "$nf/src.iso" ]]; then
-    if bash build-iso.sh --iso "$nf/src.iso" --out "$nf/a.iso" --password-hash "$(openssl passwd -6 x)" >"$nf/a.log" 2>&1 \
+    if bash build-iso.sh --iso "$nf/src.iso" --out "$nf/a.iso" --password 'Pl99x' >"$nf/a.log" 2>&1 \
        && xorriso -osirrox on -indev "$nf/a.iso" -extract /provision "$nf/a" >/dev/null 2>&1 \
        && [[ -x "$nf/a/24-nvidia-driver.sh" ]] \
        && grep -qx 'PIN_NVIDIA_DRIVER=595' "$nf/a/provision.env" \
@@ -1849,7 +1850,7 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
     else
       fail "build-iso nvidia default: $(tail -5 "$nf/a.log" 2>/dev/null)"
     fi
-    if bash build-iso.sh --iso "$nf/src.iso" --out "$nf/b.iso" --password-hash "$(openssl passwd -6 x)" \
+    if bash build-iso.sh --iso "$nf/src.iso" --out "$nf/b.iso" --password 'Pl99x' \
          --no-nvidia-driver --nvidia-driver-version 580 --nvidia-kernel-flavour generic >"$nf/b.log" 2>&1 \
        && xorriso -osirrox on -indev "$nf/b.iso" -extract /provision "$nf/b" >/dev/null 2>&1 \
        && grep -q '^PROVISION_SKIP=.*24-nvidia-driver' "$nf/b/provision.env" \
@@ -1880,7 +1881,7 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
   fc="$(mktemp -d)"
   bash test/make-fake-iso.sh desktop "$fc/src.iso" >/dev/null 2>&1 || true
   if [[ -f "$fc/src.iso" ]]; then
-    if bash build-iso.sh --iso "$fc/src.iso" --out "$fc/a.iso" --edition desktop --password-hash "$(openssl passwd -6 x)" \
+    if bash build-iso.sh --iso "$fc/src.iso" --out "$fc/a.iso" --edition desktop --password 'Pl99x' \
          >"$fc/a.log" 2>&1 \
        && xorriso -osirrox on -indev "$fc/a.iso" -extract /provision "$fc/a" >/dev/null 2>&1; then
       if ! grep -q 'PIN_FLCLASH' "$fc/a/provision.env" \
@@ -1892,7 +1893,7 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
     else
       fail "build-iso desktop flclash: $(tail -5 "$fc/a.log" 2>/dev/null)"
     fi
-    if bash build-iso.sh --iso "$fc/src.iso" --out "$fc/b.iso" --edition desktop --password-hash "$(openssl passwd -6 x)" \
+    if bash build-iso.sh --iso "$fc/src.iso" --out "$fc/b.iso" --edition desktop --password 'Pl99x' \
          --no-flclash >"$fc/b.log" 2>&1 \
        && xorriso -osirrox on -indev "$fc/b.iso" -extract /provision "$fc/b" >/dev/null 2>&1; then
       if grep -q '37-flclash' "$fc/b/provision.env" && grep -q 'PROVISION_SKIP=' "$fc/b/provision.env"; then
@@ -2147,8 +2148,7 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
   bash test/make-fake-iso.sh desktop "$gt/d.iso" >/dev/null 2>&1 || true
   bash test/make-fake-iso.sh server "$gt/s.iso" >/dev/null 2>&1 || true
   _gx() { xorriso -osirrox on -indev "$1" -extract /provision "$2" >/dev/null 2>&1; }
-  _ph="$(openssl passwd -6 x)"
-  if bash build-iso.sh --iso "$gt/d.iso" --out "$gt/o1.iso" --password-hash "$_ph" >"$gt/o1.log" 2>&1 && _gx "$gt/o1.iso" "$gt/p1" \
+  if bash build-iso.sh --iso "$gt/d.iso" --out "$gt/o1.iso" --password 'Pl99x' >"$gt/o1.log" 2>&1 && _gx "$gt/o1.iso" "$gt/p1" \
      && [[ -x "$gt/p1/39-grok-bot.sh" && -f "$gt/p1/grok-bot-release.sh" && -f "$gt/p1/grok-bot-archive-key.asc" ]] \
      && grep -qx 'PIN_GROK_BOT=latest' "$gt/p1/provision.env" && grep -qx "GROK_BOT_DEB_URL=''" "$gt/p1/provision.env" \
      && ! grep -q '39-grok-bot' "$gt/p1/provision.env" \
@@ -2260,13 +2260,12 @@ if command -v xorriso >/dev/null && command -v openssl >/dev/null; then
     else
       fail "jenkins overrides: $(tail -3 "$jt/a.log")"
     fi
-    # 只有哈希 → 无 secret, 提示随机密码
-    if bash build-iso.sh --iso "$jt/src.iso" --out "$jt/b.iso" --password-hash "$(openssl passwd -6 x)" >"$jt/b.log" 2>&1 \
-       && xorriso -osirrox on -indev "$jt/b.iso" -extract /provision "$jt/b" >/dev/null 2>&1 \
-       && [[ ! -e "$jt/b/jenkins-admin.secret" ]] && grep -q '/root/jenkins-admin-password' "$jt/b.log"; then
-      pass "jenkins hash-only: no secret file, random password notice"
+    # --password-hash 已移除: 拒绝并提示
+    if ! bash build-iso.sh --iso "$jt/src.iso" --out "$jt/b.iso" --password 'Pl99x' >"$jt/b.log" 2>&1 \
+       && grep -q -- '--password-hash 已移除' "$jt/b.log"; then
+      pass "jenkins --password-hash rejected with removal message"
     else
-      fail "jenkins hash-only build"
+      fail "jenkins --password-hash should be rejected"
     fi
     # --skip 30 → 不投递 secret
     if bash build-iso.sh --iso "$jt/src.iso" --out "$jt/s.iso" --skip 30 >"$jt/s.log" 2>&1 \

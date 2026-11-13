@@ -39,7 +39,7 @@ autoinstall-iso-builder 容器 (version: ${AIB_VERSION:-dev}, $(. /etc/os-releas
 
 示例:
   aib build --iso ubuntu-24.04.3-live-server-amd64.iso --out out/node01.iso \\
-            --hostname node01 --password-hash '\$6\$...'
+            --hostname node01 --password 'Ch@ngeMe'
   aib fetch-offline --release noble --out cache/offline-bundles/noble-amd64
 USAGE
 }

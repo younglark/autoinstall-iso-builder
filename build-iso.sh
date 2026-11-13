@@ -21,7 +21,7 @@ SRC_ISO=""
 OUT_ISO=""
 HOSTNAME_="ubuntu-node"
 USERNAME_="ubuntu"
-# 未传 --password / --password-hash 时的默认密码 (构建时告警, 装完请改)
+# 未传 --password 时的默认密码 (构建时告警, 装完请改)
 DEFAULT_PASSWORD="ubuntu1990"
 USED_DEFAULT_PASSWORD=0
 PASS_HASH=""
@@ -60,11 +60,12 @@ PIN_OPENCODE="${PIN_OPENCODE:-latest}"
 PIN_OPENMAUSBOT="${PIN_OPENMAUSBOT:-latest}"
 PIN_UNITY_CLI="${PIN_UNITY_CLI:-}"
 PIN_GITEA="${PIN_GITEA:-latest}"
-# Gitea 管理员 (默认 = --username / --password; 只有哈希时装机生成随机密码)
+# Gitea 管理员 (默认 = --username / --password)
 GITEA_ADMIN_USER=""
 GITEA_ADMIN_PASSWORD=""
 GITEA_ADMIN_EMAIL=""
 # Jenkins 管理员 (同 Gitea 规则) 与预装插件
+# --password-hash 已移除: 密码只接受 --password 明文或默认值, 所有服务统一使用
 JENKINS_ADMIN_USER=""
 JENKINS_ADMIN_PASSWORD=""
 DEFAULT_JENKINS_PLUGINS="workflow-aggregator git gitea docker-workflow credentials-binding timestamper rebuild ansicolor docker-plugin parameterized-trigger"
@@ -104,9 +105,9 @@ usage() {
   --iso PATH            官方 Ubuntu Server ISO (22.04 / 24.04) 或 Ubuntu Desktop 24.04 ISO
   --out PATH            输出 ISO 路径
 
-身份 (二选一; 都不传则用默认用户 ubuntu / 密码 ubuntu1990, 构建时告警, 装完请改):
-  --password-hash HASH  crypt 哈希, 推荐
+身份 (可选; 不传则用默认用户 ubuntu / 密码 ubuntu1990, 构建时告警, 装完请改):
   --password PLAIN      明文, 脚本用 openssl passwd -6 现场哈希 (会留在 shell 历史里)
+  --password-hash 已移除: 曾导致各服务密码随机生成 (镜像里没有明文可分发)
 
 可选:
   --edition E           auto (默认) | server | desktop。auto 读 ISO 内
@@ -168,14 +169,12 @@ usage() {
                         内核 flavour (如 generic-hwe-24.04 / generic), 默认装机时按已装内核自动判断
   --gitea-admin-user U  Gitea 管理员用户名, 默认 = --username
   --gitea-admin-password P
-                        Gitea 管理员密码 (>=8 位), 默认 = --password 明文;
-                        只给了 --password-hash 时装机生成随机密码写入 /root/gitea-admin-password
+                        Gitea 管理员密码 (>=8 位), 默认 = --password 明文 (含默认密码)
   --gitea-admin-email E Gitea 管理员邮箱, 默认 <用户名>@localhost
   --jenkins-admin-user U
                         Jenkins 管理员用户名, 默认 = --username
   --jenkins-admin-password P
-                        Jenkins 管理员密码, 默认 = --password 明文;
-                        只给了 --password-hash 时装机生成随机密码写入 /root/jenkins-admin-password
+                        Jenkins 管理员密码, 默认 = --password 明文 (含默认密码)
   --service-url-host H  Gitea / Jenkins 对外 URL 的主机部分, 覆盖默认的 <hostname>.local:
                         IPv4 / FQDN / localhost, 如 192.168.1.20 或 ci.example.com
                         → http://H:3000/ 与 http://H:8080/
@@ -187,8 +186,7 @@ usage() {
                         会话里用 RustDesk 客户端按 IP 直连 (端口 21118/tcp, 局域网), 并关闭合盖 / 空闲挂起
                         (锁屏保留)。关 Wayland 由 36 钩子落地, RustDesk 由 38 钩子落地
   --remote-desktop M    仅 desktop: rustdesk (默认) | x11vnc (VNC 5900, 不加密) | none (不装远程桌面)
-  --rustdesk-password P RustDesk 固定密码 (≥6 位)。默认 = --password 明文 (含默认密码);
-                        只给了 --password-hash 时装机生成随机密码写入 /root/rustdesk-password
+  --rustdesk-password P RustDesk 固定密码 (≥6 位)。默认 = --password 明文 (含默认密码)
   --rustdesk-server H   自建 RustDesk 服务器 (hbbs/hbbr) 主机, 可带端口; 写入 custom-rendezvous-server /
                         relay-server, 可经自建服务器按 ID 连。默认不设
   --rustdesk-allow-id   RustDesk 保留公共 ID 服务器 (rs-ny.rustdesk.com), 可跨网络按 ID 连。默认关闭:
@@ -198,8 +196,7 @@ usage() {
   --wayland             仅 desktop: 保留 Wayland, 不改合盖 / 空闲挂起设置。不能与 --remote-desktop x11vnc
                         同用; 与 RustDesk 同用时告警 (Wayland 下连不了登录界面, 会话里每次要手动授权共享屏幕)
   --vnc-password P      x11vnc 密码 (≥6 位, VNC 只用前 8 个字符), 仅 --remote-desktop x11vnc。
-                        默认 = --password 明文 (含默认密码); 只给了 --password-hash 时装机生成随机密码
-                        写入 /root/x11vnc-password
+                        默认 = --password 明文 (含默认密码)
   --iso-sha256 HEX      校验源 ISO 的 SHA256, 不匹配则失败
   --iso-sha256sums FILE 用 SHA256SUMS 文件按 basename 校验源 ISO
   --menu-regex REGEX    要注入的菜单项标题正则。默认 server: "Try or Install";
@@ -211,7 +208,7 @@ usage() {
   ./build-iso.sh --iso ubuntu-24.04.1-live-server-amd64.iso \
                  --out out/ubuntu-24.04.1-autoinstall.iso \
                  --hostname node01 --username ops \
-                 --password-hash "$(openssl passwd -6 'Ch@ngeMe')" \
+                 --password 'Ch@ngeMe' \
                  --packages "vim,curl,htop,net-tools" \
                  --mirror http://archive.ubuntu.com/ubuntu \
                  --iso-sha256sums SHA256SUMS \
@@ -243,7 +240,7 @@ while [[ $# -gt 0 ]]; do
     --out)            OUT_ISO="$2"; shift 2 ;;
     --hostname)       HOSTNAME_="$2"; shift 2 ;;
     --username)       USERNAME_="$2"; shift 2 ;;
-    --password-hash)  PASS_HASH="$2"; shift 2 ;;
+    --password-hash)  die "--password-hash 已移除: 传哈希意味着镜像里没有明文可分发, 装机时 Gitea/Jenkins/OpenCode/RustDesk 只能各自生成随机密码 (写入目标机 /root/*-password)。请改用 --password '你的密码', 或什么都不传走默认 ubuntu/ubuntu1990 (构建时告警)" ;;
     --password)       PASS_PLAIN="$2"; shift 2 ;;
     --locale)         LOCALE_="$2"; shift 2 ;;
     --keyboard)       KEYBOARD_="$2"; shift 2 ;;
@@ -319,8 +316,8 @@ MIRROR="$(aib_normalize_mirror "$MIRROR")"
 [[ -n "$OUT_ISO" ]] || { usage; die "缺少 --out"; }
 [[ -f "$SRC_ISO" ]] || die "源 ISO 不存在: $SRC_ISO"
 
-# 默认凭据: 两种密码参数都没传 → 默认密码 (Gitea 管理员随之默认相同)
-if [[ -z "$PASS_HASH" && -z "$PASS_PLAIN" ]]; then
+# 默认凭据: 未传 --password → 默认密码, 所有服务 (Gitea/Jenkins/OpenCode/RustDesk/VNC) 统一使用
+if [[ -z "$PASS_PLAIN" ]]; then
   PASS_PLAIN="$DEFAULT_PASSWORD"
   USED_DEFAULT_PASSWORD=1
 fi
@@ -467,13 +464,11 @@ if [[ "$_ssh_allow" == "false" && "$_has_keys" -eq 0 ]]; then
 fi
 
 if [[ "$USED_DEFAULT_PASSWORD" -eq 1 ]]; then
-  warn "未传 --password / --password-hash: 使用默认密码 (用户 $USERNAME_; Gitea/Jenkins 管理员、OpenCode Web 同此)。这是公开的默认值, 装完请立即修改: passwd + Gitea/Jenkins/OpenCode Web 改密"
+  warn "未传 --password: 使用默认密码 (用户 $USERNAME_; Gitea/Jenkins 管理员、OpenCode Web、RustDesk 同此)。这是公开的默认值, 装完请立即修改: passwd + Gitea/Jenkins/OpenCode Web 改密"
 fi
-if [[ -z "$PASS_HASH" ]]; then
-  command -v openssl >/dev/null || die "缺少 openssl, 无法哈希密码"
-  PASS_HASH="$(openssl passwd -6 "$PASS_PLAIN")"
-fi
-[[ "$PASS_HASH" == \$* ]] || die "--password-hash 不像 crypt 哈希 (应以 \$ 开头)"
+command -v openssl >/dev/null || die "缺少 openssl, 无法哈希密码"
+PASS_HASH="$(openssl passwd -6 "$PASS_PLAIN")"
+[[ "$PASS_HASH" == \$* ]] || die "openssl passwd -6 输出异常 (应以 \$ 开头)"
 
 # ---------------------------------------------------------------- 源 ISO 完整性
 verify_iso_sha256() {
@@ -966,40 +961,30 @@ if [[ "$PROVISION" -eq 1 ]]; then
     ( umask 077; printf 'GITEA_ADMIN_PASSWORD=%q\n' "$GITEA_ADMIN_PASSWORD" > "$WORK/provision/gitea-admin.secret" )
     chmod 0600 "$WORK/provision/gitea-admin.secret"
     ok "Gitea 管理员 $GITEA_ADMIN_USER: 密码随 ISO 投递 (装机后删除目标机副本)"
-  elif ! should_skip_script 45-gitea; then
-    warn "Gitea 管理员 $GITEA_ADMIN_USER: 无明文密码 (只给了 --password-hash), 装机生成随机密码 → /root/gitea-admin-password"
   fi
   # Jenkins 管理员明文密码同理: 0600 文件, 30-jenkins.sh 只写 bcrypt 哈希进 init.groovy.d 并删除此文件
   if [[ -n "$JENKINS_ADMIN_PASSWORD" ]] && ! should_skip_script 30-jenkins; then
     ( umask 077; printf 'JENKINS_ADMIN_PASSWORD=%q\n' "$JENKINS_ADMIN_PASSWORD" > "$WORK/provision/jenkins-admin.secret" )
     chmod 0600 "$WORK/provision/jenkins-admin.secret"
     ok "Jenkins 管理员 $JENKINS_ADMIN_USER: 密码随 ISO 投递 (装机时转 bcrypt, 删除明文)"
-  elif ! should_skip_script 30-jenkins; then
-    warn "Jenkins 管理员 $JENKINS_ADMIN_USER: 无明文密码 (只给了 --password-hash), 装机生成随机密码 → /root/jenkins-admin-password"
   fi
   # x11vnc 明文密码同理: 0600 文件, 36-x11vnc-xorg.sh 转成 /etc/x11vnc.pass 后删除
   if [[ "$X11VNC" -eq 1 && -n "$VNC_PASSWORD" ]] && ! should_skip_script 36-x11vnc-xorg; then
     ( umask 077; printf 'VNC_PASSWORD=%q\n' "$VNC_PASSWORD" > "$WORK/provision/x11vnc.secret" )
     chmod 0600 "$WORK/provision/x11vnc.secret"
     ok "x11vnc: 密码随 ISO 投递 (装机时写 /etc/x11vnc.pass, 删除明文)"
-  elif [[ "$X11VNC" -eq 1 ]] && ! should_skip_script 36-x11vnc-xorg; then
-    warn "x11vnc: 无明文密码 (只给了 --password-hash), 装机生成随机密码 → /root/x11vnc-password"
   fi
   # RustDesk 固定密码同理: 0600 文件, 38-rustdesk.sh 移到 /etc/aib/rustdesk.secret (root 0600), 首次开机设好后删除
   if [[ "$REMOTE_DESKTOP" == "rustdesk" && -n "$RUSTDESK_PASSWORD" ]] && ! should_skip_script 38-rustdesk; then
     ( umask 077; printf 'RUSTDESK_PASSWORD=%q\n' "$RUSTDESK_PASSWORD" > "$WORK/provision/rustdesk.secret" )
     chmod 0600 "$WORK/provision/rustdesk.secret"
     ok "RustDesk: 固定密码随 ISO 投递 (首次开机设置后删除明文)"
-  elif [[ "$REMOTE_DESKTOP" == "rustdesk" ]] && ! should_skip_script 38-rustdesk; then
-    warn "RustDesk: 无明文密码 (只给了 --password-hash), 装机生成随机密码 → /root/rustdesk-password"
   fi
   # OpenCode Web 明文密码同理: 0600 文件, 60-opencode.sh 写入 /etc/opencode/web.env 后删除
   if [[ -n "$PASS_PLAIN" ]] && ! should_skip_script 60-opencode; then
     ( umask 077; printf 'OPENCODE_WEB_PASSWORD=%q\n' "$PASS_PLAIN" > "$WORK/provision/opencode-web.secret" )
     chmod 0600 "$WORK/provision/opencode-web.secret"
     ok "OpenCode Web: 密码随 ISO 投递 (装机时写 /etc/opencode/web.env, 删除明文)"
-  elif ! should_skip_script 60-opencode; then
-    warn "OpenCode Web: 无明文密码 (只给了 --password-hash), 装机生成随机密码 → /root/opencode-web-password"
   fi
   SCRIPT_COUNT=$(find "$WORK/provision" -maxdepth 1 -name '[0-9][0-9]-*.sh' | wc -l)
   ok "已打包 $SCRIPT_COUNT 个软件预装脚本 (node>=$PIN_NODE_MAJOR grok=$PIN_GROK)"

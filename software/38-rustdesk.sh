@@ -16,7 +16,7 @@
 #                            固定密码只能经运行中的 RustDesk 设置: 首次开机由 aib-rustdesk-setup.service (oneshot)
 #                            等 rustdesk --server 进程及其 IPC 就绪后 rustdesk --password, 再读回确认选项。
 #                            不记录 RustDesk ID (要看: sudo rustdesk --get-id)
-#                            固定密码 = --rustdesk-password, 默认 = --password 明文; 只给了 --password-hash 时
+#                            固定密码 = --rustdesk-password, 默认 = --password 明文; secret 未投递时 (防御路径)
 #                            随机生成写入 /root/rustdesk-password (root 0600)。
 #   PIN_RUSTDESK             版本, 默认见 tools/rustdesk-release.sh (RUSTDESK_DEFAULT_VERSION)
 #   RUSTDESK_SERVER          自建 hbbs/hbbr 主机 (可空)
@@ -135,7 +135,7 @@ if [ -z "$RUSTDESK_PASSWORD" ]; then
   install -d -m 0700 "$R/root"
   ( umask 077; printf '%s\n' "$RUSTDESK_PASSWORD" > "$R$RANDOM_PW_FILE" )
   chmod 0600 "$R$RANDOM_PW_FILE"
-  echo "无明文 RustDesk 密码 (只给了 --password-hash): 已生成随机密码 → $RANDOM_PW_FILE"
+  echo "无明文 RustDesk 密码 (secret 未投递, 防御路径): 已生成随机密码 → $RANDOM_PW_FILE"
 fi
 install -d -m 0755 "$R/etc/aib"
 ( umask 077; printf 'RUSTDESK_PASSWORD=%q\n' "$RUSTDESK_PASSWORD" > "$R/etc/aib/rustdesk.secret" )

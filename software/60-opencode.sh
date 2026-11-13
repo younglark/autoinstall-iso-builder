@@ -7,7 +7,7 @@
 #      `opencode service` / `pair --remote`, 以免后台服务、开浏览器或开远程隧道)。
 # 密码: OPENCODE_PASSWORD (Basic auth 用户名恒为 opencode)。明文只来自
 #      /provision/opencode-web.secret, 写入 /etc/opencode/web.env (root 0600) 后删除。
-# 只给了 --password-hash 时生成随机密码 → /root/opencode-web-password (root 0600)。
+# secret 未投递时 (防御路径, 正常构建不会发生) 生成随机密码 → /root/opencode-web-password (root 0600)。
 # 系统配置 /etc/opencode/opencode.json 设 update=disable, 服务不自动升级。
 # 防火墙不动。URL: http://<主机名>.local:4096/ (或 --service-url-host)。
 #
