@@ -7,7 +7,7 @@
 #     manifest.json
 #     apt/                 # file:/ apt 源 (Packages + *.deb)
 #     apt-sources/         # 第三方 keyring + .list/.sources (装完写回, 供联网更新)
-#     npm/prefix.tar.gz    # 预装的全局 npm 树 (解压到 /usr/local)
+#     npm/prefix.tar.gz    # npm 树。装机时 openmausbot 进 /usr/local；grok/opencode 进登录用户家目录
 #     node/                # 官方 Node tarball (nodesource 失败时的兜底)
 #     unity-cli/           # Unity CLI 二进制 + version/sha256（不含 Editor）
 #     godot/               # Godot 4.7.2 Linux x86_64 zip + sha512（不含 export templates）

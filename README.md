@@ -47,8 +47,8 @@
 | `39-grok-bot.sh` | Grok Bot 桌面版 | **仅 Desktop 默认安装**（Server / 非 amd64·arm64 自动跳过；`--no-grok-bot` 或 `--skip 39` 也可跳过）。官方 linux `.deb`（发布 feed 的最新版，sha256 用签名 apt 索引或内置值校验；`--grok-bot-version` / `--grok-bot-url` + `--grok-bot-sha256` 可钉扎）；保留官方 apt 源，之后随 `apt upgrade` 更新。**只装应用**：不登录、不预置配置。失败只记 SKIP，不影响装机。详见下文 |
 | `40-nodejs.sh` | Node.js 24 | NodeSource 优先，官方 tarball 兜底 |
 | `45-gitea.sh` | Gitea（最新稳定版，可 `--pin-gitea`） | 官方 linux-amd64 二进制（sha256 校验）→ `/usr/local/bin/gitea`；系统用户 `git`；SQLite；**装机阶段写好配置并创建管理员**，开机 `gitea.service` 自启。监听 **0.0.0.0:3000**（不与 Jenkins 8080 冲突），`ROOT_URL` 为 `http://<主机名>.local:3000/`，开放注册，LFS 开，`OFFLINE_MODE`。SSH 克隆走系统 OpenSSH：`git@host:user/repo.git` |
-| `50-grok.sh` | xAI Grok Build | `@xai-official/grok`，**官方包**，不是社区的 `@vibe-kit/grok-cli` |
-| `60-opencode.sh` | OpenCode 2.x + Web | npm `@opencode/cli`（**不是** 1.x 的 `opencode-ai`）。开机启用 `opencode-web.service`（以安装用户运行），`opencode serve --hostname 0.0.0.0 --port 4096`；网页密码跟随 `--password`（HTTP Basic 用户名固定 `opencode`）。详见下文 |
+| `50-grok.sh` | xAI Grok Build | 官方布局 `~/.grok`（`installer = "internal"`），不是社区的 `@vibe-kit/grok-cli`。登录用户直接 `grok update` |
+| `60-opencode.sh` | OpenCode 2.x + Web | 官方布局 `~/.opencode/bin`（二进制来自 `@opencode/cli`，**不是** 1.x 的 `opencode-ai`）。开机启用 `opencode-web.service`（以安装用户运行），`opencode serve --hostname 0.0.0.0 --port 4096`；网页密码跟随 `--password`（HTTP Basic 用户名固定 `opencode`）。登录用户直接 `opencode upgrade`。详见下文 |
 | `70-openmausbot.sh` | OpenMausBot | npm CLI + 一个**故意未启用**的 systemd 单元 |
 | `80-unity-cli.sh` | Unity CLI | 官方 CDN 二进制装到 `/usr/local/bin/unity`；**不含 Editor / 登录 / 许可证** |
 | `85-godot.sh` | Godot Engine 4.7.2 | 官方 Linux x86_64 标准编辑器 zip → `/opt/godot/4.7.2/` + `/usr/local/bin/godot`；**不含 export templates** |
@@ -251,13 +251,14 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 
 ### OpenCode Web：装完即可打开（需自行登录模型）
 
-默认预装（`--skip 60` / `--skip 60-opencode` 可跳过），**Desktop 和 Server 都启用**。npm 包为 **`@opencode/cli`（OpenCode 2.x）**，不是 1.x 的 `opencode-ai`。`--pin-opencode` / `PIN_OPENCODE` 钉的是 `@opencode/cli` 的版本。
+默认预装（`--skip 60` / `--skip 60-opencode` 可跳过），**Desktop 和 Server 都启用**。二进制取自 **`@opencode/cli`（OpenCode 2.x）**，不是 1.x 的 `opencode-ai`。`--pin-opencode` / `PIN_OPENCODE` 钉的是这个包的版本。装到登录用户的 `~/.opencode/bin/opencode`（和官方 `curl https://opencode.ai/v2/install` 同一位置），并在 `~/.bashrc` 加上 PATH。不写 `/etc/opencode/opencode.json`，所以不会用系统策略关掉更新。
 
 装机时会：
 
 - 写入 `/etc/opencode/web.env`（root、0600，由 systemd `EnvironmentFile=` 读取），内容为 `OPENCODE_PASSWORD=...`（固定网页密码）。HTTP Basic 用户名固定为 `opencode`。明文来自 `--password`（都不传时为默认密码）；构建时的明文单独放在 ISO 的 `/provision/opencode-web.secret`（0600，不进 `provision.env` / 构建日志），装机用完即删。
-- 写入 `/etc/opencode/opencode.json`（`{"update":"disable"}`），关闭自动更新。
-- 启用 `opencode-web.service`：系统单元，以安装用户（`--username`，**不是 root**）运行，`WorkingDirectory` 为该用户家目录，`After=` / `Wants=network-online.target`，`Restart=on-failure`。前台命令为 `opencode serve --hostname 0.0.0.0 --port 4096`。不启动远程隧道、不自动打开浏览器。防火墙规则不动。
+- 启用 `opencode-web.service`：系统单元，以安装用户（`--username`，**不是 root**）运行，`WorkingDirectory` 为该用户家目录，`ExecStart` 为该用户的 `~/.opencode/bin/opencode`，`After=` / `Wants=network-online.target`，`Restart=on-failure`。前台命令为 `opencode serve --hostname 0.0.0.0 --port 4096`。不启动远程隧道、不自动打开浏览器。防火墙规则不动。
+
+升级：以该用户执行 `opencode upgrade`（会替换 `~/.opencode/bin/opencode`）。正在跑的 Web 服务要 `sudo systemctl restart opencode-web` 才会换成新二进制。
 
 开机后浏览器打开 `http://<主机名>.local:4096/`（或 `http://<本机IP>:4096/`），用用户名 `opencode` 和上面的密码登录。**镜像不预装任何模型 API key**；首次使用请以该用户执行 `opencode auth login`，或在网页里登录模型提供商。
 
@@ -310,7 +311,7 @@ SSH 克隆使用系统 OpenSSH（端口 22、用户 `git`，Gitea 维护 `~git/.
 
 | 工具 | 首次使用 |
 |---|---|
-| Grok | `export XAI_API_KEY=xai-...`（CI 里走环境变量） |
+| Grok | 装在登录用户的 `~/.grok`（与官方安装器相同）。`grok update` 直接升级。凭据：`export XAI_API_KEY=xai-...`（CI 里走环境变量） |
 | OpenCode | 以安装用户执行 `opencode auth login`，或在 Web UI（`:4096`）里登录模型提供商。镜像**不**预装 API key |
 | OpenMausBot | 填 `/etc/openmausbot/env`（0600），再 `systemctl enable --now openmausbot` |
 | Unity CLI | 装机后 `unity auth login`，需要 Editor 再 `unity install <ver>`（镜像**不**预装 Editor） |
@@ -724,7 +725,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 | 装机 late-commands | 拷到 `/opt/offline`，临时只启用 `deb [trusted=yes] file:/opt/offline/apt ./`，再跑 `software/`（`OFFLINE=1`） |
 | `software/*.sh` | 离线时不 curl、不加远程源；npm CLI 从 `prefix.tar.gz` 解压；Unity CLI 从 `unity-cli/` 安装；Godot 从 `godot/` 安装；Gitea 从 `gitea/` 安装；FlClash 从 `flclash/`、RustDesk 从 `rustdesk/`、Grok Bot 从 `grok-bot/` 安装（依赖来自本地 apt 池）；Jenkins 插件从 `jenkins-plugins/` 拷贝 |
 | `restore-online-apt.sh` | 卸掉离线 pin、恢复安装器写入的 Ubuntu 源（即 `--mirror`，默认清华 https，含 `-security`）后，把捆绑内 **全部** `apt-sources/` 种子写回（Docker CE / GitHub CLI / NVIDIA toolkit / Jenkins / NodeSource / Microsoft Edge；与在线脚本同一批 URL/密钥）。装机时可能仍无网，此处不做 `apt update`；联网后即可收安全更新。纯在线构建不会调用本脚本 |
-| 删除 `/opt/offline` | `restore-online-apt.sh` 之后的 late-command 删掉整个 `/opt/offline`（约 2-3 GB），大小记在 `/var/log/autoinstall/offline-bundle-removed.txt`。装好的软件运行时都不读它：apt 本地源已被 `restore-online-apt.sh` 撤掉，npm 全局树解压到 `/usr/local`，Node 解压到 `/opt/node-v*`，Jenkins 插件拷进 `JENKINS_HOME`，Gitea / Unity CLI / Godot 二进制和 FlClash / RustDesk / Grok Bot 的 deb 都已安装到系统目录。要保留（比如想在本机重跑 `software/`）：`--keep-offline-bundle` |
+| 删除 `/opt/offline` | `restore-online-apt.sh` 之后的 late-command 删掉整个 `/opt/offline`（约 2-3 GB），大小记在 `/var/log/autoinstall/offline-bundle-removed.txt`。装好的软件运行时都不读它：apt 本地源已被 `restore-online-apt.sh` 撤掉，OpenMausBot 从 npm 树装到 `/usr/local`，Grok / OpenCode 装进登录用户的 `~/.grok` 与 `~/.opencode`，Node 解压到 `/opt/node-v*`，Jenkins 插件拷进 `JENKINS_HOME`，Gitea / Unity CLI / Godot 二进制和 FlClash / RustDesk / Grok Bot 的 deb 都已安装到系统目录。要保留（比如想在本机重跑 `software/`）：`--keep-offline-bundle` |
 
 体积与缓存：
 
@@ -749,7 +750,7 @@ bash test/qemu-smoke.sh out/ubuntu-24.04-offline.iso --offline-nic
 **无捆绑**时的旧 `--offline` 只影响 autoinstall apt fallback；第三方脚本仍会联网。当前这套软件栈里：
 
 - GitHub CLI / Docker / NVIDIA Container Toolkit / Jenkins / NodeSource / Microsoft Edge 走各自第三方仓库 → 需要下载 `.deb` 后配 `--debs`
-- Grok / OpenCode / OpenMausBot 是 **npm 全局包** → 需要预建 npm 缓存（`npm cache add`）或打成 tarball 后离线 `npm install -g ./xxx.tgz`
+- Grok / OpenCode / OpenMausBot 的离线载荷仍打在 npm `prefix.tar.gz` 里。装机时 OpenMausBot 进 `/usr/local`；Grok 与 OpenCode 解出官方用户态目录（`~/.grok`、`~/.opencode/bin`），不留全局 npm 包装器
 - Unity CLI 是 CDN 二进制（`public-cdn.cloud.unity3d.com`）→ 全离线捆绑的 `unity-cli/`；无捆绑时脚本会联网下载
 - Godot 是官方 zip（GitHub releases / downloads.godotengine.org，固定 **4.7.2**）→ 全离线捆绑的 `godot/`；无捆绑时脚本会联网下载；**不含** export templates
 - Gitea 是官方二进制（`dl.gitea.com`，默认 latest，可用 `--pin-gitea`）→ 全离线捆绑的 `gitea/`；无捆绑时脚本会联网下载并用官方 `.sha256` 校验

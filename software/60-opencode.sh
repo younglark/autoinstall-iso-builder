@@ -8,7 +8,10 @@
 # 密码: OPENCODE_PASSWORD (Basic auth 用户名恒为 opencode)。明文只来自
 #      /provision/opencode-web.secret, 写入 /etc/opencode/web.env (root 0600) 后删除。
 # secret 未投递时 (防御路径, 正常构建不会发生) 生成随机密码 → /root/opencode-web-password (root 0600)。
-# 系统配置 /etc/opencode/opencode.json 设 update=disable, 服务不自动升级。
+# 二进制放在登录用户的 ~/.opencode/bin (官方 curl 安装器的位置)。
+# 跑起来的真实路径等于 ~/.opencode/bin/opencode 时, `opencode upgrade` 认成 curl
+# 安装, 直接替换家目录里的文件, 不走 npm 全局。不要写 /etc/opencode/opencode.json
+# 的 update=disable, 那是系统策略, 用户改不掉。
 # 防火墙不动。URL: http://<主机名>.local:4096/ (或 --service-url-host)。
 #
 # 测试钩子: AIB_TARGET_ROOT=<dir> 把文件写到该前缀; AIB_SKIP_PKG=1 跳过 npm/node。
@@ -26,7 +29,6 @@ VER="${PIN_OPENCODE:-latest}"
 PORT="${OPENCODE_WEB_PORT:-4096}"
 UNIT="$R/etc/systemd/system/opencode-web.service"
 ENV_FILE="$R/etc/opencode/web.env"
-CFG_FILE="$R/etc/opencode/opencode.json"
 SECRET_FILE="$HERE/opencode-web.secret"
 RANDOM_PW_FILE="$R/root/opencode-web-password"
 
@@ -55,38 +57,90 @@ if [ -z "$svc_home" ]; then
 fi
 
 # ---------------------------------------------------------------- 安装
-BIN=""
+# 官方安装器: ~/.opencode/bin/opencode 是文件本身 (realpath 必须落在这里)。
+BIN="${svc_home}/.opencode/bin/opencode"
+BIN_FS="$(aib_fs "$BIN")"
 if [ "$SKIP_PKG" != "1" ]; then
   export HOME="${HOME:-/root}"
   command -v node >/dev/null || { echo "ERROR: 需要先执行 40-nodejs.sh"; rm -f "$SECRET_FILE"; exit 1; }
 
+  STAGE=""
+  CLEAN_STAGE=0
   if offline_enabled 2>/dev/null && [ -f "$(offline_root)/npm/prefix.tar.gz" ]; then
-    echo "offline: 使用已解压/捆绑的 npm prefix (opencode pin=$VER pkg=$PKG)"
-    command -v opencode >/dev/null || offline_extract_npm_prefix
-    if command -v aib_opencode_cli_postinstall >/dev/null 2>&1; then
-      aib_opencode_cli_postinstall /usr/local || echo "warn: opencode postinstall 在目标机重跑失败, 沿用捆绑内二进制"
-    fi
+    echo "offline: 从 npm 树取出 opencode 二进制, 装到 ${svc_home}/.opencode (pin=$VER)"
+    aib_prepare_npm_stage || { echo "ERROR: 无法展开 npm prefix"; rm -f "$SECRET_FILE"; exit 1; }
+    STAGE="$(aib_npm_stage_dir)"
   else
-    # 禁止 --ignore-scripts: 否则 bin 只是桩, serve 不可用。
-    npm install -g "${PKG}@${VER}" --no-audit --no-fund --allow-scripts="$PKG" \
-      || npm install -g "${PKG}@${VER}" --no-audit --no-fund
+    STAGE="$(mktemp -d)"
+    CLEAN_STAGE=1
+    echo "online: npm prefix ${STAGE} 取 ${PKG}@${VER}, 再装到 ${svc_home}/.opencode"
+    # 禁止 --ignore-scripts: 否则 bin 只是桩。装在临时 prefix, 不进 /usr/local。
+    npm install --prefix "$STAGE" "${PKG}@${VER}" --no-audit --no-fund --allow-scripts="$PKG" \
+      || npm install --prefix "$STAGE" "${PKG}@${VER}" --no-audit --no-fund
     if command -v aib_prune_opencode_cli_platform >/dev/null 2>&1; then
       _arch="$(aib_opencode_node_arch "$(dpkg --print-architecture 2>/dev/null || uname -m)")"
-      aib_prune_opencode_cli_platform /usr/local "$_arch"
+      aib_prune_opencode_cli_platform "$STAGE" "$_arch"
     fi
   fi
 
-  BIN="$(command -v opencode || true)"
-  [ -n "$BIN" ] || { echo "ERROR: opencode 未进入 PATH"; rm -f "$SECRET_FILE"; exit 1; }
-  if ! "$BIN" --version >/dev/null 2>&1; then
-    echo "ERROR: opencode --version 失败 (postinstall 可能没跑, 二进制是桩)"
+  _arch="$(aib_opencode_node_arch "$(dpkg --print-architecture 2>/dev/null || uname -m)")"
+  _mods="$STAGE/lib/node_modules/@opencode/cli/node_modules"
+  SRC_BIN=""
+  if [ -r /proc/cpuinfo ] && grep -q 'avx2' /proc/cpuinfo; then
+    SRC_BIN="$_mods/@opencode/cli-linux-${_arch}/bin/opencode"
+  fi
+  if [ ! -f "$SRC_BIN" ]; then
+    SRC_BIN="$_mods/@opencode/cli-linux-${_arch}-baseline/bin/opencode"
+  fi
+  if [ ! -f "$SRC_BIN" ]; then
+    SRC_BIN="$STAGE/lib/node_modules/@opencode/cli/bin/opencode.exe"
+  fi
+  if [ -L "$SRC_BIN" ]; then
+    SRC_BIN="$(readlink -f "$SRC_BIN")"
+  fi
+  if [ ! -f "$SRC_BIN" ]; then
+    echo "ERROR: 找不到 opencode 平台二进制"
     rm -f "$SECRET_FILE"
     exit 1
   fi
-  "$BIN" --version
+  _sz="$(wc -c < "$SRC_BIN" | tr -d ' ')"
+  if [ "${_sz:-0}" -lt 1000000 ]; then
+    if command -v aib_opencode_cli_postinstall >/dev/null 2>&1; then
+      aib_opencode_cli_postinstall "$STAGE" || true
+    fi
+    _sz="$(wc -c < "$SRC_BIN" | tr -d ' ')"
+  fi
+  if [ "${_sz:-0}" -lt 1000000 ]; then
+    echo "ERROR: opencode 二进制过小 (${_sz:-0} 字节, postinstall 可能没跑)"
+    rm -f "$SECRET_FILE"
+    exit 1
+  fi
+  mkdir -p "$(dirname "$BIN_FS")"
+  install -m 0755 "$SRC_BIN" "$BIN_FS"
+  printf '%s\n' '#!/bin/sh' 'exec "$(dirname "$0")/opencode" "$@"' > "$(dirname "$BIN_FS")/opencode2"
+  chmod 0755 "$(dirname "$BIN_FS")/opencode2"
+  if [ -z "$R" ]; then
+    "$BIN_FS" --version
+  fi
+  if [ "$CLEAN_STAGE" = "1" ]; then
+    rm -rf "$STAGE"
+  fi
+  aib_unpublish_global_user_clis
 else
-  BIN="${OPENCODE_BIN:-/usr/local/bin/opencode}"
+  mkdir -p "$(dirname "$BIN_FS")"
 fi
+
+BASHRC="$(aib_fs "$svc_home/.bashrc")"
+aib_install_shell_block "$BASHRC" "# >>> opencode >>>" "# <<< opencode <<<" "$(cat <<'BLOCK'
+# >>> opencode >>>
+export PATH="$HOME/.opencode/bin:$PATH"
+# <<< opencode <<<
+BLOCK
+)"
+mkdir -p "$(aib_fs "$svc_home/.local/bin")"
+ln -sfn "$BIN" "$(aib_fs "$svc_home/.local/bin/opencode")"
+ln -sfn "$BIN" "$(aib_fs "$svc_home/.local/bin/opencode2")"
+aib_own_user "$(aib_fs "$svc_home/.opencode")" "$(aib_fs "$svc_home/.local")" "$BASHRC"
 
 # ---------------------------------------------------------------- 密码 → EnvironmentFile
 WEB_PW=""
@@ -141,15 +195,6 @@ fi
 WEB_PW=""
 rm -f "$SECRET_FILE"
 
-# 系统级关闭自动更新 (官方: update=disable; 项目级会被忽略)
-# https://opencode.ai/docs/config/
-cat > "$CFG_FILE" <<'JSON'
-{
-  "update": "disable"
-}
-JSON
-chmod 0644 "$CFG_FILE"
-
 # ---------------------------------------------------------------- systemd
 install -d -m 0755 "$(dirname "$UNIT")"
 install -d -m 0755 "$R/etc/systemd/system/multi-user.target.wants"
@@ -198,6 +243,6 @@ fi
 _mode="$(stat -c %a "$ENV_FILE")"
 [ "$_mode" = "600" ] || { echo "ERROR: $ENV_FILE 权限是 $_mode, 应为 600"; exit 1; }
 grep -q '^OPENCODE_PASSWORD=' "$ENV_FILE" || { echo "ERROR: web.env 缺少 OPENCODE_PASSWORD"; exit 1; }
-grep -q '"update": "disable"' "$CFG_FILE" || { echo "ERROR: 未关闭自动更新"; exit 1; }
+grep -q "${svc_home}/.opencode/bin/opencode" "$UNIT" || { echo "ERROR: ExecStart 不是用户家目录里的 opencode"; exit 1; }
 
-echo "opencode ok (pin=${VER} pkg=${PKG}; web ${WEB_URL} 也可 http://<本机IP>:${PORT}/, 监听 0.0.0.0:${PORT}, 用户 ${svc_user}; 首次使用请以该用户执行 opencode auth login 或在网页登录模型提供商)"
+echo "opencode ok (pin=${VER} pkg=${PKG}; ${BIN}; web ${WEB_URL} 也可 http://<本机IP>:${PORT}/, 监听 0.0.0.0:${PORT}, 用户 ${svc_user} 可直接 opencode upgrade; 首次使用请以该用户执行 opencode auth login 或在网页登录模型提供商)"

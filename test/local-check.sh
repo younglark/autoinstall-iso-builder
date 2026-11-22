@@ -1649,7 +1649,8 @@ if [[ -x software/60-opencode.sh ]] \
   && grep -q 'Wants=network-online.target' software/60-opencode.sh \
   && grep -q 'Restart=on-failure' software/60-opencode.sh \
   && grep -q 'EnvironmentFile=' software/60-opencode.sh \
-  && grep -q '"update": "disable"' software/60-opencode.sh \
+  && grep -q '.opencode/bin/opencode' software/60-opencode.sh \
+  && ! grep -q '"update": "disable"' software/60-opencode.sh \
   && grep -q 'opencode-web.secret' software/60-opencode.sh \
   && grep -q '/root/opencode-web-password' software/60-opencode.sh \
   && grep -q 'opencode-web.secret' build-iso.sh \
@@ -1689,13 +1690,15 @@ assert p.stat().st_mode & 0o777 == 0o600' "$oc/t1/etc/opencode/web.env" \
    && grep -q '^User=ubuntu$' "$oc/t1/etc/systemd/system/opencode-web.service" \
    && ! grep -q 'User=root' "$oc/t1/etc/systemd/system/opencode-web.service" \
    && grep -q 'WorkingDirectory=/home/ubuntu' "$oc/t1/etc/systemd/system/opencode-web.service" \
-   && grep -q 'ExecStart=/usr/local/bin/opencode serve --hostname 0.0.0.0 --port 4096' "$oc/t1/etc/systemd/system/opencode-web.service" \
+   && grep -q 'ExecStart=/home/ubuntu/.opencode/bin/opencode serve --hostname 0.0.0.0 --port 4096' "$oc/t1/etc/systemd/system/opencode-web.service" \
    && grep -q '^After=network-online.target$' "$oc/t1/etc/systemd/system/opencode-web.service" \
    && grep -q '^Wants=network-online.target$' "$oc/t1/etc/systemd/system/opencode-web.service" \
    && grep -q '^Restart=on-failure$' "$oc/t1/etc/systemd/system/opencode-web.service" \
    && grep -q '^EnvironmentFile=/etc/opencode/web.env$' "$oc/t1/etc/systemd/system/opencode-web.service" \
    && ! grep -E '^ExecStart=' "$oc/t1/etc/systemd/system/opencode-web.service" | grep -qE -- '--service|pair --remote' \
-   && grep -q '"update": "disable"' "$oc/t1/etc/opencode/opencode.json" \
+   && [[ ! -e "$oc/t1/etc/opencode/opencode.json" ]] \
+   && grep -q 'export PATH="$HOME/.opencode/bin:$PATH"' "$oc/t1/home/ubuntu/.bashrc" \
+   && grep -q '# >>> opencode >>>' "$oc/t1/home/ubuntu/.bashrc" \
    && grep -q 'http://desk-01.local:4096/' "$oc/t1.log" \
    && [[ -L "$oc/t1/etc/systemd/system/multi-user.target.wants/opencode-web.service" ]]; then
   pass "60-opencode hook (server): unit as ubuntu not root, env 0600, secret deleted, URL logged, no plaintext"

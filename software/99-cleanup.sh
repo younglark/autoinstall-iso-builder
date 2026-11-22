@@ -92,6 +92,22 @@ _manifest_ver() {
         echo "(not found)"
       fi
       ;;
+    grok|opencode)
+      _home=""
+      if [ -n "${TARGET_USER:-}" ]; then
+        _home="$(getent passwd "$TARGET_USER" 2>/dev/null | cut -d: -f6 || true)"
+      fi
+      if [ "$1" = "grok" ]; then
+        _bin="${_home:-/root}/.grok/bin/grok"
+      else
+        _bin="${_home}/.opencode/bin/opencode"
+      fi
+      if [ -n "$_bin" ] && [ -x "$_bin" ]; then
+        "$_bin" --version 2>/dev/null | head -1 || echo "(not found)"
+      else
+        echo "(not found)"
+      fi
+      ;;
     *)
       # shellcheck disable=SC2086
       if command -v $1 >/dev/null 2>&1 || [ "$1" = "docker compose" ]; then

@@ -283,7 +283,21 @@ if command -v virt-cat >/dev/null 2>&1; then
   )
   missing=0
   for b in "${EXPECTED_BINS[@]}"; do
+    _found=0
     if echo "$BINS" | grep -qx "$b"; then
+      _found=1
+    elif [[ "$b" == "grok" || "$b" == "opencode" ]]; then
+      # 官方用户态布局: ~/.grok/bin/grok  ~/.opencode/bin/opencode
+      _rel=".grok/bin"
+      [[ "$b" == "opencode" ]] && _rel=".opencode/bin"
+      for _u in $(virt-ls -a "$DISK" /home 2>/dev/null || true); do
+        if virt-ls -a "$DISK" "/home/${_u}/${_rel}" 2>/dev/null | grep -qx "$b"; then
+          _found=1
+          break
+        fi
+      done
+    fi
+    if [[ "$_found" -eq 1 ]]; then
       printf '    %-14s ok\n' "$b"
     else
       printf '    %-14s MISSING\n' "$b"
